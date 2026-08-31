@@ -235,15 +235,11 @@ def run_strategy(gateway_url: str, strategy_name: str, task: dict,
             model = MID_MODEL
         elif strategy_name == "all-premium":
             model = PREMIUM_MODEL
-        else:  # gateway-router
-            model = ULTRA_CHEAP_MODEL  # send cheapest, let gateway upgrade if needed
+        else:  # gateway-router: let smart-router decide
+            model = "auto"
 
         step = f"turn{turn_idx}"
         
-        # For gateway-router, upgrade to mid model for code-writing turns
-        if strategy_name == "gateway-router" and turn_idx >= 3:
-            model = MID_MODEL
-
         result = call_gateway(gateway_url, model, messages, trial, step, task["name"], kw)
         result.turn = turn_idx
 

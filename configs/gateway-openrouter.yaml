@@ -63,9 +63,9 @@ plugins:
     endpoint: "http://localhost:18000/v1"
     model: "qwen3.8-27b"
     api_key: ""
-    max_tokens: 500
+    max_tokens: 100
     temperature: 0
-    timeout_ms: 15000
+    timeout_ms: 10000
     prompt_preview_chars: 500
     include_system_prompt: true
     include_message_count: true

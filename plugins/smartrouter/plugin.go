@@ -286,11 +286,16 @@ func sortByCost(models []ModelEntry) {
 
 // callDecisionModel sends the routing prompt to the decision LLM.
 func (s *SmartRouter) callDecisionModel(prompt string) (*DecisionResponse, error) {
+	// Build request body. chat_template_kwargs.enable_thinking=false
+	// disables Qwen3.8's thinking mode for fast JSON-only output (~500ms vs ~10s).
 	body, _ := json.Marshal(map[string]any{
 		"model":       s.cfg.Model,
 		"messages":    []map[string]string{{"role": "user", "content": prompt}},
 		"max_tokens":  s.cfg.MaxTokens,
 		"temperature": s.cfg.Temperature,
+		"chat_template_kwargs": map[string]bool{
+			"enable_thinking": false,
+		},
 	})
 
 	url := strings.TrimRight(s.cfg.Endpoint, "/") + "/chat/completions"
@@ -444,26 +449,14 @@ func parseRequest(body []byte) *parsedRequest {
 func (s *SmartRouter) buildPrompt(p *parsedRequest) string {
 	var sb strings.Builder
 
-	sb.WriteString("You are a model router for an AI gateway. Select the most cost-effective model for this request. ")
-	sb.WriteString("Consider task complexity, required capabilities, and cost. ")
-	sb.WriteString("Prefer cheaper models unless the task genuinely requires a stronger one.\n\n")
+	sb.WriteString("Select the most cost-effective model for this request. Prefer cheaper unless the task is complex.\n\n")
 
-	sb.WriteString("Available models (sorted by cost):\n")
+	sb.WriteString("Models:\n")
 	sb.WriteString(s.menuJSON)
 	sb.WriteString("\n\n")
 
-	sb.WriteString("Request context:\n")
 	if s.cfg.IncludeMessageCount {
-		sb.WriteString(fmt.Sprintf("- Conversation depth: %d messages\n", p.MessageCount))
-	}
-	sb.WriteString(fmt.Sprintf("- Estimated input tokens: %d\n", p.EstimatedTokens))
-
-	if s.cfg.IncludeSystemPrompt && p.SystemMsg != "" {
-		sys := p.SystemMsg
-		if len(sys) > 200 {
-			sys = sys[:200] + "..."
-		}
-		sb.WriteString(fmt.Sprintf("- System: %q\n", sys))
+		sb.WriteString(fmt.Sprintf("Depth: %d msgs, ~%d tokens.\n", p.MessageCount, p.EstimatedTokens))
 	}
 
 	if p.LatestUserMsg != "" {
@@ -471,11 +464,10 @@ func (s *SmartRouter) buildPrompt(p *parsedRequest) string {
 		if len(msg) > s.cfg.PromptPreviewChars {
 			msg = msg[:s.cfg.PromptPreviewChars] + "..."
 		}
-		sb.WriteString(fmt.Sprintf("- User message: %q\n", msg))
+		sb.WriteString(fmt.Sprintf("Request: %s\n", msg))
 	}
 
-	sb.WriteString("\nRespond with ONLY a JSON object:\n")
-	sb.WriteString(`{"model": "model-id-from-list", "reason": "one sentence"}`)
+	sb.WriteString("\nJSON only: {\"model\":\"id\",\"reason\":\"why\"}")
 
 	return sb.String()
 }
