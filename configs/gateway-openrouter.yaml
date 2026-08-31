@@ -86,4 +86,6 @@ plugins:
 
   audit:
     enabled: true
-    store: log
+    store: both
+    sqlite_path: ./data/audit-openrouter.db
+    log_truncate_body: 1024

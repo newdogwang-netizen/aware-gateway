@@ -38,6 +38,17 @@ import (
 const maxBodySize = 50 << 20 // 50MB
 const maxRetryBufSize = 1 << 20
 
+// TaskContext holds task/step correlation metadata extracted from request headers.
+// Harbor agents pass these via LiteLLM extra_headers — they allow the gateway
+// to group multiple LLM calls into a single task run / step and answer
+// "which model did step N use?"
+type TaskContext struct {
+	SessionID string // X-Session-ID (e.g. "{trial_name}__agent")
+	TrialName string // X-Trial-Name (e.g. "trial-abc123")
+	StepName  string // X-Step-Name (e.g. "fix-bug")
+	TaskName  string // X-Task-Name (e.g. "data-anonymization")
+}
+
 // PoolProvider abstracts pool lookup for hot-reload support.
 type PoolProvider interface {
 	Get(name string) (*pool.Pool, bool)
@@ -103,6 +114,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if traceID == "" {
 		traceID = uuid.NewString()
+	}
+
+	// Extract task/step correlation headers (passed by harbor agents via LiteLLM extra_headers)
+	taskCtx := TaskContext{
+		SessionID: r.Header.Get("X-Session-ID"),
+		TrialName: r.Header.Get("X-Trial-Name"),
+		StepName:  r.Header.Get("X-Step-Name"),
+		TaskName:  r.Header.Get("X-Task-Name"),
 	}
 
 	// --- 2. Authenticators ---
@@ -247,7 +266,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// --- 9. Audit ---
 	h.recordAudit(
-		traceID, start, r, dw, meta, targetPool, originalModel, finalModel, routingReason,
+		traceID, start, r, dw, meta, targetPool, originalModel, finalModel, routingReason, taskCtx,
 	)
 }
 
@@ -411,6 +430,7 @@ func (h *Handler) recordAudit(
 	meta *routing.Meta,
 	poolName string,
 	originalModel, finalModel, routingReason string,
+	taskCtx TaskContext,
 ) {
 	endpoint, retryAttempt, isFallback := routing.GetRoutingMeta(r)
 	if meta != nil && meta.Endpoint != "" {
@@ -484,6 +504,10 @@ func (h *Handler) recordAudit(
 		FinishReason:  finishReason,
 		RoutingReason: routingReason,
 		ErrorKind:     classifyError(dw.code),
+		SessionID:     taskCtx.SessionID,
+		TrialName:     taskCtx.TrialName,
+		StepName:      taskCtx.StepName,
+		TaskName:      taskCtx.TaskName,
 	}
 
 	// Dispatch to audit sinks

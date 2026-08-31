@@ -117,3 +117,39 @@ type HealthReporter interface {
 	Plugin
 	Status() interface{}
 }
+
+// TraceFilter holds query parameters for trace lookup.
+type TraceFilter struct {
+	TrialName string
+	TaskName  string
+	StepName  string
+	Limit     int
+}
+
+// TraceEntry is a single LLM call record returned by /v1/traces.
+type TraceEntry struct {
+	TraceID       string `json:"trace_id"`
+	Timestamp     string `json:"timestamp"`
+	Model         string `json:"model"`
+	RoutedModel   string `json:"routed_model"`
+	Pool          string `json:"pool"`
+	Endpoint      string `json:"endpoint"`
+	StepName      string `json:"step_name,omitempty"`
+	TaskName      string `json:"task_name,omitempty"`
+	TrialName     string `json:"trial_name,omitempty"`
+	PromptTokens  int    `json:"prompt_tokens"`
+	CompTokens    int    `json:"completion_tokens"`
+	TotalTokens   int    `json:"total_tokens"`
+	Cost          float64 `json:"cost"`
+	LatencyMs     int64  `json:"latency_ms"`
+	Status        int    `json:"status"`
+	Streaming     bool   `json:"streaming"`
+	FinishReason  string `json:"finish_reason,omitempty"`
+	RoutingReason string `json:"routing_reason,omitempty"`
+}
+
+// TraceQueryer is an optional interface that AuditSink plugins can implement
+// to support the /v1/traces endpoint.
+type TraceQueryer interface {
+	QueryTraces(filter TraceFilter) ([]TraceEntry, error)
+}

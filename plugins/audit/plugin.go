@@ -101,6 +101,15 @@ func (p *Plugin) Close() error {
 	return nil
 }
 
+// QueryTraces delegates to the SQLite store if available.
+// Implements core.TraceQueryer for the /v1/traces endpoint.
+func (p *Plugin) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, error) {
+	if p.store == nil {
+		return nil, fmt.Errorf("audit sqlite store not configured")
+	}
+	return p.store.QueryTraces(filter)
+}
+
 func (p *Plugin) Record(record *plugin.AuditRecord) error {
 	if !p.cfg.Enabled {
 		return nil
@@ -133,6 +142,12 @@ func (p *Plugin) Record(record *plugin.AuditRecord) error {
 				UserID:       record.UserID,
 				APIKey:       record.APIKey,
 				Cost:         record.Cost,
+				SessionID:    record.SessionID,
+				TrialName:    record.TrialName,
+				StepName:     record.StepName,
+				TaskName:     record.TaskName,
+				FinishReason:  record.FinishReason,
+				RoutingReason: record.RoutingReason,
 			})
 		}
 	}
@@ -174,6 +189,16 @@ type Record struct {
 	UserID       string    `json:"user_id"`
 	APIKey       string    `json:"api_key"`
 	Cost         float64   `json:"cost"`
+
+	// Task/step correlation
+	SessionID string `json:"session_id,omitempty"`
+	TrialName string `json:"trial_name,omitempty"`
+	StepName  string `json:"step_name,omitempty"`
+	TaskName  string `json:"task_name,omitempty"`
+
+	// Extra fields for trace queries
+	FinishReason  string `json:"finish_reason,omitempty"`
+	RoutingReason string `json:"routing_reason,omitempty"`
 }
 
 type Store struct {
@@ -211,12 +236,20 @@ func Open(path string) (*Store, error) {
 		fallback TEXT,
 		user_id TEXT,
 		api_key TEXT,
-		cost REAL DEFAULT 0
+		cost REAL DEFAULT 0,
+		session_id TEXT DEFAULT '',
+		trial_name TEXT DEFAULT '',
+		step_name TEXT DEFAULT '',
+		task_name TEXT DEFAULT '',
+		finish_reason TEXT DEFAULT '',
+		routing_reason TEXT DEFAULT ''
 	);
 	CREATE INDEX IF NOT EXISTS idx_audit_trace ON audit(trace_id);
 	CREATE INDEX IF NOT EXISTS idx_audit_time ON audit(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_audit_pool ON audit(pool);
 	CREATE INDEX IF NOT EXISTS idx_audit_model ON audit(model);
+	CREATE INDEX IF NOT EXISTS idx_audit_trial ON audit(trial_name);
+	CREATE INDEX IF NOT EXISTS idx_audit_task ON audit(task_name);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -268,8 +301,9 @@ func (s *Store) flush(records []Record) {
 	}
 	stmt, err := tx.Prepare(`INSERT INTO audit
 		(trace_id, timestamp, method, path, endpoint, status, latency_ms, model, routed_model, pool,
-		 prompt_tokens, completion_tokens, total_tokens, retry_attempt, fallback, user_id, api_key, cost)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		 prompt_tokens, completion_tokens, total_tokens, retry_attempt, fallback, user_id, api_key, cost,
+		 session_id, trial_name, step_name, task_name, finish_reason, routing_reason)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		slog.Error("audit: prepare failed", "error", err)
 		tx.Rollback()
@@ -283,6 +317,8 @@ func (s *Store) flush(records []Record) {
 			r.Status, r.LatencyMs, r.Model, r.RoutedModel, r.Pool,
 			r.PromptTokens, r.CompTokens, r.TotalTokens, r.RetryAttempt, r.Fallback,
 			r.UserID, r.APIKey, r.Cost,
+			r.SessionID, r.TrialName, r.StepName, r.TaskName,
+			r.FinishReason, r.RoutingReason,
 		)
 		if err != nil {
 			slog.Error("audit: insert failed", "error", err)
@@ -310,4 +346,61 @@ func (s *Store) flushLoop() {
 func (s *Store) Close() error {
 	close(s.stopCh)
 	return s.db.Close()
+}
+
+// QueryTraces retrieves audit records matching the given filter.
+// Implements plugin.TraceQueryer for the /v1/traces endpoint.
+func (s *Store) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("audit store not available")
+	}
+
+	query := `SELECT trace_id, timestamp, model, routed_model, pool, endpoint,
+		step_name, task_name, trial_name,
+		prompt_tokens, completion_tokens, total_tokens, cost,
+		latency_ms, status, finish_reason, routing_reason
+		FROM audit WHERE 1=1`
+	args := []any{}
+
+	if filter.TrialName != "" {
+		query += " AND trial_name = ?"
+		args = append(args, filter.TrialName)
+	}
+	if filter.TaskName != "" {
+		query += " AND task_name = ?"
+		args = append(args, filter.TaskName)
+	}
+	if filter.StepName != "" {
+		query += " AND step_name = ?"
+		args = append(args, filter.StepName)
+	}
+	query += " ORDER BY timestamp ASC"
+	if filter.Limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query traces: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []plugin.TraceEntry
+	for rows.Next() {
+		var e plugin.TraceEntry
+		var finishReason, routingReason sql.NullString
+		err := rows.Scan(
+			&e.TraceID, &e.Timestamp, &e.Model, &e.RoutedModel, &e.Pool, &e.Endpoint,
+			&e.StepName, &e.TaskName, &e.TrialName,
+			&e.PromptTokens, &e.CompTokens, &e.TotalTokens, &e.Cost,
+			&e.LatencyMs, &e.Status, &finishReason, &routingReason,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan trace: %w", err)
+		}
+		e.FinishReason = finishReason.String
+		e.RoutingReason = routingReason.String
+		entries = append(entries, e)
+	}
+	return entries, nil
 }

@@ -25,12 +25,18 @@ func NewReverseProxy(ep *pool.Endpoint) *httputil.ReverseProxy {
 			req.URL.Path = ep.URL.Path + req.URL.Path
 			req.Host = ep.URL.Host
 
-			// Strip internal headers before forwarding to upstream
+			// Strip internal routing headers before forwarding to upstream
 			req.Header.Del("X-Backend-Endpoint")
 			req.Header.Del("X-Retry-Attempt")
 			req.Header.Del("X-Fallback")
 			req.Header.Del("X-Routed-Model")
 			req.Header.Del("X-Routing-Reason")
+			// Strip task correlation headers — these are gateway-internal,
+			// not for upstream consumption (OpenRouter/OpenAI would 400 on unknown headers)
+			req.Header.Del("X-Session-ID")
+			req.Header.Del("X-Trial-Name")
+			req.Header.Del("X-Step-Name")
+			req.Header.Del("X-Task-Name")
 
 			// Inject gateway-managed auth token when configured
 			if ep.AuthToken != "" {

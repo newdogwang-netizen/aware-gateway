@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -104,6 +105,8 @@ func BuildRouter(
 	r.Get("/health", healthHandler(pp, reg))
 	r.Get("/metrics", promhttp.Handler().ServeHTTP)
 	r.Get("/v1/usage", usageHandler(reg))
+	r.Get("/v1/traces", traceQueryHandler(reg))
+	r.Get("/v1/traces/{trial}", traceQueryHandler(reg))
 
 	// Plugin health reporters endpoint
 	r.Get("/v1/plugins", pluginsHandler(reg))
@@ -234,6 +237,68 @@ func usageHandler(reg *plugin.Registry) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"plugins": pluginNames(reg),
+		})
+	}
+}
+
+// TraceQueryer, TraceFilter, and TraceEntry are defined in the plugin package
+// to avoid circular imports. The core server uses them via plugin.Registry.
+
+func traceQueryHandler(reg *plugin.Registry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Find audit sink plugins that implement TraceQueryer
+		var queryer plugin.TraceQueryer
+		for _, sink := range reg.AuditSinks() {
+			if q, ok := sink.(plugin.TraceQueryer); ok {
+				queryer = q
+				break
+			}
+		}
+		if queryer == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "no audit sink supports trace queries (enable audit plugin with sqlite store)",
+			})
+			return
+		}
+
+		// Parse query params
+		filter := plugin.TraceFilter{
+			TrialName: r.URL.Query().Get("trial"),
+			TaskName:  r.URL.Query().Get("task"),
+			StepName:  r.URL.Query().Get("step"),
+		}
+		// Also try chi URL param for /v1/traces/{trial}
+		if filter.TrialName == "" {
+			if rtr := chi.RouteContext(r.Context()); rtr != nil {
+				filter.TrialName = rtr.URLParam("trial")
+			}
+		}
+		if l := r.URL.Query().Get("limit"); l != "" {
+			var n int
+			fmt.Sscanf(l, "%d", &n)
+			if n > 0 {
+				filter.Limit = n
+			}
+		}
+		if filter.Limit == 0 {
+			filter.Limit = 100
+		}
+
+		entries, err := queryer.QueryTraces(filter)
+		if err != nil {
+			slog.Error("trace query failed", "error", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "internal"})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"traces": entries,
+			"count":  len(entries),
 		})
 	}
 }
