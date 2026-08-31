@@ -62,36 +62,41 @@ plugins:
     default_strategy: cheapest
     prefer_healthy: true
     models:
+      # Ultra-cheap tier (no leaderboard, but fastest/cheapest)
       - name: "z-ai/glm-5.3-flash"
         pool: "openrouter"
         capabilities: ["chat", "code", "reasoning"]
-        context_window: 131072
-        input_price: 0.075
+        context_window: 1310720
+        input_price: 0.07
         output_price: 0.25
-      - name: "qwen/qwen3.8-flash"
+      # Budget tier — Terminal-Bench 4.0 leaderboard #8 (17.3% resolution)
+      - name: "openai/gpt-5.6-luna"
+        pool: "openrouter"
+        capabilities: ["chat", "code", "reasoning", "vision"]
+        context_window: 1050000
+        input_price: 0.20
+        output_price: 1.20
+      # Budget tier — new generation, no leaderboard yet
+      - name: "deepseek/deepseek-v4-flash"
         pool: "openrouter"
         capabilities: ["chat", "code", "reasoning"]
-        context_window: 131072
-        input_price: 0.15
-        output_price: 0.47
-      - name: "openai/gpt-4o-mini"
+        context_window: 1048576
+        input_price: 0.09
+        output_price: 0.18
+      # Mid tier — Terminal-Bench 4.0 leaderboard #3 (41.8% resolution)
+      - name: "z-ai/glm-5.3"
+        pool: "openrouter"
+        capabilities: ["chat", "code", "reasoning"]
+        context_window: 1310720
+        input_price: 1.40
+        output_price: 4.40
+      # Premium tier — Terminal-Bench 4.0 leaderboard #4 (37.3% resolution)
+      - name: "openai/gpt-5.6-sol"
         pool: "openrouter"
         capabilities: ["chat", "code", "reasoning", "vision"]
-        context_window: 128000
-        input_price: 0.15
-        output_price: 0.60
-      - name: "openai/gpt-4o"
-        pool: "openrouter"
-        capabilities: ["chat", "code", "reasoning", "vision"]
-        context_window: 128000
-        input_price: 2.50
+        context_window: 1050000
+        input_price: 2.00
         output_price: 10.00
-      - name: "deepseek/deepseek-v3.2"
-        pool: "openrouter"
-        capabilities: ["chat", "code", "reasoning"]
-        context_window: 131072
-        input_price: 0.27
-        output_price: 1.10
     rules:
       - task: reasoning
         strategy: best_quality
@@ -107,27 +112,38 @@ plugins:
     log_truncate_body: 1024
 
 # Pricing for cost calculation (USD per 1M tokens)
+# Sourced from OpenRouter /v1/models API — verified Aug 2026
 pricing:
   enabled: true
   default:
     prompt: 1.0
     completion: 3.0
   models:
+    # Ultra-cheap
     "z-ai/glm-5.3-flash":
-      prompt: 0.075
+      prompt: 0.07
       completion: 0.25
-    "qwen/qwen3.8-flash":
-      prompt: 0.15
-      completion: 0.47
-    "meta-llama/llama-3.1-8b-instruct":
-      prompt: 0.05
-      completion: 0.08
-    "openai/gpt-4o-mini":
-      prompt: 0.15
-      completion: 0.60
-    "openai/gpt-4o":
-      prompt: 2.50
+    "qwen/qwen3.7-flash":
+      prompt: 0.03
+      completion: 0.13
+    # Budget
+    "deepseek/deepseek-v4-flash":
+      prompt: 0.09
+      completion: 0.18
+    "openai/gpt-5.6-luna":
+      prompt: 0.20
+      completion: 1.20
+    # Mid
+    "deepseek/deepseek-v4-pro":
+      prompt: 1.60
+      completion: 3.20
+    "z-ai/glm-5.3":
+      prompt: 1.40
+      completion: 4.40
+    # Premium
+    "openai/gpt-5.6-sol":
+      prompt: 2.00
       completion: 10.00
-    "deepseek/deepseek-v3.2":
-      prompt: 0.27
-      completion: 1.10
+    "anthropic/claude-opus-5":
+      prompt: 5.00
+      completion: 25.00

@@ -31,12 +31,17 @@ import urllib.error
 from dataclasses import dataclass, field
 from typing import Optional
 
-# ─── Model Tiers ─────────────────────────────────────────────
+# ─── Model Tiers (based on Terminal-Bench 4.0 leaderboard) ────
+# Removed outdated: GPT-4o, GPT-4o-mini (not on TB 4.0 leaderboard)
+# Added: GPT-5.6 Luna (#8), GLM-5.3 (#3), DeepSeek V4 Flash (new gen)
 
-EXPENSIVE_MODEL = "openai/gpt-4o"
-CHEAP_MODEL = "z-ai/glm-5.3-flash"
-# For gateway-router strategy, we let the gateway decide.
-# We send the cheap model and let task-router override if needed.
+ULTRA_CHEAP_MODEL = "z-ai/glm-5.3-flash"       # $0.07/$0.25 per M — no leaderboard
+BUDGET_MODEL      = "openai/gpt-5.6-luna"       # $0.20/$1.20 per M — TB 4.0 #8, 17.3%
+MID_MODEL         = "z-ai/glm-5.3"              # $1.40/$4.40 per M — TB 4.0 #3, 41.8%
+PREMIUM_MODEL     = "openai/gpt-5.6-sol"        # $2.00/$10.00 per M — TB 4.0 #4, 37.3%
+
+# For gateway-router strategy, we send ultra-cheap and let task-router
+# decide whether to upgrade based on task classification.
 
 # ─── Tasks ───────────────────────────────────────────────────
 
@@ -222,19 +227,22 @@ def run_strategy(gateway_url: str, strategy_name: str, task: dict,
         messages.append({"role": "user", "content": user_content})
 
         # Choose model based on strategy
-        if strategy_name == "all-expensive":
-            model = EXPENSIVE_MODEL
-        elif strategy_name == "all-cheap":
-            model = CHEAP_MODEL
+        if strategy_name == "all-ultra-cheap":
+            model = ULTRA_CHEAP_MODEL
+        elif strategy_name == "all-budget":
+            model = BUDGET_MODEL
+        elif strategy_name == "all-mid":
+            model = MID_MODEL
+        elif strategy_name == "all-premium":
+            model = PREMIUM_MODEL
         else:  # gateway-router
-            model = CHEAP_MODEL  # send cheap, let gateway upgrade if needed
+            model = ULTRA_CHEAP_MODEL  # send cheapest, let gateway upgrade if needed
 
         step = f"turn{turn_idx}"
         
-        # For gateway-router, we also try sending expensive for turns 3+ (code writing)
-        # to simulate a "smart" router that upgrades for complex turns
+        # For gateway-router, upgrade to mid model for code-writing turns
         if strategy_name == "gateway-router" and turn_idx >= 3:
-            model = EXPENSIVE_MODEL
+            model = MID_MODEL
 
         result = call_gateway(gateway_url, model, messages, trial, step, task["name"], kw)
         result.turn = turn_idx
@@ -295,12 +303,13 @@ def main():
         names = args.tasks.split(",")
         tasks = [t for t in TASKS if t["name"] in names]
 
-    strategies = ["all-cheap", "all-expensive", "gateway-router"]
+    strategies = ["all-ultra-cheap", "all-budget", "all-mid", "gateway-router"]
     
     sep = "=" * 90
     print(sep)
     print("  aware-gateway Multi-Turn Cost Benchmark")
-    print("  5 turns per task × 3 strategies × 5 tasks = 75 LLM calls")
+    print("  5 turns × 4 strategies × 5 tasks = 100 LLM calls")
+    print("  Models: GLM-5.3-flash | GPT-5.6 Luna (TB#8) | GLM-5.3 (TB#3) | gateway-router")
     print(sep)
     print()
 
@@ -338,13 +347,12 @@ def main():
     print(header)
     print(f"  {'─'*25} {'─'*18} {'─'*10} {'─'*8} {'─'*8} {'─'*10}")
 
-    grand_savings = 0.0
-    grand_expensive = 0.0
+    grand_premium = 0.0
     grand_router = 0.0
 
     for task_name, strats in all_results.items():
-        expensive_cost = strats.get("all-expensive", StrategyResult("", "")).total_cost
-        cheap_cost = strats.get("all-cheap", StrategyResult("", "")).total_cost
+        premium_cost = strats.get("all-premium", StrategyResult("", "")).total_cost
+        cheap_cost = strats.get("all-ultra-cheap", StrategyResult("", "")).total_cost
         router_cost = strats.get("gateway-router", StrategyResult("", "")).total_cost
 
         for strat_name in strategies:
@@ -352,11 +360,11 @@ def main():
             if r.total_cost == 0 and r.success_count == 0:
                 continue
             
-            if strat_name == "all-expensive":
+            if strat_name == "all-premium":
                 save_str = "(baseline)"
             else:
-                save = expensive_cost - r.total_cost
-                save_pct = (save / expensive_cost * 100) if expensive_cost > 0 else 0
+                save = premium_cost - r.total_cost
+                save_pct = (save / premium_cost * 100) if premium_cost > 0 else 0
                 save_str = f"${save:.6f} ({save_pct:.0f}%)"
             
             print(f"  {task_name: <25} {strat_name: <18} ${r.total_cost:>9.6f} "
@@ -364,17 +372,17 @@ def main():
         
         print(f"  {'─'*25} {'─'*18} {'─'*10} {'─'*8} {'─'*8} {'─'*10}")
 
-        grand_expensive += expensive_cost
+        grand_premium += premium_cost
         grand_router += router_cost
 
     print()
     print(f"  GRAND TOTAL:")
-    print(f"    all-expensive:   ${grand_expensive:.6f}")
-    print(f"    gateway-router:  ${grand_router:.6f}")
-    if grand_expensive > 0:
-        total_save = grand_expensive - grand_router
-        total_pct = (total_save / grand_expensive * 100)
-        print(f"    savings:         ${total_save:.6f} ({total_pct:.0f}%)")
+    print(f"    all-premium:    ${grand_premium:.6f}")
+    print(f"    gateway-router: ${grand_router:.6f}")
+    if grand_premium > 0:
+        total_save = grand_premium - grand_router
+        total_pct = (total_save / grand_premium * 100)
+        print(f"    savings:        ${total_save:.6f} ({total_pct:.0f}%)")
     print()
     print(f"  Query per-trial details:")
     print(f"    curl {args.gateway}/v1/traces?limit=100 | python3 -m json.tool")

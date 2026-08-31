@@ -122,7 +122,68 @@
     <span class="tag">cost-optimization</span>
     <span class="tag">openrouter</span>
     <span class="tag">GLM-5.3-flash</span>
-    <span class="tag">GPT-4o</span>
+    <span class="tag">GPT-5.6-luna</span>
+    <span class="tag">GLM-5.3</span>
+</div>
+
+<h2>Background: Terminal-Bench 4.0 Leaderboard</h2>
+<p>
+    <a href="https://www.tbench.ai/" style="color:var(--accent)">Terminal-Bench 4.0</a>
+    is a benchmark by Stanford / Harbor / Laude Institute that measures AI agents' ability
+    to complete real-world software tasks in a terminal environment. 66 tasks across 7 categories
+    (Software, Science, ML, Operations, Security, Hardware, Media), each graded pass/fail by
+    an automated verifier. An agent runs inside a Docker container, interacts with the terminal,
+    writes code, and must pass all tests to count as solved.
+</p>
+<p>
+    <strong>Resolution Rate</strong> = fraction of 66 tasks the agent fully solved (all verifier tests pass).
+    No partial credit — a task is either solved (1) or not (0).
+</p>
+
+<table>
+    <tr><th>#</th><th>Model</th><th>Agent</th><th>Effort</th><th>Resolution</th><th>Tokens</th><th>Cost</th></tr>
+    <tr><td>1</td><td>Opus 5</td><td>Claude Code</td><td>max</td><td class="num">51.8%</td><td class="num">6.5B</td><td class="num expensive">$6,000</td></tr>
+    <tr><td>2</td><td>Fable 5</td><td>Claude Code</td><td>max</td><td class="num">44.5%</td><td class="num">3.8B</td><td class="num expensive">$7,300</td></tr>
+    <tr><td>3</td><td><strong>GLM-5.3</strong></td><td>Claude Code</td><td>max</td><td class="num">41.8%</td><td class="num">8.7B</td><td class="num">$2,700</td></tr>
+    <tr><td>4</td><td>GPT-5.6 Sol</td><td>Codex</td><td>max</td><td class="num">37.3%</td><td class="num">4.4B</td><td class="num">$2,500</td></tr>
+    <tr><td>5</td><td>Opus 4.8</td><td>Claude Code</td><td>max</td><td class="num">23.6%</td><td class="num">6.4B</td><td class="num">$6,500</td></tr>
+    <tr><td>6</td><td>GPT-5.6 Terra</td><td>Codex</td><td>max</td><td class="num">21.5%</td><td class="num">5.7B</td><td class="num">$1,700</td></tr>
+    <tr><td>7</td><td>Grok 4.6</td><td>Grok Build</td><td>high</td><td class="num">20.3%</td><td class="num">4.0B</td><td class="num">$3,600</td></tr>
+    <tr><td>8</td><td><strong>GPT-5.6 Luna</strong></td><td>Codex</td><td>max</td><td class="num">17.3%</td><td class="num">11.6B</td><td class="num cheap">$347</td></tr>
+    <tr><td>9</td><td>Grok 4.5</td><td>Grok Build</td><td>high</td><td class="num">12.4%</td><td class="num">3.4B</td><td class="num">$2,100</td></tr>
+    <tr><td>9</td><td>Sonnet 5</td><td>Claude Code</td><td>max</td><td class="num">12.4%</td><td class="num">21.6B</td><td class="num expensive">$9,600</td></tr>
+</table>
+
+<div class="highlight">
+    <p><strong>Key observations from the leaderboard:</strong></p>
+    <ol>
+        <li><strong>Cost ≠ quality.</strong> Sonnet 5 spent $9,600 (most expensive) but only achieved 12.4% — worse than Grok 4.6 at $3,600/20.3%.</li>
+        <li><strong>GLM-5.3 is the best value.</strong> #3 at 41.8% for $2,700 — Opus 5 (#1) costs 2.2x more for only +10pp. It's the highest-ranked non-Anthropic model on the leaderboard.</li>
+        <li><strong>GPT-5.6 Luna is the budget champion.</strong> 17.3% for just $347 — 7x cheaper than GPT-5.6 Terra (#6) at similar quality.</li>
+        <li><strong>All entries use max/high effort.</strong> No budget or flash model variants appear — this is the gap aware-gateway targets.</li>
+    </ol>
+</div>
+
+<h3>Model Pricing on OpenRouter</h3>
+<p>Prices verified via OpenRouter <code>/v1/models</code> API, August 2026:</p>
+
+<table>
+    <tr><th>Tier</th><th>Model</th><th>$/M prompt</th><th>$/M comp</th><th>Leaderboard</th><th>Notes</th></tr>
+    <tr><td class="cheap">ultra-cheap</td><td>GLM-5.3 Flash</td><td class="num">$0.07</td><td class="num">$0.25</td><td>—</td><td>Flash variant, not benchmarked</td></tr>
+    <tr><td class="cheap">ultra-cheap</td><td>Qwen 3.7 Flash</td><td class="num">$0.03</td><td class="num">$0.13</td><td>—</td><td>Cheapest on OpenRouter</td></tr>
+    <tr><td class="router">budget</td><td>DeepSeek V4 Flash</td><td class="num">$0.09</td><td class="num">$0.18</td><td>—</td><td>New generation, not yet benchmarked</td></tr>
+    <tr><td class="router">budget</td><td>GPT-5.6 Luna</td><td class="num">$0.20</td><td class="num">$1.20</td><td>#8 (17.3%)</td><td>Best value on leaderboard</td></tr>
+    <tr><td>mid</td><td>DeepSeek V4 Pro</td><td class="num">$1.60</td><td class="num">$3.20</td><td>—</td><td>New generation, not yet benchmarked</td></tr>
+    <tr><td>mid</td><td>GLM-5.3</td><td class="num">$1.40</td><td class="num">$4.40</td><td>#3 (41.8%)</td><td>Highest-ranked non-Anthropic</td></tr>
+    <tr><td class="expensive">premium</td><td>GPT-5.6 Sol</td><td class="num">$2.00</td><td class="num">$10.00</td><td>#4 (37.3%)</td><td>Strong but expensive</td></tr>
+    <tr><td class="expensive">premium</td><td>Opus 5</td><td class="num">$5.00</td><td class="num">$25.00</td><td>#1 (51.8%)</td><td>Strongest model, highest cost</td></tr>
+</table>
+
+<div class="highlight">
+    <p><strong>Removed as outdated:</strong> GPT-4o ($2.50/$10.00) and GPT-4o-mini ($0.15/$0.60) —
+    neither appears on the Terminal-Bench 4.0 leaderboard, both superseded by GPT-5.6 Luna
+    (cheaper and higher resolution). The previous version of this benchmark used GPT-4o as
+    the "expensive" baseline — that has been corrected.</p>
 </div>
 
 <h2>Goal</h2>
