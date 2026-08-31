@@ -114,7 +114,7 @@
 </div>
 
 <h1>Cost Benchmark: Multi-Turn Agent Simulation on Terminal-Bench</h1>
-<p class="muted">August 31, 2026 · 75 LLM calls · 5 tasks × 3 strategies × 5 turns</p>
+<p class="muted">August 31, 2026 · Multi-turn agent simulation · 5 tasks × 4 strategies × 5 turns</p>
 
 <div style="margin: 16px 0;">
     <span class="tag">aware-gateway</span>
@@ -184,6 +184,81 @@
     neither appears on the Terminal-Bench 4.0 leaderboard, both superseded by GPT-5.6 Luna
     (cheaper and higher resolution). The previous version of this benchmark used GPT-4o as
     the "expensive" baseline — that has been corrected.</p>
+</div>
+
+<h3>Per-Task Detail: Opus 5 (Leaderboard #1)</h3>
+<p>
+    Clicking any row on <a href="https://www.tbench.ai/" style="color:var(--accent)">tbench.ai</a>
+    opens the Harbor Hub job page, which shows per-task trial results.
+    Opus 5 ran 330 trials (66 tasks × 5 runs each). Here are the first 54 tasks extracted:
+</p>
+
+<table>
+    <tr><th>Task</th><th>Runs</th><th>Pass</th><th>Fail</th><th>Pass%</th><th>Avg Cost</th></tr>
+    <tr><td>atrx-vep-crispr</td><td class="num">1</td><td class="num">0</td><td class="num">1</td><td class="num expensive">0%</td><td class="num">$186</td></tr>
+    <tr><td>batched-eval-parity</td><td class="num">1</td><td class="num">0</td><td class="num">1</td><td class="num expensive">0%</td><td class="num">$1,607</td></tr>
+    <tr><td>biped-contact-dynamics</td><td class="num">1</td><td class="num">0</td><td class="num">1</td><td class="num expensive">0%</td><td class="num">$3,932</td></tr>
+    <tr><td>bun-sourcemap-leak</td><td class="num">3</td><td class="num">0</td><td class="num">3</td><td class="num expensive">0%</td><td class="num">$920</td></tr>
+    <tr><td>cad-model</td><td class="num">4</td><td class="num">4</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$520</td></tr>
+    <tr><td>cargo-flight-dispatch</td><td class="num">2</td><td class="num">0</td><td class="num">2</td><td class="num expensive">0%</td><td class="num">$400</td></tr>
+    <tr><td>coq-block-bound</td><td class="num">2</td><td class="num">2</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$400</td></tr>
+    <tr><td>ctr-optimization</td><td class="num">1</td><td class="num">0</td><td class="num">1</td><td class="num expensive">0%</td><td class="num">$2,022</td></tr>
+    <tr><td>cumulative-layout-shift</td><td class="num">2</td><td class="num">2</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$5,785</td></tr>
+    <tr><td>distributed-dedup</td><td class="num">1</td><td class="num">1</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$3,502</td></tr>
+    <tr><td>embedding-drift-monitor</td><td class="num">2</td><td class="num">2</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$599</td></tr>
+    <tr><td>fin-saccr-rwa</td><td class="num">4</td><td class="num">3</td><td class="num">1</td><td class="num">75%</td><td class="num">$264</td></tr>
+    <tr><td>formal-crypto</td><td class="num">1</td><td class="num">1</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$1,671</td></tr>
+    <tr><td>fp8-rmsnorm-gemm</td><td class="num">2</td><td class="num">2</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$5,140</td></tr>
+    <tr><td>freecad-impeller</td><td class="num">2</td><td class="num">0</td><td class="num">2</td><td class="num expensive">0%</td><td class="num">$470</td></tr>
+    <tr><td>freecad-platform-drawing</td><td class="num">2</td><td class="num">2</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$474</td></tr>
+    <tr><td>freight-dispatch-shift</td><td class="num">1</td><td class="num">0</td><td class="num">1</td><td class="num expensive">0%</td><td class="num">$2,835</td></tr>
+    <tr><td>glycan-ms2-elucidation</td><td class="num">3</td><td class="num">0</td><td class="num">3</td><td class="num expensive">0%</td><td class="num">$130</td></tr>
+    <tr><td>gsea-proteomics</td><td class="num">2</td><td class="num">2</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$247</td></tr>
+    <tr><td>heat-pump-warranty</td><td class="num">3</td><td class="num">1</td><td class="num">2</td><td class="num">33%</td><td class="num">$375</td></tr>
+    <tr><td>html-js-filter</td><td class="num">2</td><td class="num">2</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$2,345</td></tr>
+    <tr><td>interleaved-vigenere</td><td class="num">2</td><td class="num">2</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$1,819</td></tr>
+    <tr><td>intrastat-meldung</td><td class="num">2</td><td class="num">1</td><td class="num">1</td><td class="num">50%</td><td class="num">$754</td></tr>
+    <tr><td>jax-speedrun-gpu</td><td class="num">2</td><td class="num">1</td><td class="num">1</td><td class="num">50%</td><td class="num">$4,186</td></tr>
+    <tr><td>ks-solver-cpp</td><td class="num">1</td><td class="num">1</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$2,025</td></tr>
+    <tr><td>kv-live-surgery</td><td class="num">3</td><td class="num">3</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$1,520</td></tr>
+    <tr><td>layout-config-recreation</td><td class="num">2</td><td class="num">0</td><td class="num">2</td><td class="num expensive">0%</td><td class="num">$8,979</td></tr>
+    <tr><td>live-database-cutover</td><td class="num">1</td><td class="num">1</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$3,561</td></tr>
+    <tr><td>math-eval-grader</td><td class="num">3</td><td class="num">2</td><td class="num">1</td><td class="num">67%</td><td class="num">$679</td></tr>
+    <tr><td>mp-checkpoint-consolidation</td><td class="num">2</td><td class="num">2</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$585</td></tr>
+    <tr><td>nextjs-performance</td><td class="num">1</td><td class="num">0</td><td class="num">1</td><td class="num expensive">0%</td><td class="num">$1,095</td></tr>
+    <tr><td>ontology-kg-querying</td><td class="num">2</td><td class="num">0</td><td class="num">2</td><td class="num expensive">0%</td><td class="num">$1,332</td></tr>
+    <tr><td>payments-pipeline-fix</td><td class="num">2</td><td class="num">2</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$5,195</td></tr>
+    <tr><td>photonic-waveguide-routing</td><td class="num">1</td><td class="num">0</td><td class="num">1</td><td class="num expensive">0%</td><td class="num">$2</td></tr>
+    <tr><td>pretrain-shard-corruption</td><td class="num">1</td><td class="num">1</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$1,360</td></tr>
+    <tr><td>production-planning</td><td class="num">1</td><td class="num">1</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$228</td></tr>
+    <tr><td>protein-autointerp-disulfide</td><td class="num">2</td><td class="num">0</td><td class="num">2</td><td class="num expensive">0%</td><td class="num">$18</td></tr>
+    <tr><td>react-lead-form</td><td class="num">1</td><td class="num">0</td><td class="num">1</td><td class="num expensive">0%</td><td class="num">$722</td></tr>
+    <tr><td>retro-console-soc</td><td class="num">2</td><td class="num">2</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$5,224</td></tr>
+    <tr><td>risk-scorer-replay</td><td class="num">1</td><td class="num">1</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$1,124</td></tr>
+    <tr><td>roy-polymorph-cn</td><td class="num">2</td><td class="num">1</td><td class="num">1</td><td class="num">50%</td><td class="num">$82</td></tr>
+    <tr><td>rs-archive-clone</td><td class="num">3</td><td class="num">2</td><td class="num">1</td><td class="num">67%</td><td class="num">$7,118</td></tr>
+    <tr><td>satb-audio-transcription</td><td class="num">1</td><td class="num">1</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$735</td></tr>
+    <tr><td>session-window-debug</td><td class="num">2</td><td class="num">0</td><td class="num">2</td><td class="num expensive">0%</td><td class="num">$222</td></tr>
+    <tr><td>sglang-qwen-burst</td><td class="num">1</td><td class="num">0</td><td class="num">1</td><td class="num expensive">0%</td><td class="num">$8,065</td></tr>
+    <tr><td>shadow-relay</td><td class="num">3</td><td class="num">3</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$112</td></tr>
+    <tr><td>sound-change-cascade</td><td class="num">2</td><td class="num">2</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$859</td></tr>
+    <tr><td>takens-embedding-lean</td><td class="num">1</td><td class="num">0</td><td class="num">1</td><td class="num expensive">0%</td><td class="num">$265</td></tr>
+    <tr><td>telecom-entity-resolution</td><td class="num">2</td><td class="num">2</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$3,669</td></tr>
+    <tr><td>uefi-bootkit</td><td class="num">1</td><td class="num">1</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$1,803</td></tr>
+    <tr><td>vf2-speedup-networkx</td><td class="num">2</td><td class="num">1</td><td class="num">1</td><td class="num">50%</td><td class="num">$4,032</td></tr>
+    <tr><td>vpp-loss-divergence</td><td class="num">1</td><td class="num">1</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$780</td></tr>
+    <tr><td>wal-recovery-ordering</td><td class="num">2</td><td class="num">0</td><td class="num">2</td><td class="num expensive">0%</td><td class="num">$189</td></tr>
+    <tr><td>wdm-design</td><td class="num">3</td><td class="num">3</td><td class="num">0</td><td class="num cheap">100%</td><td class="num">$2,298</td></tr>
+</table>
+
+<div class="highlight">
+    <p><strong>Key insight from per-task data:</strong></p>
+    <ol>
+        <li><strong>Same task, different outcomes.</strong> <code>vf2-speedup-networkx</code> passed 1/2 runs — the same model on the same task sometimes succeeds, sometimes fails. This is agent loop variance, not model capability ceiling.</li>
+        <li><strong>Cost varies wildly per task.</strong> <code>photonic-waveguide-routing</code> cost only $2 (agent gave up in 55 min), while <code>sglang-qwen-burst</code> cost $8,065 (agent ran 1h 41m burning tokens). Both failed.</li>
+        <li><strong>Failed tasks still burn money.</strong> 14 tasks had 0% pass rate but Opus 5 spent real money trying — $24,898 total across just these failed attempts. A router that recognizes "this isn't working" earlier could cut losses.</li>
+        <li><strong>Cannot pre-judge model capability.</strong> Different models have different strengths. A task that Opus 5 fails might be solvable by GLM-5.3 or GPT-5.6 Luna — we just don't have that cross-model per-task data yet.</li>
+    </ol>
 </div>
 
 <h2>Goal</h2>
