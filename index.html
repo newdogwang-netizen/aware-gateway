@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>aware-gateway</title>
+    <style>
+        :root {
+            --bg: #0d1117; --card: #161b22; --border: #30363d;
+            --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --green: #3fb950;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: var(--bg); color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            line-height: 1.6; max-width: 800px; margin: 0 auto; padding: 40px 20px;
+        }
+        h1 { font-size: 2em; margin-bottom: 8px; }
+        h2 { color: var(--accent); margin: 24px 0 8px; }
+        p { margin-bottom: 12px; }
+        .muted { color: var(--muted); }
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .card {
+            background: var(--card); border: 1px solid var(--border);
+            border-radius: 8px; padding: 16px; margin: 12px 0;
+        }
+        .tag {
+            display: inline-block; background: var(--card); border: 1px solid var(--border);
+            border-radius: 12px; padding: 2px 10px; font-size: 0.8em;
+            color: var(--muted); margin: 0 4px 4px 0;
+        }
+        .post-list { list-style: none; }
+        .post-list li {
+            padding: 12px 0; border-bottom: 1px solid var(--border);
+        }
+        .post-list a { font-size: 1.1em; font-weight: 600; }
+        .footer { margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.85em; }
+    </style>
+</head>
+<body>
+    <h1>aware-gateway</h1>
+    <p class="muted">Smart plugin-based AI model gateway with task-aware routing, multi-model endpoint auto-discovery, and GenAI OpenTelemetry observability.</p>
+
+    <div style="margin: 12px 0;">
+        <span class="tag">Go</span>
+        <span class="tag">OpenTelemetry</span>
+        <span class="tag">OpenRouter</span>
+        <span class="tag">Terminal-Bench</span>
+    </div>
+
+    <h2>Blog</h2>
+    <ul class="post-list">
+        <li>
+            <a href="docs/benchmark-cost.html">Cost Benchmark: Multi-Turn Agent Simulation on Terminal-Bench</a>
+            <p class="muted">Aug 31, 2026 — 75 LLM calls across 5 tasks × 3 strategies. Key finding: GLM-5.3-flash matches or beats GPT-4o on quality while costing 96% less.</p>
+        </li>
+    </ul>
+
+    <div class="card">
+        <h2>Quick Start</h2>
+        <pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;overflow-x:auto;font-size:0.85em;">
+git clone https://github.com/newdogwang-netizen/aware-gateway
+cd aware-gateway
+export GW_OPENROUTER_KEY=sk-or-...
+make start   # Docker on :12026
+
+# Or run locally
+make dev     # build + start on :12026</pre>
+    </div>
+
+    <div class="footer">
+        <p><a href="https://github.com/newdogwang-netizen/aware-gateway">GitHub ↗</a> · <a href="https://github.com/newdogwang-netizen/aware-gateway/blob/main/README.md">Docs</a></p>
+    </div>
+</body>
+</html>
