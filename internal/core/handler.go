@@ -230,6 +230,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Update Content-Length to match the (possibly rewritten) body.
+	// If Content-Length doesn't match body size, upstream CDNs like
+	// Cloudflare return 400 Bad Request.
+	if bodyBytes != nil {
+		r.ContentLength = int64(len(bodyBytes))
+		r.Header.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
+	}
+
 	// --- 7. Determine target pool ---
 	targetPool := routedPool
 	if targetPool == "" {
