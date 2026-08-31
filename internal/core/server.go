@@ -107,6 +107,7 @@ func BuildRouter(
 	r.Get("/v1/usage", usageHandler(reg))
 	r.Get("/v1/traces", traceQueryHandler(reg))
 	r.Get("/v1/traces/{trial}", traceQueryHandler(reg))
+	r.Get("/v1/traces/{trial}/summary", traceSummaryHandler(reg))
 
 	// Plugin health reporters endpoint
 	r.Get("/v1/plugins", pluginsHandler(reg))
@@ -299,6 +300,129 @@ func traceQueryHandler(reg *plugin.Registry) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"traces": entries,
 			"count":  len(entries),
+		})
+	}
+}
+
+// traceSummaryHandler returns aggregated cost/token stats for a trial.
+// GET /v1/traces/{trial}/summary
+func traceSummaryHandler(reg *plugin.Registry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var queryer plugin.TraceQueryer
+		for _, sink := range reg.AuditSinks() {
+			if q, ok := sink.(plugin.TraceQueryer); ok {
+				queryer = q
+				break
+			}
+		}
+		if queryer == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "no audit sink supports trace queries",
+			})
+			return
+		}
+
+		trialName := ""
+		if rtr := chi.RouteContext(r.Context()); rtr != nil {
+			trialName = rtr.URLParam("trial")
+		}
+		if trialName == "" {
+			trialName = r.URL.Query().Get("trial")
+		}
+
+		// Get all traces for this trial (up to 1000)
+		entries, err := queryer.QueryTraces(plugin.TraceFilter{
+			TrialName: trialName,
+			Limit:     1000,
+		})
+		if err != nil {
+			slog.Error("trace summary query failed", "error", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "internal"})
+			return
+		}
+
+		// Aggregate
+		totalPrompt := 0
+		totalCompletion := 0
+		totalTokens := 0
+		totalCost := 0.0
+		successCount := 0
+		failCount := 0
+		stepBreakdown := map[string]interface{}{}
+		modelBreakdown := map[string]interface{}{}
+
+		for _, e := range entries {
+			totalPrompt += e.PromptTokens
+			totalCompletion += e.CompTokens
+			totalTokens += e.TotalTokens
+			totalCost += e.Cost
+			if e.Status == 200 {
+				successCount++
+			} else {
+				failCount++
+			}
+
+			// Per-step aggregation
+			stepKey := e.StepName
+			if stepKey == "" {
+				stepKey = "(no-step)"
+			}
+			if existing, ok := stepBreakdown[stepKey].(map[string]interface{}); ok {
+				existing["prompt_tokens"] = existing["prompt_tokens"].(int) + e.PromptTokens
+				existing["completion_tokens"] = existing["completion_tokens"].(int) + e.CompTokens
+				existing["total_tokens"] = existing["total_tokens"].(int) + e.TotalTokens
+				existing["cost"] = existing["cost"].(float64) + e.Cost
+				existing["calls"] = existing["calls"].(int) + 1
+			} else {
+				stepBreakdown[stepKey] = map[string]interface{}{
+					"prompt_tokens":     e.PromptTokens,
+					"completion_tokens": e.CompTokens,
+					"total_tokens":      e.TotalTokens,
+					"cost":              e.Cost,
+					"calls":             1,
+					"model":             e.RoutedModel,
+					"routing_reason":    e.RoutingReason,
+				}
+			}
+
+			// Per-model aggregation
+			modelKey := e.RoutedModel
+			if modelKey == "" {
+				modelKey = "(unknown)"
+			}
+			if existing, ok := modelBreakdown[modelKey].(map[string]interface{}); ok {
+				existing["prompt_tokens"] = existing["prompt_tokens"].(int) + e.PromptTokens
+				existing["completion_tokens"] = existing["completion_tokens"].(int) + e.CompTokens
+				existing["total_tokens"] = existing["total_tokens"].(int) + e.TotalTokens
+				existing["cost"] = existing["cost"].(float64) + e.Cost
+				existing["calls"] = existing["calls"].(int) + 1
+			} else {
+				modelBreakdown[modelKey] = map[string]interface{}{
+					"prompt_tokens":     e.PromptTokens,
+					"completion_tokens": e.CompTokens,
+					"total_tokens":      e.TotalTokens,
+					"cost":              e.Cost,
+					"calls":             1,
+				}
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"trial":              trialName,
+			"total_calls":        len(entries),
+			"successful_calls":   successCount,
+			"failed_calls":       failCount,
+			"total_prompt_tokens":     totalPrompt,
+			"total_completion_tokens": totalCompletion,
+			"total_tokens":            totalTokens,
+			"total_cost_usd":          totalCost,
+			"per_step":                stepBreakdown,
+			"per_model":               modelBreakdown,
 		})
 	}
 }

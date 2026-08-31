@@ -17,10 +17,25 @@ type Config struct {
 	CircuitBreaker CircuitBreakerConfig  `yaml:"circuit_breaker"`
 	Audit          AuditConfig           `yaml:"audit"`
 	Tracing        TracingConfig         `yaml:"tracing"`
+	Pricing        PricingConfig         `yaml:"pricing"`
 	Pools          map[string]PoolConfig `yaml:"pools"`
 	Routes         []RouteConfig         `yaml:"routes"`
 	ModelMap       map[string]string     `yaml:"model_map"`
-	Plugins        map[string]any        `yaml:"plugins"` // plugin-specific config blocks
+	Plugins        map[string]any        `yaml:"plugins"`
+}
+
+// PricingConfig holds per-model token pricing for cost calculation.
+// Prices are in USD per 1 million (1M) tokens.
+type PricingConfig struct {
+	Enabled bool                  `yaml:"enabled"`
+	Models  map[string]ModelPrice `yaml:"models"`
+	Default *ModelPrice           `yaml:"default"`
+}
+
+// ModelPrice is the per-token price in USD per 1M tokens.
+type ModelPrice struct {
+	Prompt     float64 `yaml:"prompt"`     // $/M prompt tokens
+	Completion float64 `yaml:"completion"` // $/M completion tokens
 }
 
 type ServerConfig struct {

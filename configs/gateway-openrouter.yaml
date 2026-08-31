@@ -89,3 +89,29 @@ plugins:
     store: both
     sqlite_path: ./data/audit-openrouter.db
     log_truncate_body: 1024
+
+# Pricing for cost calculation (USD per 1M tokens)
+pricing:
+  enabled: true
+  default:
+    prompt: 1.0
+    completion: 3.0
+  models:
+    "z-ai/glm-5.3-flash":
+      prompt: 0.075
+      completion: 0.25
+    "qwen/qwen3.8-flash":
+      prompt: 0.15
+      completion: 0.47
+    "meta-llama/llama-3.1-8b-instruct":
+      prompt: 0.05
+      completion: 0.08
+    "openai/gpt-4o-mini":
+      prompt: 0.15
+      completion: 0.60
+    "openai/gpt-4o":
+      prompt: 2.50
+      completion: 10.00
+    "deepseek/deepseek-v3.2":
+      prompt: 0.27
+      completion: 1.10

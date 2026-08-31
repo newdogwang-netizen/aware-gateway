@@ -27,6 +27,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/aware/gateway/internal/billing"
 	"github.com/aware/gateway/internal/config"
 	"github.com/aware/gateway/internal/metrics"
 	"github.com/aware/gateway/internal/plugin"
@@ -74,12 +75,13 @@ func (m MapPoolProvider) All() map[string]*pool.Pool {
 // Handler is the core request processor. It is created once and used
 // as the HTTP handler for all proxied routes.
 type Handler struct {
-	cfg       *config.Config
-	pp        PoolProvider
-	registry  *plugin.Registry
-	logger    *slog.Logger
-	retryable map[int]bool
+	cfg        *config.Config
+	pp         PoolProvider
+	registry   *plugin.Registry
+	logger     *slog.Logger
+	retryable  map[int]bool
 	maxRetries int
+	pricing    *billing.PricingTable
 }
 
 // NewHandler creates the core handler.
@@ -99,6 +101,7 @@ func NewHandler(cfg *config.Config, pp PoolProvider, reg *plugin.Registry, logge
 		logger:     logger,
 		retryable:  retryable,
 		maxRetries: maxRetries,
+		pricing:    billing.NewPricingTable(cfg.Pricing),
 	}
 }
 
@@ -491,6 +494,12 @@ func (h *Handler) recordAudit(
 		metrics.LLMTTFT.WithLabelValues(poolName, finalModel).Observe(dw.firstWriteAt.Sub(start).Seconds())
 	}
 
+	// Calculate cost from tokens + pricing table
+	cost := 0.0
+	if h.pricing != nil && h.pricing.Enabled() && hasTokens {
+		cost = h.pricing.Calculate(finalModel, promptTokens, compTokens)
+	}
+
 	// Build audit record
 	record := &plugin.AuditRecord{
 		TraceID:       traceID,
@@ -506,6 +515,7 @@ func (h *Handler) recordAudit(
 		PromptTokens:  promptTokens,
 		CompTokens:    compTokens,
 		TotalTokens:   totalTokens,
+		Cost:          cost,
 		RetryAttempt:  retryAttempt,
 		Fallback:      isFallback,
 		Streaming:     dw.streaming,
