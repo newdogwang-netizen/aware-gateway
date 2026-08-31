@@ -1,0 +1,185 @@
+# aware-gateway configuration
+# A smart, plugin-based AI model gateway.
+
+server:
+  listen: ":9090"
+  timeout: 120s
+  graceful_shutdown: 15s
+
+rate_limit:
+  global_rps: 100
+  per_key_rps: 20
+  key_header: "X-Heidi-Key"
+
+retry:
+  max_retries: 3
+  retryable_statuses: [429, 500, 502, 503]
+
+circuit_breaker:
+  threshold: 5
+  window: 30s
+  open_duration: 60s
+
+audit:
+  enabled: true
+  store: both              # log | sqlite | both
+  sqlite_path: ./data/audit.db
+  log_truncate_body: 1024
+  log_tokens: true
+
+tracing:
+  enabled: false
+  exporter: stdout         # stdout | otlp | none
+  # endpoint: localhost:4318
+  # insecure: true
+  service_name: aware-gateway
+  sample_rate: 1.0
+
+# Pool definitions: groups of upstream endpoints
+pools:
+  vllm:
+    strategy: round_robin
+    health_check:
+      interval: 10s
+      timeout: 5s
+    endpoints:
+      - name: vllm-onprem
+        url: http://10.0.1.5:8000
+        health_path: /health
+        weight: 10
+        timeout: 120s
+        models:
+          - qwen2.5-72b
+          - gemma-2-9b
+
+  openai:
+    strategy: round_robin
+    health_check:
+      interval: 30s
+      timeout: 10s
+    endpoints:
+      - name: openai-primary
+        url: https://api.openai.com
+        health_path: /v1/models
+        weight: 10
+        timeout: 120s
+        auth_token_env: GW_OPENAI_KEY
+        models:
+          - gpt-4o
+          - gpt-4o-mini
+          - gpt-4.1
+
+  fireworks:
+    strategy: round_robin
+    health_check:
+      interval: 30s
+      timeout: 10s
+    endpoints:
+      - name: fireworks-primary
+        url: https://api.fireworks.ai/inference
+        health_path: /v1/models
+        weight: 10
+        timeout: 120s
+        auth_token_env: GW_FIREWORKS_KEY
+        models:
+          - accounts/fireworks/models/llama-v3p1-70b-instruct
+          - accounts/fireworks/models/deepseek-v3
+
+  whisper:
+    strategy: round_robin
+    health_check:
+      interval: 10s
+      timeout: 5s
+    endpoints:
+      - name: whisper-1
+        url: http://10.0.1.6:9000
+        health_path: /health
+        weight: 10
+
+# Route patterns → pool mapping (fallback when no router plugin decides)
+routes:
+  - pattern: /v1/chat/completions
+    pool: vllm
+  - pattern: /v1/completions
+    pool: vllm
+  - pattern: /v1/embeddings
+    pool: vllm
+  - pattern: /v1/models
+    pool: vllm
+  - pattern: /v1/audio/transcriptions
+    pool: whisper
+  - pattern: /v1/audio/translations
+    pool: whisper
+
+# Model alias map (simple name→name, applied when no router plugin decides)
+model_map: {}
+
+# --- Plugin configurations ---
+plugins:
+  # Rate limiting plugin
+  ratelimit:
+    enabled: true
+    global_rps: 100
+    per_key_rps: 20
+    key_header: "X-Heidi-Key"
+
+  # GenAI observability plugin (OTel semantic conventions)
+  otel-genai:
+    enabled: true
+    convention: gen_ai       # gen_ai | openinference | both
+    capture_request_body: false  # PII risk if true!
+    system_overrides:
+      vllm: vllm
+      openai: openai
+      fireworks: fireworks
+
+  # Task-aware routing plugin
+  task-router:
+    enabled: true
+    default_strategy: balanced   # best_quality | cheapest | lowest_latency | balanced | any
+    prefer_healthy: true
+    models:
+      - name: "gpt-4o"
+        pool: "openai"
+        capabilities: ["chat", "code", "reasoning", "vision"]
+        context_window: 128000
+        input_price: 2.50
+        output_price: 10.00
+        max_tokens: 16384
+      - name: "gpt-4o-mini"
+        pool: "openai"
+        capabilities: ["chat"]
+        context_window: 128000
+        input_price: 0.15
+        output_price: 0.60
+        max_tokens: 16384
+      - name: "qwen2.5-72b"
+        pool: "vllm"
+        capabilities: ["chat", "code", "reasoning"]
+        context_window: 32768
+        input_price: 0.0
+        output_price: 0.0
+        max_tokens: 8192
+      - name: "accounts/fireworks/models/llama-v3p1-70b-instruct"
+        pool: "fireworks"
+        capabilities: ["chat", "code"]
+        context_window: 131072
+        input_price: 0.90
+        output_price: 0.90
+        max_tokens: 8192
+    rules:
+      - task: reasoning
+        strategy: best_quality
+      - task: code
+        strategy: best_quality
+      - task: chat
+        strategy: cheapest
+      - task: vision
+        strategy: best_quality
+
+  # Audit sink plugin
+  audit:
+    enabled: true
+    store: both
+    sqlite_path: ./data/audit.db
+    log_truncate_body: 1024

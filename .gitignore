@@ -1,0 +1,30 @@
+# Binary
+aware-gateway
+
+# Data
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Logs
+/tmp/aware-gateway*.log
+/tmp/aware-gateway*.pid
+
+# Secrets (never commit)
+openrouter.env
+*.env
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+*.tar.gz

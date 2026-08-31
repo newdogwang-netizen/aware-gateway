@@ -1,0 +1,56 @@
+# Local test config — no external API keys required
+server:
+  listen: ":9090"
+  timeout: 120s
+  graceful_shutdown: 15s
+
+retry:
+  max_retries: 3
+  retryable_statuses: [429, 500, 502, 503]
+
+circuit_breaker:
+  threshold: 5
+  window: 30s
+  open_duration: 60s
+
+pools:
+  mock:
+    strategy: round_robin
+    health_check:
+      interval: 30s
+      timeout: 5s
+    endpoints:
+      - name: mock-1
+        url: http://localhost:18000
+        health_path: /health
+        weight: 10
+        models:
+          - test-model
+
+routes:
+  - pattern: /v1/chat/completions
+    pool: mock
+  - pattern: /v1/models
+    pool: mock
+
+plugins:
+  ratelimit:
+    enabled: true
+    global_rps: 1000
+
+  otel-genai:
+    enabled: true
+    convention: gen_ai
+
+  task-router:
+    enabled: true
+    default_strategy: balanced
+    models:
+      - name: "test-model"
+        pool: "mock"
+        capabilities: ["chat", "code", "reasoning"]
+        context_window: 32768
+
+  audit:
+    enabled: true
+    store: log

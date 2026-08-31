@@ -1,0 +1,89 @@
+# OpenRouter test config — real API calls
+server:
+  listen: ":12026"
+  timeout: 120s
+  graceful_shutdown: 10s
+
+retry:
+  max_retries: 2
+  retryable_statuses: [429, 500, 502, 503]
+
+circuit_breaker:
+  threshold: 10
+  window: 60s
+  open_duration: 30s
+
+tracing:
+  enabled: false
+  exporter: stdout
+  service_name: aware-gateway
+  sample_rate: 1.0
+
+pools:
+  openrouter:
+    strategy: round_robin
+    health_check:
+      interval: 60s
+      timeout: 10s
+    endpoints:
+      - name: openrouter-primary
+        url: https://openrouter.ai/api
+        health_path: /v1/models
+        weight: 10
+        timeout: 120s
+        auth_token_env: GW_OPENROUTER_KEY
+        # No static models — let auto-discovery find them
+
+routes:
+  - pattern: /v1/chat/completions
+    pool: openrouter
+  - pattern: /v1/completions
+    pool: openrouter
+  - pattern: /v1/models
+    pool: openrouter
+  - pattern: /v1/embeddings
+    pool: openrouter
+
+model_map: {}
+
+plugins:
+  ratelimit:
+    enabled: true
+    global_rps: 20
+
+  otel-genai:
+    enabled: true
+    convention: gen_ai
+    system_overrides:
+      openrouter: openrouter
+
+  task-router:
+    enabled: true
+    default_strategy: cheapest
+    prefer_healthy: true
+    # No explicit models — let auto-discovery from the pool populate the registry.
+    # We add a couple of explicit ones to test the merge:
+    models:
+      - name: "z-ai/glm-5.3-flash"
+        pool: "openrouter"
+        capabilities: ["chat", "code", "reasoning"]
+        context_window: 131072
+        input_price: 0.0
+        output_price: 0.0
+      - name: "qwen/qwen3.8-flash"
+        pool: "openrouter"
+        capabilities: ["chat", "code", "reasoning"]
+        context_window: 131072
+        input_price: 0.0
+        output_price: 0.0
+    rules:
+      - task: reasoning
+        strategy: best_quality
+      - task: code
+        strategy: best_quality
+      - task: chat
+        strategy: cheapest
+
+  audit:
+    enabled: true
+    store: log
