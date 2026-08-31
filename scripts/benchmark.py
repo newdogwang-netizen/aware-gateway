@@ -133,13 +133,25 @@ class TurnResult:
 
 def call_gateway(gateway_url: str, model: str, messages: list,
                   trial: str, step: str, task_name: str,
-                  quality_keywords: list) -> TurnResult:
-    body = json.dumps({
+                  quality_keywords: list, strategy_name: str = "") -> TurnResult:
+    body_dict = {
         "model": model,
         "messages": messages,
         "max_tokens": 500,
         "temperature": 0.7,
-    }).encode()
+    }
+
+    # Pin provider + seed for non-smart-router strategies to eliminate
+    # OpenRouter multi-provider randomness. Smart-router is left uncontrolled
+    # because model="auto" may be rewritten by the gateway.
+    if strategy_name != "gateway-router":
+        body_dict["seed"] = 42
+        body_dict["provider"] = {
+            "order": ["Fireworks", "Z.ai"],
+            "allow_fallbacks": False,
+        }
+
+    body = json.dumps(body_dict).encode()
 
     url = f"{gateway_url}/v1/chat/completions"
     req = urllib.request.Request(url, data=body, method="POST")
@@ -240,7 +252,8 @@ def run_strategy(gateway_url: str, strategy_name: str, task: dict,
 
         step = f"turn{turn_idx}"
         
-        result = call_gateway(gateway_url, model, messages, trial, step, task["name"], kw)
+        result = call_gateway(gateway_url, model, messages, trial, step, task["name"], kw,
+                              strategy_name=strategy_name)
         result.turn = turn_idx
 
         # Add assistant response to conversation history
