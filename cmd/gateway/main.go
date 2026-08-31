@@ -20,6 +20,7 @@ import (
 	"github.com/aware/gateway/plugins/audit"
 	"github.com/aware/gateway/plugins/otelgenai"
 	"github.com/aware/gateway/plugins/ratelimit"
+	"github.com/aware/gateway/plugins/smartrouter"
 	"github.com/aware/gateway/plugins/taskrouter"
 )
 
@@ -73,9 +74,13 @@ func main() {
 
 	// Register built-in plugins explicitly.
 	// Order matters for middleware (lower priority = outermost wrapper).
-	// Routers run chain-of-responsibility; audit sinks are fan-out.
+	// Routers run chain-of-responsibility (lower priority = runs first).
+	// smart-router (priority 50) runs before task-router (priority 100):
+	// if smart-router's LLM decision succeeds, task-router is skipped;
+	// if it fails (returns Skip), task-router handles as fallback.
 	mustRegister(registry, &ratelimit.Plugin{})
 	mustRegister(registry, &otelgenai.Plugin{})
+	mustRegister(registry, &smartrouter.SmartRouter{})
 	mustRegister(registry, &taskrouter.Router{})
 	mustRegister(registry, &audit.Plugin{})
 
