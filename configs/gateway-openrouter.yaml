@@ -61,21 +61,37 @@ plugins:
     enabled: true
     default_strategy: cheapest
     prefer_healthy: true
-    # No explicit models — let auto-discovery from the pool populate the registry.
-    # We add a couple of explicit ones to test the merge:
     models:
       - name: "z-ai/glm-5.3-flash"
         pool: "openrouter"
         capabilities: ["chat", "code", "reasoning"]
         context_window: 131072
-        input_price: 0.0
-        output_price: 0.0
+        input_price: 0.075
+        output_price: 0.25
       - name: "qwen/qwen3.8-flash"
         pool: "openrouter"
         capabilities: ["chat", "code", "reasoning"]
         context_window: 131072
-        input_price: 0.0
-        output_price: 0.0
+        input_price: 0.15
+        output_price: 0.47
+      - name: "openai/gpt-4o-mini"
+        pool: "openrouter"
+        capabilities: ["chat", "code", "reasoning", "vision"]
+        context_window: 128000
+        input_price: 0.15
+        output_price: 0.60
+      - name: "openai/gpt-4o"
+        pool: "openrouter"
+        capabilities: ["chat", "code", "reasoning", "vision"]
+        context_window: 128000
+        input_price: 2.50
+        output_price: 10.00
+      - name: "deepseek/deepseek-v3.2"
+        pool: "openrouter"
+        capabilities: ["chat", "code", "reasoning"]
+        context_window: 131072
+        input_price: 0.27
+        output_price: 1.10
     rules:
       - task: reasoning
         strategy: best_quality

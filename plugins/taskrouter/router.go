@@ -176,6 +176,15 @@ func (r *Router) Route(req *http.Request, body []byte) (*plugin.RoutingDecision,
 		return &plugin.RoutingDecision{Skip: true}, nil
 	}
 
+	// If the requested model is explicitly configured in our registry
+	// with capabilities, respect the client's choice — don't override.
+	// This allows callers to pin specific models when they want to.
+	if parsed.Model != "" {
+		if _, exists := r.registry.Get(parsed.Model); exists {
+			return &plugin.RoutingDecision{Skip: true}, nil
+		}
+	}
+
 	// Classify the task
 	task := r.classifier.Classify(parsed)
 
