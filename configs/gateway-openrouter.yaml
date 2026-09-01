@@ -71,33 +71,30 @@ plugins:
     include_message_count: true
     cache_ttl_seconds: 300
     cache_max_entries: 10000
-    # Model menu — populated from task-router models below via auto-discovery
-    # If empty, smart-router builds menu from pool endpoints
+    # Model menu — only models verified working on OpenRouter
     models:
+      # Ultra-cheap tier
       - name: "z-ai/glm-5.3-flash"
         pool: "openrouter"
         capabilities: ["chat", "code", "reasoning"]
         context_window: 1310720
         input_price: 0.07
         output_price: 0.25
-      - name: "google/gemma-4-31b-it"
-        pool: "openrouter"
-        capabilities: ["chat", "code", "reasoning"]
-        context_window: 262144
-        input_price: 0.09
-        output_price: 0.34
+      # Budget tier — Terminal-Bench 4.0 leaderboard #8 (17.3%)
       - name: "openai/gpt-5.6-luna"
         pool: "openrouter"
         capabilities: ["chat", "code", "reasoning"]
         context_window: 1050000
         input_price: 0.20
         output_price: 1.20
+      # Mid tier — Terminal-Bench 4.0 leaderboard #3 (41.8%)
       - name: "z-ai/glm-5.3"
         pool: "openrouter"
         capabilities: ["chat", "code", "reasoning"]
         context_window: 1310720
         input_price: 1.40
         output_price: 4.40
+      # Premium tier — Terminal-Bench 4.0 leaderboard #4 (37.3%)
       - name: "openai/gpt-5.6-sol"
         pool: "openrouter"
         capabilities: ["chat", "code", "reasoning"]
@@ -125,13 +122,6 @@ plugins:
         context_window: 1050000
         input_price: 0.20
         output_price: 1.20
-      # Budget tier — new generation, no leaderboard yet
-      - name: "deepseek/deepseek-v4-flash"
-        pool: "openrouter"
-        capabilities: ["chat", "code", "reasoning"]
-        context_window: 1048576
-        input_price: 0.09
-        output_price: 0.18
       # Mid tier — Terminal-Bench 4.0 leaderboard #3 (41.8% resolution)
       - name: "z-ai/glm-5.3"
         pool: "openrouter"

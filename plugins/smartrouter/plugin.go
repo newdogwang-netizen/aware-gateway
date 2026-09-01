@@ -254,8 +254,21 @@ func (s *SmartRouter) buildMenuText() string {
 		total := m.InputPrice + m.OutputPrice
 		caps := strings.Join(m.Capabilities, ",")
 		ctx := formatCtx(m.ContextWindow)
-		lines = append(lines, fmt.Sprintf("%d. %s %.2f/%.2f perM %.2f %s %s ctx",
-			i+1, m.Name, m.InputPrice, m.OutputPrice, total, caps, ctx))
+
+		// Add tier label based on price
+		tier := ""
+		if total < 1.0 {
+			tier = "ultra-cheap"
+		} else if total < 3.0 {
+			tier = "budget"
+		} else if total < 10.0 {
+			tier = "mid"
+		} else {
+			tier = "premium"
+		}
+
+		lines = append(lines, fmt.Sprintf("%d. %s [%s] $%.2f/$%.2f perM %s %s ctx",
+			i+1, m.Name, tier, m.InputPrice, m.OutputPrice, caps, ctx))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -449,25 +462,49 @@ func parseRequest(body []byte) *parsedRequest {
 func (s *SmartRouter) buildPrompt(p *parsedRequest) string {
 	var sb strings.Builder
 
-	sb.WriteString("Select the most cost-effective model for this request. Prefer cheaper unless the task is complex.\n\n")
+	// System instruction: explain the routing task with clear criteria
+	sb.WriteString("You are routing an AI agent's LLM call. Pick the cheapest model that can handle this turn well.\n\n")
 
-	sb.WriteString("Models:\n")
+	// Model menu with tier descriptions
+	sb.WriteString("Models (cheapest first):\n")
 	sb.WriteString(s.menuJSON)
 	sb.WriteString("\n\n")
 
-	if s.cfg.IncludeMessageCount {
-		sb.WriteString(fmt.Sprintf("Depth: %d msgs, ~%d tokens.\n", p.MessageCount, p.EstimatedTokens))
+	// Turn phase context — tell the decision model what the agent is doing
+	// This is derived from message count (2=understand, 4=plan, 6=code, 8=review, 10=fix)
+	phase := "unknown"
+	switch {
+	case p.MessageCount <= 2:
+		phase = "understand — agent is reading and summarizing the task"
+	case p.MessageCount <= 4:
+		phase = "plan — agent is creating an implementation plan"
+	case p.MessageCount <= 6:
+		phase = "code — agent is writing implementation code"
+	case p.MessageCount <= 8:
+		phase = "review — agent is analyzing code output and debugging"
+	default:
+		phase = "fix — agent is fixing issues and finalizing"
 	}
+	sb.WriteString(fmt.Sprintf("Turn phase: %s\n", phase))
+	sb.WriteString(fmt.Sprintf("Conversation depth: %d messages, ~%d input tokens\n\n", p.MessageCount, p.EstimatedTokens))
 
+	// Request preview — give enough context to judge complexity
 	if p.LatestUserMsg != "" {
 		msg := p.LatestUserMsg
 		if len(msg) > s.cfg.PromptPreviewChars {
 			msg = msg[:s.cfg.PromptPreviewChars] + "..."
 		}
-		sb.WriteString(fmt.Sprintf("Request: %s\n", msg))
+		sb.WriteString(fmt.Sprintf("Latest user message:\n%s\n\n", msg))
 	}
 
-	sb.WriteString("\nJSON only: {\"model\":\"id\",\"reason\":\"why\"}")
+	// Decision criteria with concrete guidance
+	sb.WriteString("Guidelines:\n")
+	sb.WriteString("- Simple formatting, summarization, or short answers → use the cheapest model\n")
+	sb.WriteString("- Writing production code, debugging complex systems, or multi-step reasoning → use a stronger model\n")
+	sb.WriteString("- Consider conversation depth: later turns with more context may need stronger models\n")
+	sb.WriteString("- When unsure, prefer cheaper — the agent can retry with a stronger model if needed\n\n")
+
+	sb.WriteString("JSON only: {\"model\":\"id\",\"reason\":\"why\"}")
 
 	return sb.String()
 }
