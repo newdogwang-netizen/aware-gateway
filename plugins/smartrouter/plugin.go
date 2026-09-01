@@ -1,8 +1,9 @@
 // Package smartrouter implements an LLM-based model selection plugin.
 //
 // It calls a small decision model to choose the best downstream model
-// for each request. If the decision model fails, it returns Skip=true
-// and the rule-based task-router handles the request as fallback.
+// for each request. If the decision model fails, it routes to the configured
+// fallback model when set; otherwise it returns Skip=true so the next router
+// can handle the request.
 //
 // Configuration (under plugins.smart-router in gateway.yaml):
 //
@@ -12,6 +13,8 @@
 //	    endpoint: "http://localhost:18000/v1"
 //	    model: "qwen3.8-27b"
 //	    timeout_ms: 2000
+//	    fallback_model: "anthropic/claude-opus-5"
+//	    fallback_pool: "openrouter"
 //	    cache_ttl_seconds: 300
 package smartrouter
 
@@ -32,32 +35,34 @@ import (
 type ModelEntry struct {
 	Name          string   `json:"name"`
 	Pool          string   `json:"pool"`
-	InputPrice    float64  `json:"input_price"`    // $/M tokens
-	OutputPrice   float64  `json:"output_price"`   // $/M tokens
+	InputPrice    float64  `json:"input_price"`  // $/M tokens
+	OutputPrice   float64  `json:"output_price"` // $/M tokens
 	Capabilities  []string `json:"capabilities"`
 	ContextWindow int      `json:"context_window"`
 }
 
 // Config is the plugin-specific configuration.
 type Config struct {
-	Enabled              bool         `yaml:"enabled" json:"enabled"`
-	Endpoint             string       `yaml:"endpoint" json:"endpoint"`                  // OpenAI-compatible base URL
-	Model                string       `yaml:"model" json:"model"`                         // decision model name
-	APIKey               string       `yaml:"api_key" json:"api_key"`                     // optional
-	MaxTokens            int          `yaml:"max_tokens" json:"max_tokens"`               // default 100
-	Temperature          float64      `yaml:"temperature" json:"temperature"`             // default 0
-	TimeoutMs            int          `yaml:"timeout_ms" json:"timeout_ms"`               // default 2000
-	PromptPreviewChars   int          `yaml:"prompt_preview_chars" json:"prompt_preview_chars"` // default 500
-	IncludeSystemPrompt  bool         `yaml:"include_system_prompt" json:"include_system_prompt"`
-	IncludeMessageCount  bool         `yaml:"include_message_count" json:"include_message_count"`
-	CacheTTLSeconds      int          `yaml:"cache_ttl_seconds" json:"cache_ttl_seconds"`   // default 300
-	CacheMaxEntries      int          `yaml:"cache_max_entries" json:"cache_max_entries"`   // default 10000
+	Enabled             bool    `yaml:"enabled" json:"enabled"`
+	Endpoint            string  `yaml:"endpoint" json:"endpoint"`                         // OpenAI-compatible base URL
+	Model               string  `yaml:"model" json:"model"`                               // decision model name
+	APIKey              string  `yaml:"api_key" json:"api_key"`                           // optional
+	MaxTokens           int     `yaml:"max_tokens" json:"max_tokens"`                     // default 100
+	Temperature         float64 `yaml:"temperature" json:"temperature"`                   // default 0
+	TimeoutMs           int     `yaml:"timeout_ms" json:"timeout_ms"`                     // default 2000
+	PromptPreviewChars  int     `yaml:"prompt_preview_chars" json:"prompt_preview_chars"` // default 500
+	IncludeSystemPrompt bool    `yaml:"include_system_prompt" json:"include_system_prompt"`
+	IncludeMessageCount bool    `yaml:"include_message_count" json:"include_message_count"`
+	CacheTTLSeconds     int     `yaml:"cache_ttl_seconds" json:"cache_ttl_seconds"` // default 300
+	CacheMaxEntries     int     `yaml:"cache_max_entries" json:"cache_max_entries"` // default 10000
+	FallbackModel       string  `yaml:"fallback_model" json:"fallback_model"`
+	FallbackPool        string  `yaml:"fallback_pool" json:"fallback_pool"`
 	// Decision model pricing ($/M tokens). For self-hosted vLLM, leave as 0
 	// (cost is GPU amortization, not per-token). For commercial decision
 	// models, set these to enable cost tracking in audit trail.
-	DecisionInputPrice   float64      `yaml:"decision_input_price" json:"decision_input_price"`
-	DecisionOutputPrice  float64      `yaml:"decision_output_price" json:"decision_output_price"`
-	Models               []ModelEntry `yaml:"models" json:"models"`                         // model menu
+	DecisionInputPrice  float64      `yaml:"decision_input_price" json:"decision_input_price"`
+	DecisionOutputPrice float64      `yaml:"decision_output_price" json:"decision_output_price"`
+	Models              []ModelEntry `yaml:"models" json:"models"` // model menu
 }
 
 // SmartRouter implements plugin.RequestRouter.
@@ -106,7 +111,7 @@ func (s *SmartRouter) Init(ctx *plugin.Context) error {
 		s.cfg.TimeoutMs = 2000
 	}
 	if cfg.PromptPreviewChars == 0 {
-		s.cfg.PromptPreviewChars = 500
+		s.cfg.PromptPreviewChars = 2000
 	}
 	if cfg.CacheTTLSeconds == 0 {
 		s.cfg.CacheTTLSeconds = 300
@@ -142,6 +147,7 @@ func (s *SmartRouter) Init(ctx *plugin.Context) error {
 		"menu_size", len(s.menu),
 		"cache_ttl", s.cfg.CacheTTLSeconds,
 		"timeout_ms", s.cfg.TimeoutMs,
+		"fallback_model", s.cfg.FallbackModel,
 	)
 	return nil
 }
@@ -166,27 +172,32 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 		return &plugin.RoutingDecision{Skip: true}, nil
 	}
 
-	// If client pinned a known model, respect it
+	// If client pinned a known model, respect it.
 	if parsed.Model != "" {
 		for _, m := range s.menu {
 			if m.Name == parsed.Model {
 				return &plugin.RoutingDecision{Skip: true}, nil
 			}
 		}
+		if parsed.Model == s.cfg.FallbackModel {
+			return &plugin.RoutingDecision{Skip: true}, nil
+		}
 	}
 
-	// Check cache
-	cacheKey := s.cache.Key(s.menu, parsed.MessageCount, parsed.SystemMsg, parsed.LatestUserMsg)
-	if cached, hit := s.cache.Get(cacheKey); hit {
-		s.logger.Debug("smart-router: cache hit",
-			"model", cached.Model,
-			"reason", cached.Reason,
-		)
-		return &plugin.RoutingDecision{
-			Pool:   cached.Pool,
-			Model:  cached.Model,
-			Reason: "cached: " + cached.Reason,
-		}, nil
+	// Check cache (skip if disabled via cache_ttl_seconds < 0)
+	if s.cache != nil && s.cfg.CacheTTLSeconds >= 0 {
+		cacheKey := s.cache.Key(s.menu, parsed.MessageCount, parsed.SystemMsg, parsed.LatestUserMsg)
+		if cached, hit := s.cache.Get(cacheKey); hit {
+			s.logger.Debug("smart-router: cache hit",
+				"model", cached.Model,
+				"reason", cached.Reason,
+			)
+			return &plugin.RoutingDecision{
+				Pool:   cached.Pool,
+				Model:  cached.Model,
+				Reason: "cached: " + cached.Reason,
+			}, nil
+		}
 	}
 
 	// Build prompt
@@ -195,11 +206,12 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 	// Call decision model (pass req for trial/step/task header extraction)
 	decision, err := s.callDecisionModel(prompt, req)
 	if err != nil {
-		s.logger.Warn("smart-router: decision model failed, falling back to task-router",
+		s.logger.Warn("smart-router: decision model failed",
 			"error", err,
 			"endpoint", s.cfg.Endpoint,
+			"fallback_model", s.cfg.FallbackModel,
 		)
-		return &plugin.RoutingDecision{Skip: true}, nil
+		return s.fallbackDecision("decision-model-error"), nil
 	}
 
 	// Validate: model must exist in menu
@@ -211,31 +223,71 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 		}
 	}
 	if pool == "" {
-		s.logger.Debug("smart-router: decision model returned unknown model, skipping",
+		s.logger.Debug("smart-router: decision model returned unknown model",
 			"model", decision.Model,
+			"fallback_model", s.cfg.FallbackModel,
 		)
-		return &plugin.RoutingDecision{Skip: true}, nil
+		return s.fallbackDecision("unknown-model"), nil
 	}
 
-	// Cache the decision
-	s.cache.Set(cacheKey, CachedDecision{
-		Model:  decision.Model,
-		Pool:   pool,
-		Reason: decision.Reason,
-	})
-
-	s.logger.Info("smart-router: routed",
-		"model", decision.Model,
-		"pool", pool,
-		"reason", decision.Reason,
-		"cached_key", cacheKey[:8],
-	)
+	// Cache the decision (skip if disabled)
+	if s.cache != nil && s.cfg.CacheTTLSeconds >= 0 {
+		cacheKey := s.cache.Key(s.menu, parsed.MessageCount, parsed.SystemMsg, parsed.LatestUserMsg)
+		s.cache.Set(cacheKey, CachedDecision{
+			Model:  decision.Model,
+			Pool:   pool,
+			Reason: decision.Reason,
+		})
+		s.logger.Info("smart-router: routed",
+			"model", decision.Model,
+			"pool", pool,
+			"reason", decision.Reason,
+			"cached_key", cacheKey[:8],
+		)
+	} else {
+		s.logger.Info("smart-router: routed",
+			"model", decision.Model,
+			"pool", pool,
+			"reason", decision.Reason,
+		)
+	}
 
 	return &plugin.RoutingDecision{
 		Pool:   pool,
 		Model:  decision.Model,
 		Reason: fmt.Sprintf("smart-router: %s", decision.Reason),
 	}, nil
+}
+
+func (s *SmartRouter) fallbackDecision(reason string) *plugin.RoutingDecision {
+	if s.cfg.FallbackModel == "" {
+		return &plugin.RoutingDecision{Skip: true}
+	}
+
+	pool := s.cfg.FallbackPool
+	if pool == "" {
+		for _, m := range s.menu {
+			if m.Name == s.cfg.FallbackModel {
+				pool = m.Pool
+				break
+			}
+		}
+	}
+	if pool == "" {
+		if s.logger != nil {
+			s.logger.Warn("smart-router: fallback model configured without fallback pool",
+				"fallback_model", s.cfg.FallbackModel,
+				"reason", reason,
+			)
+		}
+		return &plugin.RoutingDecision{Skip: true}
+	}
+
+	return &plugin.RoutingDecision{
+		Pool:   pool,
+		Model:  s.cfg.FallbackModel,
+		Reason: fmt.Sprintf("smart-router fallback=%s", reason),
+	}
 }
 
 // discoverFromPools builds the model menu from pool endpoints.
@@ -361,7 +413,7 @@ func (s *SmartRouter) callDecisionModel(prompt string, req *http.Request) (*Deci
 		Usage struct {
 			PromptTokens     int `json:"prompt_tokens"`
 			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens       int `json:"total_tokens"`
+			TotalTokens      int `json:"total_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -536,8 +588,10 @@ func parseRequest(body []byte) *parsedRequest {
 func (s *SmartRouter) buildPrompt(p *parsedRequest) string {
 	var sb strings.Builder
 
-	// System instruction: explain the routing task with clear criteria
-	sb.WriteString("You are routing an AI agent's LLM call. Pick the cheapest model that can handle this turn well.\n\n")
+	// System instruction: explain the routing task with clear criteria.
+	sb.WriteString("You are routing one LLM call inside a terminal coding agent. ")
+	sb.WriteString("Pick the lowest-cost model that is likely to succeed for this call. ")
+	sb.WriteString("There is no automatic retry or second chance, so do not choose a cheaper model if it is likely to cause failed tests, broken code, or an incomplete task.\n\n")
 
 	// Model menu with tier descriptions
 	sb.WriteString("Models (cheapest first):\n")
@@ -562,7 +616,7 @@ func (s *SmartRouter) buildPrompt(p *parsedRequest) string {
 	sb.WriteString(fmt.Sprintf("Turn phase: %s\n", phase))
 	sb.WriteString(fmt.Sprintf("Conversation depth: %d messages, ~%d input tokens\n\n", p.MessageCount, p.EstimatedTokens))
 
-	// Request preview — give enough context to judge complexity
+	// Request preview — give enough context to judge complexity.
 	if s.cfg.IncludeSystemPrompt && p.SystemMsg != "" {
 		sys := p.SystemMsg
 		if len(sys) > 200 {
@@ -579,12 +633,14 @@ func (s *SmartRouter) buildPrompt(p *parsedRequest) string {
 		sb.WriteString(fmt.Sprintf("Latest user message:\n%s\n\n", msg))
 	}
 
-	// Decision criteria with concrete guidance
+	// Decision criteria with concrete guidance.
 	sb.WriteString("Guidelines:\n")
-	sb.WriteString("- Simple formatting, summarization, or short answers → use the cheapest model\n")
-	sb.WriteString("- Writing production code, debugging complex systems, or multi-step reasoning → use a stronger model\n")
-	sb.WriteString("- Consider conversation depth: later turns with more context may need stronger models\n")
-	sb.WriteString("- When unsure, prefer cheaper — the agent can retry with a stronger model if needed\n\n")
+	sb.WriteString("- Use the cheapest model for low-risk comprehension, summaries, simple formatting, routine planning, or short answers.\n")
+	sb.WriteString("- Use the strongest model for nontrivial code changes, debugging failed tests, multi-file or stateful systems, security-sensitive logic, performance/concurrency/data-corruption work, specialized domains, or fragile final fixes.\n")
+	sb.WriteString("- Judge the underlying task risk, not just the latest message. A short follow-up like \"fix it\" can still require the strongest model if the task is hard.\n")
+	sb.WriteString("- Consider conversation depth: later review/fix turns with more context and higher mistake cost often need the strongest model.\n")
+	sb.WriteString("- Prefer the cheaper model only when expected correctness is close to the stronger model.\n")
+	sb.WriteString("- Return exactly one model id from the menu.\n\n")
 
 	sb.WriteString("JSON only: {\"model\":\"id\",\"reason\":\"why\"}")
 

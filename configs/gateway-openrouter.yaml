@@ -66,12 +66,19 @@ plugins:
     max_tokens: 100
     temperature: 0
     timeout_ms: 10000
-    prompt_preview_chars: 500
+    # If Qwen3 times out or returns an invalid/unknown model, route directly
+    # to the strongest fallback instead of letting task-router choose a
+    # mid-tier model.
+    fallback_model: "anthropic/claude-opus-5"
+    fallback_pool: "openrouter"
+    prompt_preview_chars: 2000
     include_system_prompt: true
     include_message_count: true
     cache_ttl_seconds: 300
     cache_max_entries: 10000
-    # Model menu — only models verified working on OpenRouter
+    # Decision menu for the V3 experiment: only compare flash vs premium.
+    # Keep budget/mid-tier models out of Qwen3's choices so smart-router
+    # results are attributable to "cheap unless upgrade is needed".
     models:
       # Ultra-cheap tier
       - name: "z-ai/glm-5.3-flash"
@@ -80,20 +87,6 @@ plugins:
         context_window: 1310720
         input_price: 0.07
         output_price: 0.25
-      # Budget tier — Terminal-Bench 4.0 leaderboard #8 (17.3%)
-      - name: "openai/gpt-5.6-luna"
-        pool: "openrouter"
-        capabilities: ["chat", "code", "reasoning"]
-        context_window: 1050000
-        input_price: 0.20
-        output_price: 1.20
-      # Mid tier — Terminal-Bench 4.0 leaderboard #3 (41.8%)
-      - name: "z-ai/glm-5.3"
-        pool: "openrouter"
-        capabilities: ["chat", "code", "reasoning"]
-        context_window: 1310720
-        input_price: 1.40
-        output_price: 4.40
       # Premium tier — Terminal-Bench 4.0 leaderboard #4 (37.3%)
       - name: "openai/gpt-5.6-sol"
         pool: "openrouter"

@@ -11,7 +11,7 @@ Request (model="auto" or unknown)
   → smart-router (priority 50, runs first)
       → cache hit? return cached decision
       → call decision LLM → valid model? return decision
-      → failed? return Skip=true
+      → failed? return configured fallback model, if set
   → task-router (priority 100, runs next)
       → keyword classify + score → return decision
   → no router decides → static config routing
@@ -43,7 +43,7 @@ Completely independent from `task-router`. Owns its own model registry copy
 
 ```
 plugins/
-  taskrouter/router.go    — existing rule-based (unchanged, stays as fallback)
+  taskrouter/router.go    — existing rule-based (unchanged, fallback when smart-router skips)
   smartrouter/plugin.go   — NEW: LLM-based decision router
 ```
 
@@ -65,7 +65,7 @@ plugins/
       - Model menu (numbered list)
       - Message count (conversation depth)
       - System message preview (first 200 chars, if present)
-      - Latest user message preview (first 500 chars)
+      - Latest user message preview (configured length, 2000 chars in V3)
 
    f. Call decision model:
       POST {endpoint}/v1/chat/completions
@@ -80,10 +80,10 @@ plugins/
       - Extract JSON: {"model": "model-id", "reason": "..."}
       - Validate: model exists in menu?
         YES → return RoutingDecision{Model, Pool, Reason}
-        NO  → return Skip (let task-router handle)
+        NO  → return configured fallback model, if set; otherwise Skip
 
    h. On any failure (timeout, 5xx, invalid JSON, parse error):
-      → return Skip (let task-router handle)
+      → return configured fallback model, if set; otherwise Skip
 ```
 
 ### Router Prompt
@@ -133,10 +133,12 @@ plugins:
     # Decision call settings
     max_tokens: 100
     temperature: 0
-    timeout_ms: 2000         # fail fast → fallback to task-router
+    timeout_ms: 2000         # fail fast → configured fallback, if set
+    fallback_model: "anthropic/claude-opus-5"
+    fallback_pool: "openrouter"
 
     # Prompt construction
-    prompt_preview_chars: 500    # truncate user message
+    prompt_preview_chars: 2000   # truncate user message
     include_system_prompt: true   # include system message preview
     include_message_count: true   # include conversation depth
 
@@ -154,7 +156,7 @@ plugins:
 Identical requests within `cache_ttl_seconds` reuse the decision:
 
 ```
-cache_key = hash(sorted_model_ids + message_count + first_500_chars_of_latest_user_msg)
+cache_key = hash(sorted_model_ids + message_count + first_200_chars_of_system_msg + first_2000_chars_of_latest_user_msg)
 cache_value = { model, reason, expires_at }
 ```
 
@@ -189,7 +191,8 @@ emit an AuditRecord itself.
 Priority 50: smart-router
   → LLM decision success → return RoutingDecision
   → cache hit → return RoutingDecision
-  → any failure → return Skip=true
+  → decision failure → return configured fallback model, if set
+  → no configured fallback → return Skip=true
 
 Priority 100: task-router (existing, unchanged)
   → keyword classify + score → return RoutingDecision
@@ -199,15 +202,16 @@ Priority 100: task-router (existing, unchanged)
 ```
 
 The gateway's `RequestRouter` chain calls routers in priority order. First
-non-Skip decision wins. Smart-router failing silently falls through to
-task-router with zero coupling.
+non-Skip decision wins. Smart-router can route directly to a configured
+fallback model for decision failures, or fall through to task-router when no
+fallback is configured.
 
 ### Latency Budget
 
 ```
 Decision model call:   100-500ms (small model, ≤100 tokens output)
 Cache hit:             <1ms
-Fallback to task-router: <1ms (in-process, no network)
+Configured fallback:    no extra decision latency after failure
 
 Typical upstream LLM:  3-15s
 Acceptable overhead:   <5% of upstream latency
@@ -255,4 +259,3 @@ client choice). Only `model="auto"`, empty, or unknown triggers LLM decision.
    message?** — current design: latest user message + system message + depth count
 3. **Budget cap per trial?** — should the router stop upgrading when cumulative
    cost exceeds a threshold?
-

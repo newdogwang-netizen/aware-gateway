@@ -18,7 +18,7 @@ type CachedDecision struct {
 
 // cacheEntry holds a decision and its expiry time.
 type cacheEntry struct {
-	decision CachedDecision
+	decision  CachedDecision
 	expiresAt time.Time
 	// LRU tracking
 	lastAccess time.Time
@@ -65,9 +65,10 @@ func (c *DecisionCache) Key(menu []ModelEntry, msgCount int, systemMsg, latestMs
 		systemMsg = systemMsg[:200]
 	}
 	h.Write([]byte(systemMsg))
-	// First 500 chars of latest user message
-	if len(latestMsg) > 500 {
-		latestMsg = latestMsg[:500]
+	// First 2000 chars of latest user message, matching the V3 experiment
+	// prompt preview size.
+	if len(latestMsg) > 2000 {
+		latestMsg = latestMsg[:2000]
 	}
 	h.Write([]byte(latestMsg))
 
