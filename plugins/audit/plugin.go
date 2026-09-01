@@ -250,6 +250,7 @@ func Open(path string) (*Store, error) {
 	CREATE INDEX IF NOT EXISTS idx_audit_model ON audit(model);
 	CREATE INDEX IF NOT EXISTS idx_audit_trial ON audit(trial_name);
 	CREATE INDEX IF NOT EXISTS idx_audit_task ON audit(task_name);
+	CREATE INDEX IF NOT EXISTS idx_audit_session ON audit(session_id);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -356,7 +357,7 @@ func (s *Store) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, err
 	}
 
 	query := `SELECT trace_id, timestamp, model, routed_model, pool, endpoint,
-		step_name, task_name, trial_name,
+		step_name, task_name, trial_name, session_id,
 		prompt_tokens, completion_tokens, total_tokens, cost,
 		latency_ms, status, finish_reason, routing_reason
 		FROM audit WHERE 1=1`
@@ -374,6 +375,10 @@ func (s *Store) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, err
 		query += " AND step_name = ?"
 		args = append(args, filter.StepName)
 	}
+	if filter.SessionID != "" {
+		query += " AND session_id = ?"
+		args = append(args, filter.SessionID)
+	}
 	query += " ORDER BY timestamp ASC"
 	if filter.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
@@ -388,16 +393,20 @@ func (s *Store) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, err
 	var entries []plugin.TraceEntry
 	for rows.Next() {
 		var e plugin.TraceEntry
+		var sessionID sql.NullString
 		var finishReason, routingReason sql.NullString
 		err := rows.Scan(
 			&e.TraceID, &e.Timestamp, &e.Model, &e.RoutedModel, &e.Pool, &e.Endpoint,
-			&e.StepName, &e.TaskName, &e.TrialName,
+			&e.StepName, &e.TaskName, &e.TrialName, &sessionID,
 			&e.PromptTokens, &e.CompTokens, &e.TotalTokens, &e.Cost,
 			&e.LatencyMs, &e.Status, &finishReason, &routingReason,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("scan trace: %w", err)
-		}
+			)
+			if err != nil {
+				return nil, fmt.Errorf("scan trace row: %w", err)
+			}
+			if sessionID.Valid {
+				e.SessionID = sessionID.String
+			}
 		e.FinishReason = finishReason.String
 		e.RoutingReason = routingReason.String
 		entries = append(entries, e)

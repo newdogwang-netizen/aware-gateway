@@ -84,14 +84,6 @@ func main() {
 	mustRegister(registry, &taskrouter.Router{})
 	mustRegister(registry, &audit.Plugin{})
 
-	// After all plugins are registered, inject audit sinks into smart-router
-	// so decision model calls are recorded in the trace/billing pipeline.
-	for _, p := range registry.AllPlugins() {
-		if sr, ok := p.(*smartrouter.SmartRouter); ok {
-			sr.SetAuditSinks(registry.AuditSinks())
-		}
-	}
-
 	// Stop channel for background goroutines
 	stopChan := make(chan struct{})
 
@@ -105,6 +97,15 @@ func main() {
 	if err := registry.Init(pctx); err != nil {
 		slog.Error("plugin initialization failed", "error", err)
 		os.Exit(1)
+	}
+
+	// After Init(), inject audit sinks into smart-router so decision model
+	// calls are recorded in the trace/billing pipeline. Must be after Init()
+	// because AuditSinks() only returns non-nil sinks after plugins are initialized.
+	for _, p := range registry.AllPlugins() {
+		if sr, ok := p.(*smartrouter.SmartRouter); ok {
+			sr.SetAuditSinks(registry.AuditSinks())
+		}
 	}
 
 	// Build router with plugin middleware

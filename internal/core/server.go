@@ -269,6 +269,7 @@ func traceQueryHandler(reg *plugin.Registry) http.HandlerFunc {
 			TrialName: r.URL.Query().Get("trial"),
 			TaskName:  r.URL.Query().Get("task"),
 			StepName:  r.URL.Query().Get("step"),
+			SessionID: r.URL.Query().Get("session_id"),
 		}
 		// Also try chi URL param for /v1/traces/{trial}
 		if filter.TrialName == "" {

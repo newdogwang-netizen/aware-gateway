@@ -32,13 +32,17 @@ From 47 common tasks in Terminal-Bench 4.0 leaderboard data:
 | Total cost (330 trials) | $6,000 | $2,700 | est. $200-400 |
 | Avg cost per Both-Pass task | $21 | $262 | est. $5-15 |
 
-GLM-5.3 burns 10x more tokens than Opus 5 — lower unit price but higher
-total cost. GLM-5.3-flash at $0.07/$0.25 is the real cheap option: even
-at 10x token volume, total cost stays negligible.
+GLM-5.3's aggregate token count (8.7B) is ~1.34x Opus 5's (6.5B). However,
+on individual tasks GLM-5.3's cost is often 5-15x higher than Opus 5's
+(e.g. kv-live-surgery: $629 vs $15). This per-task cost explosion — not
+aggregate token ratio — is why GLM-5.3 is not a drop-in cost saver.
+GLM-5.3-flash at $0.07/$0.25 keeps total cost negligible even at high
+token volumes.
 
 **Note:** GLM-5.3-flash quality vs GLM-5.3 is an assumption, not verified.
-This experiment will test it indirectly: if all-flash passes tasks that
-GLM-5.3 failed, flash is at least as good.
+This experiment includes `all-glm-5.3` as a control strategy to test it.
+If flash and GLM-5.3 produce same pass/fail on these tasks, the
+assumption holds.
 
 ## Task Selection: Opus-Only, Stable Pass
 
@@ -53,15 +57,22 @@ To reduce noise, we prioritize tasks where Opus 5 passed consistently
 | gsea-proteomics | 4h | 2/2 | 0/2 | $2.47 | $11.97 | Opus stable, GLM 2 runs both fail |
 | vpp-loss-divergence | 2h | 1/1 | 0/2 | $7.80 | $166.25 | Opus 1 run, GLM 2 runs both fail |
 
-**Selected 5 tasks** (span difficulty, exclude exotic domains, favor stable Opus pass):
+**Selected 5 tasks** (prioritize Opus pass stability over domain generality;
+some tasks are domain-specific — see limitations):
 
-| # | Task | Expert | Opus pass/run | GLM fail/run | Why |
-|---|------|--------|--------------|-------------|-----|
-| 1 | html-js-filter | 0.75h | 2/2 | 0/1 | Easiest — if flash can't do it alone, can mix? |
-| 2 | gsea-proteomics | 4h | 2/2 | 0/2 | Opus stable 2/2, GLM stable 0/2 — clean contrast |
-| 3 | vpp-loss-divergence | 2h | 1/1 | 0/2 | Opus 1/1, GLM 0/2 — both small sample but GLM definitively failed |
-| 4 | kv-live-surgery | 4h | 3/3 | 0/1 | Opus very stable 3/3 — strongest signal |
-| 5 | cad-model | 2h | 4/4 | 0/1 | Opus most stable 4/4 — if flash+premium can't solve, nothing can |
+| # | Task | Expert | Opus pass/run | GLM fail/run | Domain | Why |
+|---|------|--------|--------------|-------------|--------|-----|
+| 1 | html-js-filter | 0.75h | 2/2 | 0/1 | Security | Easiest — if flash can't do it alone, can mix? |
+| 2 | gsea-proteomics | 4h | 2/2 | 0/2 | Biology* | Opus stable 2/2, GLM stable 0/2 — clean contrast |
+| 3 | vpp-loss-divergence | 2h | 1/1 | 0/2 | ML | Opus 1/1, GLM 0/2 — GLM definitively failed |
+| 4 | kv-live-surgery | 4h | 3/3 | 0/1 | Systems | Opus very stable 3/3 — strongest signal |
+| 5 | cad-model | 2h | 4/4 | 0/1 | Hardware* | Opus most stable 4/4 — if flash+premium can't solve, nothing can |
+
+*Domain-specific: gsea-proteomics (biology) and cad-model (hardware) are
+not "generic software" tasks. They were selected because they have the
+cleanest Opus-stable / GLM-fail signal. This is a trade-off: stability
+of the cross-model contrast vs. generality of the task. Results on these
+two tasks may not generalize to pure software tasks.
 
 Excluded: jax-speedrun-gpu (Opus only 1/2 — too random), live-database-cutover
 (GLM 0/5 but 8h runtime — too expensive for 3 runs), rs-archive-clone ($71/task
@@ -126,31 +137,33 @@ different system prompts.
 
 ### Fix 4: Harbor header configuration
 
-Harbor's terminus_2 agent sends `X-Session-ID` via `session_id_headers`.
-The gateway also needs `X-Trial-Name`, `X-Step-Name`, `X-Task-Name`
-for trace aggregation. We configure these via `extra_headers` in
-`llm_call_kwargs`:
+**Known limitation:** Harbor's `session_id_headers` sets which header name
+receives the session ID, but LiteLLM only sends `X-Session-ID` if the
+session_id was set at LLM construction time. The runner's later
+`agent.session_id` assignment may not propagate to LiteLLM's internal
+state. Static `HARBOR_TRIAL/HARBOR_STEP` values would mix all trials together.
 
-```bash
-harbor run \
-  --agent terminus-2 \
-  --model "auto" \
-  --agent-kwarg "api_base=http://localhost:12026/v1" \
-  --agent-kwarg "session_id_headers=[\"X-Session-ID\"]" \
-  --agent-kwarg "llm_call_kwargs={\"extra_headers\":{\"X-Trial-Name\":\"HARBOR_TRIAL\",\"X-Step-Name\":\"HARBOR_STEP\",\"X-Task-Name\":\"HARBOR_TASK\"}}" \
-  --agent-env "OPENAI_API_KEY=*** \
-  ...
-```
+**Approach for this experiment:**
+1. Use `X-Session-ID` as the trial identifier (Harbor does send this)
+2. The gateway already extracts `SessionID` from `X-Session-ID` header
+3. Query traces via `/v1/traces` and filter by `session_id` field in the
+   audit SQLite directly (bypass `/v1/traces/{trial}/summary` which
+   filters by `TrialName`)
+4. For per-trial aggregation, write a post-processing script that:
+   - Reads all traces from `/v1/traces?limit=1000`
+   - Groups by `session_id` (which Harbor sets per trial)
+   - Sums cost + tokens per session_id
+   - Joins with harbor's trial results (reward.txt)
 
-**Note:** Harbor's trial/step/task names are generated at runtime, not
-known in advance. The above sets static placeholder values. For proper
-per-trial correlation, we need to verify whether Harbor's session_id
-mechanism can carry trial-specific values, or modify the gateway to
-extract trial info from the session ID format (`{trial_name}__agent`).
+**Alternative (if Harbor supports it):** Configure
+`llm_call_kwargs.extra_headers` with `X-Trial-Name` etc. and verify
+whether Harbor propagates runtime trial names. If not, fall back to
+session_id grouping.
 
-**Fallback:** If Harbor can't send per-trial headers, we use
-`X-Session-ID` (which Harbor does send) as the trial identifier in
-trace queries. The gateway already extracts SessionID from this header.
+**Code change needed in audit plugin:** Add `SessionID` to `TraceFilter`
+and the SQL query so `/v1/traces?session_id=XXX` works as a query
+parameter. Currently `TraceFilter` only has `TrialName`, `TaskName`,
+`StepName`, `Limit` — no `SessionID` field.
 
 ## Execution
 
@@ -211,16 +224,15 @@ This bounds cost while still giving the agent a real chance to solve:
 
 ## Success Criteria (strengthened)
 
-1. **smart-router resolution rate >= all-premium - 1** (within 1 task of premium)
-2. **smart-router total cost <= 30% of all-premium total cost**
+1. **smart_router_passes >= premium_passes - 1** (within 1 task of premium, out of 15 trials)
+2. **smart_router_total_cost <= 30% of premium_total_cost**
 3. **At least 1 task where smart-router passes but all-flash fails** (upgrade value)
-4. **all-flash vs all-glm-5.3 resolution rate within 1 task** (flash ≈ GLM-5.3 assumption check)
+4. **all_flash_passes vs all_glm53_passes within 1** (flash ≈ GLM-5.3 assumption check)
 5. **Per-turn logs show differentiated selection** (not all-flash or all-premium)
-6. **Decision model cost < 5% of total cost** (routing overhead negligible)
+6. **Decision model token usage tracked** (step=router-decision in traces with token counts)
 
-Report all results with n=15 and Wilson 95% CI. If criteria not met,
-report honestly as "smart-router did not improve over all-flash" or
-"smart-router cost exceeded 30% of premium".
+Report all results with n=15 and Wilson 95% CI for resolution rate.
+If criteria not met, report honestly as negative result.
 
 ## Risks and Mitigations
 
@@ -238,10 +250,13 @@ report honestly as "smart-router did not improve over all-flash" or
 ## What This Experiment Does NOT Prove
 
 - Does not prove smart-router is universally better than fixed-model strategies
-- Does not prove flash = GLM-5.3 (only tests on 5 tasks)
+- Does not prove flash = GLM-5.3 (only tests on 5 tasks, 2 of which are domain-specific)
 - Does not prove the decision model makes optimal choices (only that its choices work)
 - Does not account for agent loop variance (3 runs reduce but don't eliminate noise)
 - Results are specific to these 5 tasks + terminus_2 agent + OpenRouter providers
+- gsea-proteomics and cad-model are domain-specific — results may not generalize to pure software tasks
+- Sol ≠ Opus — tasks selected on Opus data may behave differently with Sol as premium baseline
+- OpenRouter pricing may change — snapshot /v1/models before running to lock prices
 
 ## Blog Update Plan
 

@@ -52,6 +52,11 @@ type Config struct {
 	IncludeMessageCount  bool         `yaml:"include_message_count" json:"include_message_count"`
 	CacheTTLSeconds      int          `yaml:"cache_ttl_seconds" json:"cache_ttl_seconds"`   // default 300
 	CacheMaxEntries      int          `yaml:"cache_max_entries" json:"cache_max_entries"`   // default 10000
+	// Decision model pricing ($/M tokens). For self-hosted vLLM, leave as 0
+	// (cost is GPU amortization, not per-token). For commercial decision
+	// models, set these to enable cost tracking in audit trail.
+	DecisionInputPrice   float64      `yaml:"decision_input_price" json:"decision_input_price"`
+	DecisionOutputPrice  float64      `yaml:"decision_output_price" json:"decision_output_price"`
 	Models               []ModelEntry `yaml:"models" json:"models"`                         // model menu
 }
 
@@ -187,8 +192,8 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 	// Build prompt
 	prompt := s.buildPrompt(parsed)
 
-	// Call decision model
-	decision, err := s.callDecisionModel(prompt)
+	// Call decision model (pass req for trial/step/task header extraction)
+	decision, err := s.callDecisionModel(prompt, req)
 	if err != nil {
 		s.logger.Warn("smart-router: decision model failed, falling back to task-router",
 			"error", err,
@@ -311,7 +316,10 @@ func sortByCost(models []ModelEntry) {
 }
 
 // callDecisionModel sends the routing prompt to the decision LLM.
-func (s *SmartRouter) callDecisionModel(prompt string) (*DecisionResponse, error) {
+// The request is passed to extract trial/step/task correlation headers
+// for the audit record, and to calculate decision cost from the
+// decision model pricing config.
+func (s *SmartRouter) callDecisionModel(prompt string, req *http.Request) (*DecisionResponse, error) {
 	// Build request body. chat_template_kwargs.enable_thinking=false
 	// disables Qwen3.8's thinking mode for fast JSON-only output (~500ms vs ~10s).
 	body, _ := json.Marshal(map[string]any{
@@ -325,16 +333,16 @@ func (s *SmartRouter) callDecisionModel(prompt string) (*DecisionResponse, error
 	})
 
 	url := strings.TrimRight(s.cfg.Endpoint, "/") + "/chat/completions"
-	req, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
+	httpReq, err := http.NewRequest("POST", url, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Type", "application/json")
 	if s.cfg.APIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+s.cfg.APIKey)
+		httpReq.Header.Set("Authorization", "Bearer "+s.cfg.APIKey)
 	}
 
-	resp, err := s.client.Do(req)
+	resp, err := s.client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("call decision model: %w", err)
 	}
@@ -366,8 +374,31 @@ func (s *SmartRouter) callDecisionModel(prompt string) (*DecisionResponse, error
 
 	content := result.Choices[0].Message.Content
 
+	// Calculate decision model cost from pricing config.
+	// The decision model (Qwen3.8-27B) runs on local vLLM — its cost
+	// is effectively zero (self-hosted GPU), but we track token usage
+	// for accounting. If a commercial decision model is used, set
+	// DecisionInputPrice/DecisionOutputPrice in config.
+	decisionCost := 0.0
+	if s.cfg.DecisionInputPrice > 0 || s.cfg.DecisionOutputPrice > 0 {
+		const perM = 1_000_000.0
+		decisionCost = float64(result.Usage.PromptTokens)*s.cfg.DecisionInputPrice/perM +
+			float64(result.Usage.CompletionTokens)*s.cfg.DecisionOutputPrice/perM
+	}
+
 	// Record decision model cost in audit trail.
-	// This ensures /v1/traces/{trial}/summary includes routing overhead.
+	// Extract trial/step/task from the original request headers so
+	// the decision call is correlated with the same trial in summary.
+	trialName := req.Header.Get("X-Trial-Name")
+	taskName := req.Header.Get("X-Task-Name")
+	sessionID := req.Header.Get("X-Session-ID")
+	// Use "router-decision" as the step name so it's distinguishable
+	// from the actual agent turn in trace summaries.
+	decisionStep := "router-decision"
+	if sn := req.Header.Get("X-Step-Name"); sn != "" {
+		decisionStep = "router-decision-" + sn
+	}
+
 	for _, sink := range s.auditSinks {
 		sink.Record(&plugin.AuditRecord{
 			Timestamp:     time.Now(),
@@ -381,7 +412,11 @@ func (s *SmartRouter) callDecisionModel(prompt string) (*DecisionResponse, error
 			PromptTokens:  result.Usage.PromptTokens,
 			CompTokens:    result.Usage.CompletionTokens,
 			TotalTokens:   result.Usage.TotalTokens,
-			StepName:      "router-decision",
+			Cost:          decisionCost,
+			StepName:      decisionStep,
+			TaskName:      taskName,
+			TrialName:     trialName,
+			SessionID:     sessionID,
 			RoutingReason: "smart-router decision call",
 		})
 	}

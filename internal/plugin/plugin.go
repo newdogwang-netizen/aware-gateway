@@ -120,10 +120,11 @@ type HealthReporter interface {
 
 // TraceFilter holds query parameters for trace lookup.
 type TraceFilter struct {
-	TrialName string
-	TaskName  string
-	StepName  string
-	Limit     int
+	TrialName  string
+	TaskName   string
+	StepName   string
+	SessionID  string
+	Limit      int
 }
 
 // TraceEntry is a single LLM call record returned by /v1/traces.
@@ -137,6 +138,7 @@ type TraceEntry struct {
 	StepName      string `json:"step_name,omitempty"`
 	TaskName      string `json:"task_name,omitempty"`
 	TrialName     string `json:"trial_name,omitempty"`
+	SessionID     string `json:"session_id,omitempty"`
 	PromptTokens  int    `json:"prompt_tokens"`
 	CompTokens    int    `json:"completion_tokens"`
 	TotalTokens   int    `json:"total_tokens"`
