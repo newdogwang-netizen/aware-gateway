@@ -57,12 +57,14 @@ type Config struct {
 
 // SmartRouter implements plugin.RequestRouter.
 type SmartRouter struct {
-	cfg      Config
-	menu     []ModelEntry
-	menuJSON string // pre-serialized menu for prompt
-	client   *http.Client
-	cache    *DecisionCache
-	logger   *slog.Logger
+	cfg        Config
+	menu       []ModelEntry
+	menuJSON   string // pre-serialized menu for prompt
+	client     *http.Client
+	cache      *DecisionCache
+	logger     *slog.Logger
+	ctx        *plugin.Context
+	auditSinks []plugin.AuditSink
 }
 
 func (s *SmartRouter) Name() string { return "smart-router" }
@@ -71,6 +73,7 @@ func (s *SmartRouter) Name() string { return "smart-router" }
 func (s *SmartRouter) Priority() int { return 50 }
 
 func (s *SmartRouter) Init(ctx *plugin.Context) error {
+	s.ctx = ctx
 	s.logger = ctx.Logger
 
 	cfg, ok := config.PluginConfig[Config](ctx.Config, "smart-router")
@@ -85,6 +88,10 @@ func (s *SmartRouter) Init(ctx *plugin.Context) error {
 		s.logger.Info("smart-router: disabled in config")
 		return nil
 	}
+
+	// Capture audit sinks for decision cost tracking.
+	// Registry is available via the Registry type, but Context doesn't expose it.
+	// We'll set audit sinks from main.go after registration.
 
 	// Apply defaults
 	if cfg.MaxTokens == 0 {
@@ -136,6 +143,12 @@ func (s *SmartRouter) Init(ctx *plugin.Context) error {
 
 func (s *SmartRouter) Close() error { return nil }
 
+// SetAuditSinks allows main.go to inject audit sinks after registry init,
+// so decision model calls can be recorded in the trace/billing pipeline.
+func (s *SmartRouter) SetAuditSinks(sinks []plugin.AuditSink) {
+	s.auditSinks = sinks
+}
+
 // Route implements plugin.RequestRouter.
 func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDecision, error) {
 	if !s.cfg.Enabled || len(s.menu) == 0 {
@@ -158,7 +171,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 	}
 
 	// Check cache
-	cacheKey := s.cache.Key(s.menu, parsed.MessageCount, parsed.LatestUserMsg)
+	cacheKey := s.cache.Key(s.menu, parsed.MessageCount, parsed.SystemMsg, parsed.LatestUserMsg)
 	if cached, hit := s.cache.Get(cacheKey); hit {
 		s.logger.Debug("smart-router: cache hit",
 			"model", cached.Model,
@@ -337,6 +350,11 @@ func (s *SmartRouter) callDecisionModel(prompt string) (*DecisionResponse, error
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens       int `json:"total_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
@@ -347,6 +365,27 @@ func (s *SmartRouter) callDecisionModel(prompt string) (*DecisionResponse, error
 	}
 
 	content := result.Choices[0].Message.Content
+
+	// Record decision model cost in audit trail.
+	// This ensures /v1/traces/{trial}/summary includes routing overhead.
+	for _, sink := range s.auditSinks {
+		sink.Record(&plugin.AuditRecord{
+			Timestamp:     time.Now(),
+			Method:        "POST",
+			Path:          "/v1/chat/completions",
+			Endpoint:      s.cfg.Endpoint,
+			Status:        200,
+			Model:         s.cfg.Model,
+			RoutedModel:   s.cfg.Model,
+			Pool:          "decision-model",
+			PromptTokens:  result.Usage.PromptTokens,
+			CompTokens:    result.Usage.CompletionTokens,
+			TotalTokens:   result.Usage.TotalTokens,
+			StepName:      "router-decision",
+			RoutingReason: "smart-router decision call",
+		})
+	}
+
 	return parseDecisionJSON(content)
 }
 
@@ -489,6 +528,14 @@ func (s *SmartRouter) buildPrompt(p *parsedRequest) string {
 	sb.WriteString(fmt.Sprintf("Conversation depth: %d messages, ~%d input tokens\n\n", p.MessageCount, p.EstimatedTokens))
 
 	// Request preview — give enough context to judge complexity
+	if s.cfg.IncludeSystemPrompt && p.SystemMsg != "" {
+		sys := p.SystemMsg
+		if len(sys) > 200 {
+			sys = sys[:200] + "..."
+		}
+		sb.WriteString(fmt.Sprintf("System: %s\n", sys))
+	}
+
 	if p.LatestUserMsg != "" {
 		msg := p.LatestUserMsg
 		if len(msg) > s.cfg.PromptPreviewChars {

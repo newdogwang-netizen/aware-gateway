@@ -41,8 +41,10 @@ func NewDecisionCache(maxSize int, ttl time.Duration) *DecisionCache {
 	}
 }
 
-// Key generates a cache key from the model menu, message count, and latest user message.
-func (c *DecisionCache) Key(menu []ModelEntry, msgCount int, latestMsg string) string {
+// Key generates a cache key from the model menu, message count, system message,
+// and latest user message. Including system message prevents cross-task cache
+// pollution when different tasks share similar user messages but different system prompts.
+func (c *DecisionCache) Key(menu []ModelEntry, msgCount int, systemMsg, latestMsg string) string {
 	// Sort model IDs for stable key
 	ids := make([]string, len(menu))
 	for i, m := range menu {
@@ -55,9 +57,14 @@ func (c *DecisionCache) Key(menu []ModelEntry, msgCount int, latestMsg string) s
 		h.Write([]byte(id))
 		h.Write([]byte{0})
 	}
-	// Message count as a factor — different conversation depths may need different models
+	// Message count as a factor
 	countBytes := []byte{byte(msgCount >> 24), byte(msgCount >> 16), byte(msgCount >> 8), byte(msgCount)}
 	h.Write(countBytes)
+	// System message (truncated) — different system = different task context
+	if len(systemMsg) > 200 {
+		systemMsg = systemMsg[:200]
+	}
+	h.Write([]byte(systemMsg))
 	// First 500 chars of latest user message
 	if len(latestMsg) > 500 {
 		latestMsg = latestMsg[:500]

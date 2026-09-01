@@ -84,6 +84,14 @@ func main() {
 	mustRegister(registry, &taskrouter.Router{})
 	mustRegister(registry, &audit.Plugin{})
 
+	// After all plugins are registered, inject audit sinks into smart-router
+	// so decision model calls are recorded in the trace/billing pipeline.
+	for _, p := range registry.AllPlugins() {
+		if sr, ok := p.(*smartrouter.SmartRouter); ok {
+			sr.SetAuditSinks(registry.AuditSinks())
+		}
+	}
+
 	// Stop channel for background goroutines
 	stopChan := make(chan struct{})
 
