@@ -121,11 +121,20 @@ Excluded: jax-speedrun-gpu (Opus only 1/2 — too random), live-database-cutover
 
 ## Strategies (3 per task, 3 runs each)
 
-| Strategy | Model Sent | Price ($/M in/out) | Purpose |
-|----------|-----------|-------------------|---------|
-| all-premium | openai/gpt-5.6-sol | $2.00 / $10.00 | Premium baseline (TB #4, 37.3%) |
-| all-flash | z-ai/glm-5.3-flash | $0.07 / $0.25 | Ultra-cheap, expected to fail on some |
-| smart-router | model="auto" | varies | LLM decides per turn |
+| Strategy | Gateway Model | Harbor/LiteLLM Model | Price ($/M in/out) | Purpose |
+|----------|---------------|---------------------|-------------------|---------|
+| all-premium | openai/gpt-5.6-sol | openai/openai/gpt-5.6-sol | $2.00 / $10.00 | Premium baseline (TB #4, 37.3%) |
+| all-flash | z-ai/glm-5.3-flash | openai/z-ai/glm-5.3-flash | $0.07 / $0.25 | Ultra-cheap, expected to fail on some |
+| smart-router | auto | openai/auto | varies | LLM decides per turn |
+
+Harbor uses LiteLLM locally, so every Harbor `--model` value must include the
+`openai/` provider prefix for the gateway's OpenAI-compatible endpoint. The
+gateway treats `openai/auto` as the smart-router trigger and canonicalizes
+explicit fixed-model Harbor IDs through `model_map`, for example
+`openai/z-ai/glm-5.3-flash` to `z-ai/glm-5.3-flash` and
+`openai/openai/gpt-5.6-sol` to `openai/gpt-5.6-sol`. Explicit fixed-model
+baselines bypass Qwen3; only `openai/auto` should create `router-decision`
+traces.
 
 The removed GLM-5.3 fixed-model strategy is not a baseline in the run
 matrix, and it is also excluded from the smart-router decision menu for
@@ -212,10 +221,23 @@ different system prompts.
 
 Qwen3 does not see the Terminal-Bench verifier, repository files, hidden
 task state, or historical pass/fail table. Its routing decision is based
-only on the prompt assembled by `smart-router` for the current LLM call:
+only on the prompt assembled by `smart-router` for the current LLM call,
+except for the deterministic guardrail below:
+
+- Harbor task-completion confirmation is routed directly to the strongest
+  configured menu model. The confirmation asks the agent to emit exact
+  `task_complete` protocol output; a malformed response can lose reward after
+  the solution is already complete. This is logged through the normal agent
+  call audit record with a `smart-router guardrail` reason and does not count
+  as a Qwen3 decision call.
+
+For ordinary `auto` calls, Qwen3 sees:
 
 - Routing instruction: choose the lowest-cost model likely to succeed for
-  this one call; there is no automatic retry or second chance.
+  this one call while optimizing final task quality per dollar, not speed.
+  Ordinary terminal-agent work is iterative, so the stronger model should be
+  used only when it is likely to materially improve final success or avoid
+  expensive rework.
 - Model menu: candidate model IDs, pools, input/output prices,
   capabilities, and context windows, sorted cheapest first.
 - Turn phase inferred from message count:
@@ -223,13 +245,27 @@ only on the prompt assembled by `smart-router` for the current LLM call:
 - Conversation depth: message count and rough input token estimate.
 - Request preview: first 200 chars of the system message and up to
   2000 chars of the latest user message.
-- Guidelines: low-risk comprehension, summaries, simple formatting,
-  routine planning, or short answers use the cheapest model; nontrivial
-  code changes, failed-test debugging, multi-file/stateful systems,
-  security-sensitive logic, performance/concurrency/data-corruption work,
-  specialized domains, or fragile final fixes use the strongest model;
-  judge the underlying task risk, not only the latest message wording;
-  prefer cheaper only when expected correctness is close.
+- Guidelines: reversible progress — comprehension, environment inspection,
+  command-output summaries, routine planning, short answers, and drafting
+  low-risk commands/tests — uses the cheapest model. Qwen3 must not upgrade
+  solely because the task domain mentions security, performance, data, or
+  systems work; it should upgrade when the current turn changes
+  safety-critical logic, diagnoses failed tests, handles subtle edge cases,
+  or makes a hard-to-recover decision. High-leverage turns — nontrivial core
+  code changes, failed-test debugging, multi-file/stateful changes,
+  concurrency/performance/data-corruption risks, specialized domain
+  reasoning, exact agent-control protocols, or fragile final fixes — use the
+  strongest model. Normal terminal-agent JSON replies and shell-command batches
+  are not by themselves an upgrade reason; they are the ordinary iterative
+  protocol unless the turn is final submission or otherwise hard to recover.
+  Finalization or submission turns after local checks pass also use the
+  strongest model, even when the latest message looks like a simple
+  confirmation, because malformed `task_complete` output or a missed last check
+  loses the whole trial. It must judge both the underlying task and current
+  turn: a hard task can still have cheap observation/planning turns, while a
+  short follow-up can require the strongest model if the state is complex.
+  Prefer the cheaper model when it can safely advance the task; choose the
+  stronger model when its expected quality gain justifies the much higher cost.
 - Output contract: JSON only, `{"model":"id","reason":"why"}`.
 
 Decision call settings are part of the experimental condition:
@@ -242,6 +278,25 @@ For the experiment report, treat `reason` as the model's stated rationale,
 not ground truth. The audit log should be used to check whether Qwen3
 actually differentiated turns and whether those choices improved pass rate
 or cost.
+
+### Fix 4a: Completion confirmation guardrail
+
+Harbor/Terminus2 requires a second confirmation after the agent first marks a
+task complete. The prompt contains:
+
+- "Are you sure you want to mark the task as complete?"
+- `"task_complete": true` for JSON mode, or
+  `<task_complete>true</task_complete>` for XML mode
+
+This is a high-impact control-protocol turn, not a simple chat response. If a
+cheap model fails to emit the exact confirmation, the trial can keep running or
+lose reward even though the solution has passed local checks. Therefore
+smart-router bypasses Qwen3 for this exact confirmation message and routes to
+the strongest configured menu model, currently `openai/gpt-5.6-sol`.
+
+The guardrail is part of the declared routing policy for V3. It should be
+reported separately from Qwen3 choices by filtering `routing_reason` beginning
+with `smart-router guardrail`.
 
 ### Fix 4: Opus fallback for decision failures
 
@@ -257,34 +312,56 @@ is not evidence that Qwen3 made a good routing decision; it is a reliability
 guardrail. Report fallback count and cost separately, and treat frequent
 fallbacks as a router availability problem.
 
-### Fix 5: Harbor header configuration
+### Fix 5: Harbor session attribution patch
 
-**Known limitation:** In the local Harbor install, `session_id_headers` is
-not present. Terminus2 sends `X-Session-ID` from LiteLLM's construction-time
-`session_id`; Harbor later sets `agent.session_id = {trial_name}__agent`,
-but that assignment may not propagate into LiteLLM's internal session ID.
-Static `HARBOR_TRIAL/HARBOR_STEP` values would mix all trials together.
+**Chosen approach:** patch local Harbor/Terminus2 before the formal matrix.
+Timestamp joins are acceptable only as a forensic fallback, not as the primary
+measurement path, because they can silently misattribute traces under retries,
+summarization calls, or any accidental overlap.
 
-**Approach for this experiment:**
-1. Run a single cheap canary trial before the 45-trial matrix.
-2. Inspect `/v1/traces?limit=1000` and verify whether records contain
-   `trial_name`, `session_id`, `task_name`, and `router-decision-*` steps.
-3. If `X-Trial-Name` is present, use `/v1/traces/{trial}/summary`.
-4. If only `X-Session-ID` is present, use `/v1/traces?session_id=...` and
-   group by `session_id`.
-5. If neither is per-trial unique, do not run the full experiment. Instead,
-   either patch Harbor/Terminus2 to pass the trial name into the Terminus2
-   constructor as `session_id`, or run one-attempt jobs with unique static
-   `session_id` / `extra_headers` per trial.
+**Observed break:** the local `lite_llm.py` already writes its `_session_id` to
+both `extra_body.session_id` and `X-Session-ID`. The missing link is later:
+`harbor/trial/trial.py` sets `agent.session_id = {trial_name}__agent` after
+Terminus2 constructs LiteLLM, so LiteLLM can keep a construction-time
+`session_id` that is empty or random.
+
+**Required local patch:** in the installed Harbor file
+`harbor/agents/terminus_2/terminus_2.py`, `_reset_per_run_state()` must:
+
+1. Prefer the runtime `self.session_id` set by `trial.py`.
+2. Fall back to the constructor-provided `session_id`.
+3. Generate a UUID only if neither exists.
+4. Copy the selected value into `self._llm._session_id` before the first chat
+   call of the run.
 
 **Implemented gateway support:** `/v1/traces?session_id=XXX` is supported
-by `TraceFilter.SessionID` and the audit SQL query. The remaining risk is
-whether Harbor sends a per-trial value to the gateway.
+by `TraceFilter.SessionID` and the audit SQL query. The gateway also
+normalizes body-derived `session_id` back into internal headers before router
+hooks run, so smart-router decision traces can share the same session group.
+Before proxying to commercial upstreams, the gateway strips the internal
+`session_id` field from the JSON body and removes correlation headers.
 
 **Canary acceptance:** one trial must show all agent LLM calls and all
 `router-decision-*` calls grouped under the same unique `trial_name` or
 `session_id`. If this fails, cost and model-selection analysis will be
 misattributed.
+
+### Fix 6: Streaming usage accounting
+
+Some Harbor/Terminus2 calls can produce model responses that are rejected by
+the agent parser and therefore do not appear as successful agent steps in
+`trajectory.json`. They still consume tokens and must count toward the
+strategy's cost.
+
+For OpenAI-compatible chat requests with `stream: true`, the gateway now adds
+`stream_options.include_usage: true` while preserving any existing
+`stream_options`. The response writer parses the final SSE usage chunk and
+records prompt/completion/total tokens and recomputed gateway cost in the audit
+trace. Non-streaming requests are unchanged.
+
+If a provider does not return streaming usage despite the option, report the
+affected strategy's cost as a lower bound and do not claim a precise
+cost-saving ratio for those rows.
 
 ### Current Runner Status
 
@@ -309,6 +386,8 @@ correlation and the post-processing path is working.
 - OpenRouter API key in gateway config
 - Docker available for harbor trial environments
 - SSH tunnels to Qwen/DiffusionGemma VMs active
+- Local `terminal-bench/` task directory present; snapshot task file hashes
+  before the run instead of depending on a mutable registry tag.
 
 ### Experiment Steps
 
@@ -332,6 +411,12 @@ git rev-parse HEAD > "$ARTIFACT_DIR/git-sha.txt"
 git diff --stat > "$ARTIFACT_DIR/git-diff-stat.txt"
 git diff > "$ARTIFACT_DIR/git-diff.patch"
 cp configs/gateway-openrouter.yaml "$ARTIFACT_DIR/gateway-openrouter.yaml"
+find terminal-bench -maxdepth 2 -name task.toml -print | sort \
+  > "$ARTIFACT_DIR/terminal-bench-task-files.txt"
+find terminal-bench -maxdepth 2 -type f \
+  \( -name task.toml -o -name instruction.md -o -name README.md \) -print0 \
+  | sort -z | xargs -0 sha256sum \
+  > "$ARTIFACT_DIR/terminal-bench-task-files.sha256"
 
 make docker
 docker image inspect aware-gateway:latest > "$ARTIFACT_DIR/docker-image.json"
@@ -380,6 +465,7 @@ curl -sf http://localhost:12026/v1/chat/completions \
     "max_tokens": 120
   }' > "$ARTIFACT_DIR/direct-canary-response.json"
 
+sleep 5
 curl -sf "http://localhost:12026/v1/traces/$TRIAL/summary" \
   > "$ARTIFACT_DIR/direct-canary-summary.json"
 curl -sf "http://localhost:12026/v1/traces?session_id=$SESSION&limit=1000" \
@@ -397,7 +483,8 @@ Acceptance:
 #### Step 4: Harbor canary
 
 Run one cheap `smart-router` Terminal-Bench attempt. The goal is trace/reward
-alignment, not benchmark performance.
+alignment, not benchmark performance. Precondition: the Harbor session
+attribution patch in Fix 5 is applied and Python syntax-checks cleanly.
 
 For Docker-based Harbor agents on Linux, start with the Docker bridge host IP:
 
@@ -416,12 +503,12 @@ export GW_BASE="http://127.0.0.1:12026/v1"
 Then run:
 
 ```bash
-harbor run \
+AWARE_HARBOR_LLM_ATTEMPTS=1 harbor run \
   --job-name "$EXP_ID-canary-smart-router-html-js-filter" \
   --jobs-dir "$ARTIFACT_DIR/jobs" \
   --agent terminus-2 \
-  --model "auto" \
-  --dataset "terminal-bench/terminal-bench@4.0" \
+  --model "openai/auto" \
+  --path terminal-bench \
   --include-task-name "html-js-filter" \
   --n-attempts 1 \
   --n-concurrent 1 \
@@ -430,10 +517,21 @@ harbor run \
   --allow-environment-host "$GW_HOST" \
   --agent-kwarg "api_base=$GW_BASE" \
   --agent-env "OPENAI_API_KEY=dummy" \
+  --agent-env "AWARE_HARBOR_LLM_ATTEMPTS=1" \
   --yes | tee "$ARTIFACT_DIR/harbor-canary.log"
 
+sleep 5
 curl -sf "http://localhost:12026/v1/traces?limit=10000" \
   > "$ARTIFACT_DIR/harbor-canary-traces.json"
+
+python3 scripts/analyze_v3_results.py \
+  --artifact-dir "$ARTIFACT_DIR" \
+  --gateway-config configs/gateway-openrouter.yaml \
+  --traces-json "$ARTIFACT_DIR/harbor-canary-traces.json" \
+  --job-glob "$EXP_ID-canary-smart-router-html-js-filter" \
+  --expected-rows 1 \
+  --strict \
+  --output "$ARTIFACT_DIR/harbor-canary-analysis.csv"
 ```
 
 Acceptance:
@@ -459,26 +557,26 @@ import sys
 seed = 20260901
 tasks = [
     "html-js-filter",
-    "gsea-proteomics",
     "vpp-loss-divergence",
+    "gsea-proteomics",
     "kv-live-surgery",
     "cad-model",
 ]
 strategies = [
-    ("all-premium", "openai/gpt-5.6-sol"),
-    ("all-flash", "z-ai/glm-5.3-flash"),
-    ("smart-router", "auto"),
+    ("all-premium", "openai/gpt-5.6-sol", "openai/openai/gpt-5.6-sol"),
+    ("all-flash", "z-ai/glm-5.3-flash", "openai/z-ai/glm-5.3-flash"),
+    ("smart-router", "auto", "openai/auto"),
 ]
 
 random.seed(seed)
-writer = csv.writer(sys.stdout)
-writer.writerow(["task", "attempt", "strategy", "model"])
+writer = csv.writer(sys.stdout, lineterminator="\n")
+writer.writerow(["task", "attempt", "strategy", "gateway_model", "harbor_model"])
 for task in tasks:
     for attempt in range(1, 4):
         block = strategies[:]
         random.shuffle(block)
-        for strategy, model in block:
-            writer.writerow([task, attempt, strategy, model])
+        for strategy, gateway_model, harbor_model in block:
+            writer.writerow([task, attempt, strategy, gateway_model, harbor_model])
 PY
 
 echo 20260901 > "$ARTIFACT_DIR/random-seed.txt"
@@ -488,30 +586,51 @@ echo 20260901 > "$ARTIFACT_DIR/random-seed.txt"
 
 Run one Harbor job per row so each attempt can be traced and recovered
 independently. Keep `--n-concurrent 1`; speed is not an evaluation target.
+The checked-in helper `scripts/run_v3_matrix.sh` implements this loop with
+per-job strict aggregation, resume support, provider-5xx fail-fast monitoring,
+a cumulative cost hard stop, and the Opus fallback pause gate.
 
 ```bash
 tail -n +2 "$ARTIFACT_DIR/run-order.csv" |
-while IFS=, read -r task attempt strategy model; do
+while IFS=, read -r task attempt strategy gateway_model harbor_model; do
   JOB="$EXP_ID-${strategy}-${task}-a${attempt}"
 
-  harbor run \
+  AWARE_HARBOR_LLM_ATTEMPTS=1 harbor run \
     --job-name "$JOB" \
     --jobs-dir "$ARTIFACT_DIR/jobs" \
     --agent terminus-2 \
-    --model "$model" \
-    --dataset "terminal-bench/terminal-bench@4.0" \
+    --model "$harbor_model" \
+    --path terminal-bench \
     --include-task-name "$task" \
     --n-attempts 1 \
     --n-concurrent 1 \
     --timeout-multiplier 0.3 \
     --allow-agent-host "$GW_HOST" \
-    --allow-environment-host "$GW_HOST" \
-    --agent-kwarg "api_base=$GW_BASE" \
-    --agent-env "OPENAI_API_KEY=dummy" \
-    --yes | tee "$ARTIFACT_DIR/${JOB}.log"
+	    --allow-environment-host "$GW_HOST" \
+	    --agent-kwarg "api_base=$GW_BASE" \
+	    --agent-env "OPENAI_API_KEY=dummy" \
+	    --agent-env "AWARE_HARBOR_LLM_ATTEMPTS=1" \
+	    --yes | tee "$ARTIFACT_DIR/${JOB}.log"
 
+  # The checked-in runner additionally polls the current trial's
+  # `session_id` traces while Harbor is running. If an agent model call returns
+  # `status >= 500`, the runner records `early-provider-failure.json`,
+  # interrupts Harbor, and aggregates the trial as `reward=0`.
+  # `AWARE_HARBOR_LLM_ATTEMPTS=1` disables Harbor/LiteLLM automatic LLM retries
+  # for this experiment so provider failures are not hidden or multiplied.
+
+  sleep 5
   curl -sf "http://localhost:12026/v1/traces?limit=10000" \
     > "$ARTIFACT_DIR/traces-after-${JOB}.json"
+
+  python3 scripts/analyze_v3_results.py \
+    --artifact-dir "$ARTIFACT_DIR" \
+    --gateway-config configs/gateway-openrouter.yaml \
+    --traces-json "$ARTIFACT_DIR/traces-after-${JOB}.json" \
+    --job-glob "$JOB" \
+    --expected-rows 1 \
+    --strict \
+    --output "$ARTIFACT_DIR/${JOB}-analysis.csv"
 done
 ```
 
@@ -519,27 +638,47 @@ done
 
 Pause the run and diagnose before continuing if any of these happen:
 - A completed Harbor trial cannot be matched to a unique trace group.
+- Gateway trace agent-call count materially exceeds trajectory agent-step count
+  while trace token usage is zero, which would undercount malformed responses.
 - `anthropic/claude-opus-5` appears in more than one smart-router trial.
-- Any single trial exceeds the expected per-trial cost range by more than 2x.
+- Any single trial exceeds the expected per-trial cost range by more than 2x
+  in Harbor `agent_result.cost_usd` or recomputed trajectory cost.
 - Qwen3 decision calls time out repeatedly or return unknown models.
+- Harbor task-completion confirmation repeats after local checks have passed,
+  indicating the completion guardrail is missing or ineffective.
 - OpenRouter model availability or price snapshot changes materially.
 
 #### Step 8: Aggregate and analyze
 
 The aggregation output must have one row per formal trial:
 
+```bash
+sleep 5
+curl -sf "http://localhost:12026/v1/traces?limit=100000" \
+  > "$ARTIFACT_DIR/traces-final.json"
+
+python3 scripts/analyze_v3_results.py \
+  --artifact-dir "$ARTIFACT_DIR" \
+  --gateway-config configs/gateway-openrouter.yaml \
+  --traces-json "$ARTIFACT_DIR/traces-final.json" \
+  --job-glob "$EXP_ID-*-a*" \
+  --expected-rows 45 \
+  --strict \
+  --output "$ARTIFACT_DIR/results.csv"
+```
+
 ```text
-experiment_id,task,attempt,strategy,model_sent,reward,total_cost_usd,
-prompt_tokens,completion_tokens,total_tokens,agent_call_count,
-decision_call_count,sol_upgrade_rate,opus_fallback_rate,cache_hit_rate,
-duration_seconds,trace_key
+experiment_id,task,attempt,strategy,model_sent,agent_models,reward,total_cost_usd,
+agent_cost_usd,decision_cost_usd,prompt_tokens,completion_tokens,total_tokens,agent_call_count,
+decision_call_count,guardrail_call_count,sol_upgrade_rate,opus_fallback_rate,cache_hit_rate,
+duration_seconds,trace_key,failure_kind,exception_type,cost_source
 ```
 
 Report:
 - Aggregate pass rate, total cost, cost per successful pass, and Wilson 95% CI.
 - Paired per-task pass/cost deltas against `all-premium` and `all-flash`.
 - Smart-router model breakdown: flash calls, Sol upgrade calls, Opus fallback
-  calls, and decision-call overhead.
+  calls, completion-guardrail calls, and decision-call overhead.
 - Negative findings explicitly, especially if all-flash is sufficient or if
   smart-router quality depends on Opus fallback rather than Sol upgrades.
 
@@ -567,7 +706,7 @@ report should include both aggregate results and a per-task paired table:
 `all-premium`, `all-flash`, `smart-router`, pass/fail, cost, and selected
 models for each attempt.
 
-### Cost Estimate
+### Runtime and Cost Estimate
 
 | Strategy | Per task/run (est) | 5 tasks × 3 runs | Notes |
 |----------|-------------------|------------------|-------|
@@ -581,6 +720,22 @@ the canary from observed tokens/minute and the current `/v1/models` pricing
 snapshot. If Opus fallback triggers repeatedly, pause the run and fix the
 decision path before interpreting smart-router quality.
 
+Canary-derived serial runtime estimate with `--timeout-multiplier 0.3`:
+
+| Task | Expert estimate | Canary / extrapolated single trial |
+|------|-----------------|------------------------------------|
+| html-js-filter | 0.75h | ~15 min |
+| vpp-loss-divergence | 2h | ~40 min |
+| cad-model | 2h | ~40 min |
+| gsea-proteomics | 4h | ~70 min |
+| kv-live-surgery | 4h | ~70 min |
+
+For 45 serial trials, this implies roughly 18h optimistic, 34h realistic,
+and 52h pessimistic wall-clock time. Runtime is not a success metric, but it
+sets operator expectations for monitoring and pause points. Current planning
+budget is `$200-500`; keep the hard stop at `$2000` unless a new canary shows
+substantially higher per-trial cost.
+
 ### Timeout Control
 
 Use `--timeout-multiplier 0.3` to cap agent runtime at 30% of the
@@ -590,13 +745,44 @@ cost. If the task timeout is 28,800 seconds, `0.3` still allows 8,640
 seconds (144 minutes), regardless of the task's expert-time label. Timeout
 is a cost guardrail, not a speed success criterion.
 
+Gateway OpenRouter calls use a 300s server/endpoint timeout during the
+experiment. This leaves room for slow flash responses while still closing
+streaming response bodies at the endpoint timeout so abandoned client calls do
+not leave stale in-flight requests.
+
+Harbor/LiteLLM and Terminus2 normally retry LLM failures up to three times. The
+local Harbor runtime is patched so the default is one LLM attempt, while
+`AWARE_HARBOR_LLM_ATTEMPTS` can explicitly override it. The V3 runner still sets
+`AWARE_HARBOR_LLM_ATTEMPTS=1` both on the outer `harbor run` process and via
+`--agent-env` for the agent phase as an audit-visible experiment condition. This
+keeps timeout and 5xx semantics at one provider call per agent turn; the
+analyzer records the trial as `reward=0` with `failure_kind=provider_5xx` when
+the fail-fast marker is present.
+
+### Reasoning Control
+
+OpenRouter metadata for `z-ai/glm-5.3-flash` shows reasoning is mandatory,
+enabled by default, and defaults to `max` effort. Since this experiment's
+primary optimization target is cost while preserving quality, the gateway
+normalizes unpinned flash calls to:
+
+```json
+{"reasoning": {"effort": "low", "exclude": true}}
+```
+
+This applies to both all-flash trials and smart-router turns routed to flash.
+It preserves the flash model identity while avoiding a hidden max-reasoning
+cost/latency confound. If a caller explicitly supplies `reasoning` or
+`reasoning_effort`, the gateway preserves that caller policy.
+
 ### Cache Policy
 
 For a clean measurement of routing decisions, disable or reset the
-smart-router cache between attempts. In the current gateway config,
-`cache_ttl_seconds: 0` means "use the default 300 seconds", so do not use
-0 as a disable switch. Options:
-- Set `cache_ttl_seconds: -1` for measurement runs, or
+smart-router cache between attempts. The current experiment config sets
+`cache_ttl_seconds: -1`, which disables decision caching for measurement
+runs. Note that `cache_ttl_seconds: 0` means "use the default 300 seconds",
+so do not use 0 as a disable switch. Options:
+- Keep `cache_ttl_seconds: -1` for measurement runs, or
 - Restart the gateway before each attempt, or
 - Keep the cache enabled and report that the result measures cached product
   behavior, not independent routing decisions.
@@ -606,7 +792,17 @@ smart-router cache between attempts. In the current gateway config,
 - Verifier failure, timeout, infrastructure crash, or malformed final output
   counts as `reward=0` unless the trial is explicitly excluded before seeing
   the verifier result because the trace attribution canary failed.
-- Retries and provider fallbacks count toward the strategy's total cost.
+- The OpenRouter experiment config sets `retry.max_retries: 1` for LLM
+  generation calls. Provider timeouts are therefore recorded as that trial's
+  failure/cost outcome instead of being automatically retried, which keeps the
+  cost measurement aligned with the decision prompt's "one call, no second
+  chance" assumption.
+- The matrix runner polls the current trial's gateway trace group. If an agent
+  OpenRouter call records `status >= 500`, the runner writes an
+  `early-provider-failure.json` marker, interrupts Harbor, and the analyzer
+  records `reward=0` with `failure_kind=provider_5xx`.
+- If a future rerun enables retries, all retry attempts and provider fallbacks
+  must count toward the strategy's total cost and be reported separately.
 - Opus fallback from smart-router decision failure counts toward
   smart-router total cost and `opus_fallback_rate`; it is not counted as a
   Qwen3 upgrade decision.
@@ -620,7 +816,7 @@ Record the following before the canary and before the full matrix:
 - Git SHA and `git diff --stat` for aware-gateway.
 - Full gateway config used for each strategy, with secrets removed.
 - OpenRouter `/v1/models` pricing snapshot and gateway pricing config.
-- Harbor/Terminus2 version, task dataset version, and Docker image digest.
+- Harbor/Terminus2 version, local task file hashes, and Docker image digest.
 - Randomization seed and generated run order.
 - Smart-router cache policy and whether the gateway was restarted per attempt.
 
@@ -628,12 +824,19 @@ Record the following before the canary and before the full matrix:
 
 ### Per Trial, Primary
 - reward (0 or 1) — from verifier pytest
-- total cost — from `/v1/traces/{trial}/summary` when `trial_name` is
-  present, otherwise from `/v1/traces?session_id=...` grouped by session
+- agent token usage and cost — from Harbor `agent/trajectory.json` and
+  `agent_result`; if per-step `cost_usd` is missing or zero while token usage
+  is nonzero, recompute from `model_name`, prompt/completion tokens, cached
+  tokens, and the locked OpenRouter pricing snapshot
+- decision token usage/cost — `step_name` beginning with `router-decision` in
+  gateway traces; current Qwen3 local decision cost is expected to be `$0`
+- total cost — `agent_cost_usd + decision_cost_usd + any Opus fallback cost`;
+  gateway `/v1/traces` is the attribution source, not the only token source
 - per-turn model — from gateway traces
-- decision model usage/cost — `step_name` beginning with
-  `router-decision` in traces
+- trace key — prefer unique `session_id`; use `trial_name` only when it is
+  exactly the Harbor trial name
 - Sol upgrade rate and Opus fallback rate for smart-router trials
+- Completion-guardrail call count for smart-router trials
 
 ### Per Trial, Diagnostic
 - agent duration — from Harbor, used only to interpret cost/runtime anomalies
@@ -663,7 +866,8 @@ Upgrade-value criteria:
 
 1. **At least 1 task where smart-router passes but all-flash fails**
 2. **Per-turn logs show differentiated selection** (not all-flash or all-premium)
-3. **Sol upgrades, not Opus fallbacks, explain any quality gain over all-flash**
+3. **Qwen3-selected Sol upgrades, not Opus fallbacks or completion-guardrail
+   calls alone, explain any quality gain over all-flash**
 
 Diagnostic checks:
 
@@ -686,7 +890,7 @@ the smart-router cost-savings claim.
 | all-flash fails everything | Valid finding — flash too weak, smart-router must upgrade |
 | Sol fails where Opus passed | Report honestly — Sol ≠ Opus, note as limitation |
 | flash ≠ GLM-5.3 quality | Not measured in this trimmed plan; do not claim equivalence |
-| Harbor can't send per-trial headers | Canary first; use session_id fallback only if unique, otherwise patch Harbor or run one-attempt jobs with unique static headers |
+| Harbor session attribution patch does not produce unique trace groups | Stop after canary; do not run the matrix until one attempt maps to exactly one session group containing both agent calls and `router-decision-*` calls |
 | Decision model timeout or invalid output | Route directly to Opus via `fallback_model`; count cost and fallback rate separately |
 | Task timeout too short (--timeout-multiplier 0.3) | Report as a limitation; do not infer full-time leaderboard-equivalent capability |
 | Cost exceeds budget | Monitor per-trial cost in real-time via /v1/traces; abort if > $2000 total |

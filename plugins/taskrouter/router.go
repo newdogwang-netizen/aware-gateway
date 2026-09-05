@@ -57,28 +57,28 @@ const (
 type Strategy string
 
 const (
-	StratBestQuality  Strategy = "best_quality"
-	StratCheapest     Strategy = "cheapest"
+	StratBestQuality   Strategy = "best_quality"
+	StratCheapest      Strategy = "cheapest"
 	StratLowestLatency Strategy = "lowest_latency"
-	StratBalanced     Strategy = "balanced"
-	StratAny          Strategy = "any"
+	StratBalanced      Strategy = "balanced"
+	StratAny           Strategy = "any"
 )
 
 // ModelInfo describes a model's capabilities and cost.
 type ModelInfo struct {
-	Name          string     `yaml:"name" json:"name"`
-	Pool          string     `yaml:"pool" json:"pool"`
-	Capabilities  []string   `yaml:"capabilities" json:"capabilities"`
-	ContextWindow int        `yaml:"context_window" json:"context_window"`
-	InputPrice    float64    `yaml:"input_price" json:"input_price"`       // $/M tokens
-	OutputPrice   float64    `yaml:"output_price" json:"output_price"`     // $/M tokens
-	MaxTokens     int        `yaml:"max_tokens" json:"max_tokens"`
-	Tags          []string   `yaml:"tags" json:"tags,omitempty"`
+	Name          string   `yaml:"name" json:"name"`
+	Pool          string   `yaml:"pool" json:"pool"`
+	Capabilities  []string `yaml:"capabilities" json:"capabilities"`
+	ContextWindow int      `yaml:"context_window" json:"context_window"`
+	InputPrice    float64  `yaml:"input_price" json:"input_price"`   // $/M tokens
+	OutputPrice   float64  `yaml:"output_price" json:"output_price"` // $/M tokens
+	MaxTokens     int      `yaml:"max_tokens" json:"max_tokens"`
+	Tags          []string `yaml:"tags" json:"tags,omitempty"`
 
 	// Runtime state (not config)
-	mu          sync.Mutex
-	avgLatencyMs int64     // rolling average latency
-	reqCount     int64     // total requests routed
+	mu           sync.Mutex
+	avgLatencyMs int64 // rolling average latency
+	reqCount     int64 // total requests routed
 }
 
 // RoutingRule maps a task type to a selection strategy.
@@ -89,21 +89,21 @@ type RoutingRule struct {
 
 // Config is the plugin-specific configuration.
 type Config struct {
-	Enabled          bool          `yaml:"enabled" json:"enabled"`
-	Models           []ModelInfo   `yaml:"models" json:"models"`
-	Rules            []RoutingRule `yaml:"rules" json:"rules"`
-	DefaultStrategy  Strategy      `yaml:"default_strategy" json:"default_strategy"`
-	PreferHealthy    bool          `yaml:"prefer_healthy" json:"prefer_healthy"`
+	Enabled         bool          `yaml:"enabled" json:"enabled"`
+	Models          []ModelInfo   `yaml:"models" json:"models"`
+	Rules           []RoutingRule `yaml:"rules" json:"rules"`
+	DefaultStrategy Strategy      `yaml:"default_strategy" json:"default_strategy"`
+	PreferHealthy   bool          `yaml:"prefer_healthy" json:"prefer_healthy"`
 }
 
 // Router implements plugin.RequestRouter.
 type Router struct {
-	cfg      Config
-	registry *ModelRegistry
+	cfg        Config
+	registry   *ModelRegistry
 	classifier *TaskClassifier
-	scorer   *Scorer
-	logger   *slog.Logger
-	ctx      *plugin.Context
+	scorer     *Scorer
+	logger     *slog.Logger
+	ctx        *plugin.Context
 }
 
 func (r *Router) Name() string { return "task-router" }
@@ -180,8 +180,10 @@ func (r *Router) Route(req *http.Request, body []byte) (*plugin.RoutingDecision,
 	// with capabilities, respect the client's choice — don't override.
 	// This allows callers to pin specific models when they want to.
 	if parsed.Model != "" {
-		if _, exists := r.registry.Get(parsed.Model); exists {
-			return &plugin.RoutingDecision{Skip: true}, nil
+		for _, alias := range pinnedModelAliases(parsed.Model) {
+			if _, exists := r.registry.Get(alias); exists {
+				return &plugin.RoutingDecision{Skip: true}, nil
+			}
 		}
 	}
 
@@ -368,16 +370,16 @@ func (m *ModelInfo) RequestCount() int64 {
 // --- TaskClassifier ---
 
 type TaskClassifier struct {
-	codeKeywords    *regexp.Regexp
+	codeKeywords      *regexp.Regexp
 	reasoningKeywords *regexp.Regexp
-	visionKeywords  *regexp.Regexp
+	visionKeywords    *regexp.Regexp
 }
 
 func NewTaskClassifier() *TaskClassifier {
 	return &TaskClassifier{
-		codeKeywords:    regexp.MustCompile(`(?i)(code|function|class|method|bug|debug|compile|runtime|algorithm|api|sql|python|java|golang|typescript|javascript|rust|refactor|implement|stack trace|error trace|unit test)`),
+		codeKeywords:      regexp.MustCompile(`(?i)(code|function|class|method|bug|debug|compile|runtime|algorithm|api|sql|python|java|golang|typescript|javascript|rust|refactor|implement|stack trace|error trace|unit test)`),
 		reasoningKeywords: regexp.MustCompile(`(?i)(analyze|reason|explain why|step by step|derive|prove|mathematic|logic|deduce|infer|conclude|because|therefore|chain of thought|let's think)`),
-		visionKeywords:  regexp.MustCompile(`(?i)(image|picture|photo|screenshot|diagram|chart|figure|visual|ocr|read the|describe the image)`),
+		visionKeywords:    regexp.MustCompile(`(?i)(image|picture|photo|screenshot|diagram|chart|figure|visual|ocr|read the|describe the image)`),
 	}
 }
 
@@ -479,19 +481,19 @@ func parseRequest(body []byte, contentType string) *ParsedRequest {
 	}
 
 	var req struct {
-		Model    string    `json:"model"`
-		Messages []Message `json:"messages"`
-		Input    string    `json:"input"`   // embeddings
-		Stream   bool      `json:"stream"`
-		MaxTokens int      `json:"max_tokens"`
+		Model     string    `json:"model"`
+		Messages  []Message `json:"messages"`
+		Input     string    `json:"input"` // embeddings
+		Stream    bool      `json:"stream"`
+		MaxTokens int       `json:"max_tokens"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil
 	}
 
 	p := &ParsedRequest{
-		Model:    req.Model,
-		IsStream:   req.Stream,
+		Model:    strings.TrimSpace(req.Model),
+		IsStream: req.Stream,
 	}
 
 	// Determine request type by path or fields
@@ -505,6 +507,18 @@ func parseRequest(body []byte, contentType string) *ParsedRequest {
 	p.EstimatedTokens = estimateTokens(req.Messages, req.MaxTokens)
 
 	return p
+}
+
+func pinnedModelAliases(model string) []string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return nil
+	}
+	aliases := []string{model}
+	if strings.HasPrefix(model, "openai/") {
+		aliases = append(aliases, strings.TrimPrefix(model, "openai/"))
+	}
+	return aliases
 }
 
 func estimateTokens(msgs []Message, maxTokens int) int {
@@ -618,23 +632,39 @@ func (s *Scorer) selectBalanced(candidates []*ModelInfo, pp plugin.PoolProvider)
 
 	for _, m := range candidates {
 		cost := m.InputPrice + m.OutputPrice
-		if cost < minCost { minCost = cost }
-		if cost > maxCost { maxCost = cost }
+		if cost < minCost {
+			minCost = cost
+		}
+		if cost > maxCost {
+			maxCost = cost
+		}
 
 		lat := m.LatencyMs()
-		if lat == 0 { lat = 500 } // default assumption
-		if lat < minLatency { minLatency = lat }
-		if lat > maxLatency { maxLatency = lat }
+		if lat == 0 {
+			lat = 500
+		} // default assumption
+		if lat < minLatency {
+			minLatency = lat
+		}
+		if lat > maxLatency {
+			maxLatency = lat
+		}
 
 		load := poolLoad(m.Pool, pp)
-		if load < minLoad { minLoad = load }
-		if load > maxLoad { maxLoad = load }
+		if load < minLoad {
+			minLoad = load
+		}
+		if load > maxLoad {
+			maxLoad = load
+		}
 	}
 
 	for _, m := range candidates {
 		cost := m.InputPrice + m.OutputPrice
 		lat := m.LatencyMs()
-		if lat == 0 { lat = 500 }
+		if lat == 0 {
+			lat = 500
+		}
 		load := poolLoad(m.Pool, pp)
 
 		// Normalize to 0-1 (lower is better)

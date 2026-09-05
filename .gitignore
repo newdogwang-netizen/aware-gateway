@@ -3,11 +3,16 @@ aware-gateway
 
 # Data
 data/
+artifacts/
+terminal-bench/
+.aware-v3-current-artifact
+.aware-v4-current-artifact
 *.db
 *.db-wal
 *.db-shm
 
 # Logs
+*.log
 /tmp/aware-gateway*.log
 /tmp/aware-gateway*.pid
 
@@ -28,3 +33,7 @@ Thumbs.db
 
 # Build
 *.tar.gz
+
+# Python
+__pycache__/
+*.py[cod]

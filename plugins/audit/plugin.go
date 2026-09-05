@@ -124,28 +124,28 @@ func (p *Plugin) Record(record *plugin.AuditRecord) error {
 	if p.cfg.Store == "sqlite" || p.cfg.Store == "both" {
 		if p.store != nil {
 			p.store.Record(Record{
-				TraceID:      record.TraceID,
-				Timestamp:    record.Timestamp,
-				Method:       record.Method,
-				Path:         record.Path,
-				Endpoint:     record.Endpoint,
-				Status:       record.Status,
-				LatencyMs:    record.LatencyMs,
-				Model:        record.Model,
-				RoutedModel:  record.RoutedModel,
-				Pool:         record.Pool,
-				PromptTokens: record.PromptTokens,
-				CompTokens:   record.CompTokens,
-				TotalTokens:  record.TotalTokens,
-				RetryAttempt: record.RetryAttempt,
-				Fallback:     record.Fallback,
-				UserID:       record.UserID,
-				APIKey:       record.APIKey,
-				Cost:         record.Cost,
-				SessionID:    record.SessionID,
-				TrialName:    record.TrialName,
-				StepName:     record.StepName,
-				TaskName:     record.TaskName,
+				TraceID:       record.TraceID,
+				Timestamp:     record.Timestamp,
+				Method:        record.Method,
+				Path:          record.Path,
+				Endpoint:      record.Endpoint,
+				Status:        record.Status,
+				LatencyMs:     record.LatencyMs,
+				Model:         record.Model,
+				RoutedModel:   record.RoutedModel,
+				Pool:          record.Pool,
+				PromptTokens:  record.PromptTokens,
+				CompTokens:    record.CompTokens,
+				TotalTokens:   record.TotalTokens,
+				RetryAttempt:  record.RetryAttempt,
+				Fallback:      record.Fallback,
+				UserID:        record.UserID,
+				APIKey:        record.APIKey,
+				Cost:          record.Cost,
+				SessionID:     record.SessionID,
+				TrialName:     record.TrialName,
+				StepName:      record.StepName,
+				TaskName:      record.TaskName,
 				FinishReason:  record.FinishReason,
 				RoutingReason: record.RoutingReason,
 			})
@@ -355,6 +355,7 @@ func (s *Store) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, err
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("audit store not available")
 	}
+	s.Flush()
 
 	query := `SELECT trace_id, timestamp, model, routed_model, pool, endpoint,
 		step_name, task_name, trial_name, session_id,
@@ -390,7 +391,7 @@ func (s *Store) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, err
 	}
 	defer rows.Close()
 
-	var entries []plugin.TraceEntry
+	entries := make([]plugin.TraceEntry, 0)
 	for rows.Next() {
 		var e plugin.TraceEntry
 		var sessionID sql.NullString
@@ -400,13 +401,13 @@ func (s *Store) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, err
 			&e.StepName, &e.TaskName, &e.TrialName, &sessionID,
 			&e.PromptTokens, &e.CompTokens, &e.TotalTokens, &e.Cost,
 			&e.LatencyMs, &e.Status, &finishReason, &routingReason,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("scan trace row: %w", err)
-			}
-			if sessionID.Valid {
-				e.SessionID = sessionID.String
-			}
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan trace row: %w", err)
+		}
+		if sessionID.Valid {
+			e.SessionID = sessionID.String
+		}
 		e.FinishReason = finishReason.String
 		e.RoutingReason = routingReason.String
 		entries = append(entries, e)

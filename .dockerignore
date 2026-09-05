@@ -1,0 +1,14 @@
+.git
+artifacts
+data
+terminal-bench
+*.db
+*.log
+*.sqlite
+*.sqlite3
+openrouter.env
+aware-gateway
+__pycache__
+*.py[cod]
+.aware-v3-current-artifact
+.aware-v4-current-artifact

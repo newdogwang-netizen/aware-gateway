@@ -102,9 +102,11 @@ func main() {
 	// After Init(), inject audit sinks into smart-router so decision model
 	// calls are recorded in the trace/billing pipeline. Must be after Init()
 	// because AuditSinks() only returns non-nil sinks after plugins are initialized.
+	auditSinks := registry.AuditSinks()
+	slog.Info("injecting audit sinks into smart-router", "sink_count", len(auditSinks))
 	for _, p := range registry.AllPlugins() {
 		if sr, ok := p.(*smartrouter.SmartRouter); ok {
-			sr.SetAuditSinks(registry.AuditSinks())
+			sr.SetAuditSinks(auditSinks)
 		}
 	}
 

@@ -42,9 +42,10 @@ func NewDecisionCache(maxSize int, ttl time.Duration) *DecisionCache {
 }
 
 // Key generates a cache key from the model menu, message count, system message,
-// and latest user message. Including system message prevents cross-task cache
-// pollution when different tasks share similar user messages but different system prompts.
-func (c *DecisionCache) Key(menu []ModelEntry, msgCount int, systemMsg, latestMsg string) string {
+// latest user message, and compact router history. Including system message
+// prevents cross-task cache pollution when different tasks share similar user
+// messages but different system prompts.
+func (c *DecisionCache) Key(menu []ModelEntry, msgCount int, systemMsg, latestMsg, historyText string) string {
 	// Sort model IDs for stable key
 	ids := make([]string, len(menu))
 	for i, m := range menu {
@@ -71,6 +72,10 @@ func (c *DecisionCache) Key(menu []ModelEntry, msgCount int, systemMsg, latestMs
 		latestMsg = latestMsg[:2000]
 	}
 	h.Write([]byte(latestMsg))
+	if len(historyText) > 2000 {
+		historyText = historyText[:2000]
+	}
+	h.Write([]byte(historyText))
 
 	return hex.EncodeToString(h.Sum(nil))
 }

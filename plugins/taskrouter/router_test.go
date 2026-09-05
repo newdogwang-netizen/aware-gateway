@@ -2,10 +2,14 @@ package taskrouter
 
 import (
 	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/aware/gateway/internal/config"
+	"github.com/aware/gateway/internal/plugin"
 	"github.com/aware/gateway/internal/pool"
 )
 
@@ -152,6 +156,103 @@ func TestParseRequest(t *testing.T) {
 	}
 	if p.EstimatedTokens <= 0 {
 		t.Error("estimated_tokens should be positive")
+	}
+}
+
+func TestParseRequestTrimsModelWhitespace(t *testing.T) {
+	body := []byte("{\"model\":\"openai/gpt-5.6-sol\\r\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}")
+
+	p := parseRequest(body, "application/json")
+	if p == nil {
+		t.Fatal("expected non-nil parsed request")
+	}
+	if p.Model != "openai/gpt-5.6-sol" {
+		t.Fatalf("model = %q, want openai/gpt-5.6-sol", p.Model)
+	}
+}
+
+func TestRouteSkipsPinnedModelWithLiteLLMOpenAIProviderPrefix(t *testing.T) {
+	router := newTaskRouterForPinnedModelTest(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Content-Type", "application/json")
+	body := []byte(`{"model":"openai/z-ai/glm-5.3-flash","messages":[{"role":"user","content":"hello"}]}`)
+
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decision == nil || !decision.Skip {
+		t.Fatalf("Route = %#v, want skip for explicit flash model", decision)
+	}
+}
+
+func TestRouteSkipsPinnedOpenAIModelWithLiteLLMOpenAIProviderPrefix(t *testing.T) {
+	router := newTaskRouterForPinnedModelTest(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Content-Type", "application/json")
+	body := []byte(`{"model":"openai/openai/gpt-5.6-sol","messages":[{"role":"user","content":"hello"}]}`)
+
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decision == nil || !decision.Skip {
+		t.Fatalf("Route = %#v, want skip for explicit Sol model", decision)
+	}
+}
+
+func TestRouteSkipsPinnedAnthropicModelWithLiteLLMOpenAIProviderPrefix(t *testing.T) {
+	router := newTaskRouterForPinnedModelTest(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Content-Type", "application/json")
+	body := []byte(`{"model":"openai/anthropic/claude-opus-5","messages":[{"role":"user","content":"hello"}]}`)
+
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decision == nil || !decision.Skip {
+		t.Fatalf("Route = %#v, want skip for explicit Opus model", decision)
+	}
+}
+
+func newTaskRouterForPinnedModelTest(t *testing.T) *Router {
+	t.Helper()
+	registry := NewModelRegistry()
+	registry.Register(&ModelInfo{
+		Name:          "z-ai/glm-5.3-flash",
+		Pool:          "openrouter",
+		Capabilities:  []string{"chat"},
+		ContextWindow: 1_000_000,
+	})
+	registry.Register(&ModelInfo{
+		Name:          "openai/gpt-5.6-sol",
+		Pool:          "openrouter",
+		Capabilities:  []string{"chat"},
+		ContextWindow: 1_000_000,
+		InputPrice:    2,
+		OutputPrice:   10,
+	})
+	registry.Register(&ModelInfo{
+		Name:          "anthropic/claude-opus-5",
+		Pool:          "openrouter",
+		Capabilities:  []string{"chat"},
+		ContextWindow: 200_000,
+		InputPrice:    5,
+		OutputPrice:   25,
+	})
+	return &Router{
+		cfg: Config{
+			Enabled:         true,
+			DefaultStrategy: StratCheapest,
+		},
+		registry:   registry,
+		classifier: NewTaskClassifier(),
+		scorer:     NewScorer(false),
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ctx: &plugin.Context{
+			Pools: newMockPoolProvider("openrouter"),
+		},
 	}
 }
 

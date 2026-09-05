@@ -2,6 +2,7 @@ package core
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -28,10 +29,12 @@ type decisionWriter struct {
 	totalTokens  int
 	hasTokens    bool
 	finishReason string
+	cost         float64
+	hasCost      bool
 
 	// Streaming support
-	streaming   bool
-	tail        []byte
+	streaming    bool
+	tail         []byte
 	firstWriteAt time.Time
 }
 
@@ -49,6 +52,7 @@ func (w *decisionWriter) WriteHeader(code int) {
 	w.code = code
 
 	if code >= 200 && code < 400 {
+		w.streaming = strings.HasPrefix(w.header.Get("Content-Type"), "text/event-stream")
 		for _, h := range []string{"X-Prompt-Tokens", "X-Completion-Tokens", "X-Total-Tokens"} {
 			w.header.Del(h)
 		}
@@ -70,6 +74,12 @@ func (w *decisionWriter) Write(p []byte) (int, error) {
 	}
 
 	if w.directMode {
+		if w.firstWriteAt.IsZero() && len(p) > 0 {
+			w.firstWriteAt = time.Now()
+		}
+		if w.streaming {
+			w.appendTail(p)
+		}
 		return w.real.Write(p)
 	}
 
@@ -121,6 +131,17 @@ func (w *decisionWriter) Flush() {
 	}
 }
 
+func (w *decisionWriter) appendTail(b []byte) {
+	if len(b) >= maxTailBytes {
+		w.tail = append(w.tail[:0], b[len(b)-maxTailBytes:]...)
+		return
+	}
+	w.tail = append(w.tail, b...)
+	if len(w.tail) > maxTailBytes {
+		w.tail = w.tail[len(w.tail)-maxTailBytes:]
+	}
+}
+
 func (w *decisionWriter) reset() {
 	if w.done || w.directMode {
 		return
@@ -147,6 +168,13 @@ func (w *decisionWriter) interceptTokenHeaders() {
 		w.finishReason = v
 		w.header.Del("X-Gw-Finish-Reason")
 	}
+	if v := w.header.Get("X-Gw-Cost"); v != "" {
+		if cost, err := strconv.ParseFloat(v, 64); err == nil {
+			w.cost = cost
+			w.hasCost = true
+		}
+		w.header.Del("X-Gw-Cost")
+	}
 	w.hasTokens = w.totalTokens > 0
 }
 
@@ -160,6 +188,8 @@ type statusWriter struct {
 	totalTokens  int
 	hasTokens    bool
 	finishReason string
+	cost         float64
+	hasCost      bool
 	streaming    bool
 	tail         []byte
 	firstWriteAt time.Time
@@ -219,6 +249,13 @@ func (w *statusWriter) interceptTokenHeaders() {
 	if v := w.Header().Get("X-Gw-Finish-Reason"); v != "" {
 		w.finishReason = v
 		w.Header().Del("X-Gw-Finish-Reason")
+	}
+	if v := w.Header().Get("X-Gw-Cost"); v != "" {
+		if cost, err := strconv.ParseFloat(v, 64); err == nil {
+			w.cost = cost
+			w.hasCost = true
+		}
+		w.Header().Del("X-Gw-Cost")
 	}
 	w.hasTokens = w.totalTokens > 0
 }

@@ -1,11 +1,11 @@
 # OpenRouter test config — real API calls
 server:
   listen: ":12026"
-  timeout: 120s
+  timeout: 900s
   graceful_shutdown: 10s
 
 retry:
-  max_retries: 2
+  max_retries: 1
   retryable_statuses: [429, 500, 502, 503]
 
 circuit_breaker:
@@ -30,7 +30,7 @@ pools:
         url: https://openrouter.ai/api
         health_path: /v1/models
         weight: 10
-        timeout: 120s
+        timeout: 900s
         auth_token_env: GW_OPENROUTER_KEY
         # No static models — let auto-discovery find them
 
@@ -44,7 +44,15 @@ routes:
   - pattern: /v1/embeddings
     pool: openrouter
 
-model_map: {}
+model_map:
+  # Harbor uses LiteLLM's `openai/` provider prefix for the gateway's
+  # OpenAI-compatible endpoint. Canonicalize those request model IDs before
+  # forwarding to OpenRouter and before pricing/reasoning policy is applied.
+  "openai/auto": "auto"
+  "openai/auto-opus-warmstart": "auto-opus-warmstart"
+  "openai/z-ai/glm-5.3-flash": "z-ai/glm-5.3-flash"
+  "openai/openai/gpt-5.6-sol": "openai/gpt-5.6-sol"
+  "openai/anthropic/claude-opus-5": "anthropic/claude-opus-5"
 
 plugins:
   ratelimit:
@@ -60,13 +68,20 @@ plugins:
   # Smart router: LLM-based model selection (runs before task-router)
   smart-router:
     enabled: true
-    endpoint: "http://localhost:18000/v1"
-    model: "qwen3.8-27b"
-    api_key: ""
-    max_tokens: 100
+    endpoint: "https://openrouter.ai/api/v1"
+    model: "openai/gpt-5.6-sol"
+    api_key_env: "GW_OPENROUTER_KEY"
+    max_tokens: 1000
     temperature: 0
-    timeout_ms: 10000
-    # If Qwen3 times out or returns an invalid/unknown model, route directly
+    timeout_ms: 30000
+    decision_input_price: 2.00
+    decision_output_price: 10.00
+    disable_thinking: false
+    # The decision model now runs through OpenRouter, not the removed local
+    # decision endpoint. Two quick retries protect against transient EOFs/timeouts
+    # without retrying the actual agent/provider calls.
+    decision_retries: 2
+    # If the decision model times out or returns an invalid/unknown model, route directly
     # to the strongest fallback instead of letting task-router choose a
     # mid-tier model.
     fallback_model: "anthropic/claude-opus-5"
@@ -74,10 +89,24 @@ plugins:
     prompt_preview_chars: 2000
     include_system_prompt: true
     include_message_count: true
-    cache_ttl_seconds: 300
+    # Give the decision model compact short-term memory within a trial.
+    # Each routed call appends one short context_summary/reason; the next call
+    # sees at most the latest 5 records.
+    decision_history_turns: 5
+    decision_history_context_chars: 220
+    # Disable decision caching for measurement runs so each turn records an
+    # independent decision-model routing decision. Re-enable for product smoke tests.
+    cache_ttl_seconds: -1
     cache_max_entries: 10000
-    # Decision menu for the V3 experiment: only compare flash vs premium.
-    # Keep budget/mid-tier models out of Qwen3's choices so smart-router
+    # V4 warm-start strategy: use Opus for the first N agent calls in a
+    # session, then fall back to normal decision-model routing over the same menu.
+    warm_start:
+      trigger_models: ["auto-opus-warmstart"]
+      steps: 5
+      model: "anthropic/claude-opus-5"
+      pool: "openrouter"
+    # Decision menu for the V4 experiment: only compare flash vs strongest premium.
+    # Keep budget/mid-tier models out of the decision model's choices so smart-router
     # results are attributable to "cheap unless upgrade is needed".
     models:
       # Ultra-cheap tier
@@ -87,13 +116,13 @@ plugins:
         context_window: 1310720
         input_price: 0.07
         output_price: 0.25
-      # Premium tier — Terminal-Bench 4.0 leaderboard #4 (37.3%)
-      - name: "openai/gpt-5.6-sol"
+      # Strongest premium tier
+      - name: "anthropic/claude-opus-5"
         pool: "openrouter"
-        capabilities: ["chat", "code", "reasoning"]
-        context_window: 1050000
-        input_price: 2.00
-        output_price: 10.00
+        capabilities: ["chat", "code", "reasoning", "vision"]
+        context_window: 200000
+        input_price: 5.00
+        output_price: 25.00
 
   # Rule-based router: keyword classify + score (fallback for smart-router)
   task-router:
@@ -129,6 +158,13 @@ plugins:
         context_window: 1050000
         input_price: 2.00
         output_price: 10.00
+      # Strongest local anchor / smart-router fallback
+      - name: "anthropic/claude-opus-5"
+        pool: "openrouter"
+        capabilities: ["chat", "code", "reasoning", "vision"]
+        context_window: 200000
+        input_price: 5.00
+        output_price: 25.00
     rules:
       - task: reasoning
         strategy: best_quality

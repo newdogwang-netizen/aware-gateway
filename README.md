@@ -7,6 +7,7 @@ A smart, plugin-based AI model gateway. Single Go binary, zero runtime dependenc
 aware-gateway is a reverse proxy for LLM and ASR backends with a **plugin architecture** that adds:
 
 - **Task-aware routing**: analyzes incoming requests and selects the best model based on task type, cost, latency, and current load
+- **LLM-based smart routing**: uses a decision model to route each turn across premium/flash models, with optional cost awareness and compact per-session memory
 - **GenAI observability**: native OpenTelemetry + OpenInference semantic conventions (gen_ai.* / llm.*), compatible with Jaeger, Tempo, Grafana, Phoenix, Langfuse
 - **Pluggable everything**: routing, auth, audit, middleware, response transformation — all via a clean plugin interface
 
@@ -25,8 +26,10 @@ Built by refactoring the heidi model-gateway into a core engine + plugin system.
                          │  └─ Core Handler                     │
                          │     ├─ Authenticators (chain)        │
                          │     ├─ RequestRouters (chain)        │
-                         │     │   └─ TaskRouter: classify →    │
-                         │     │      score → select model      │
+                         │     │   ├─ SmartRouter: decide with   │
+                         │     │   │  LLM + history/cost hints   │
+                         │     │   └─ TaskRouter: classify →     │
+                         │     │      score → select model       │
                          │     ├─ RequestTransformers (pipeline)│
                          │     ├─ Proxy (retry+breaker+fallback)│
                          │     └─ AuditSinks (fan-out)          │
@@ -63,10 +66,18 @@ Built by refactoring the heidi model-gateway into a core engine + plugin system.
 
 | Plugin | Hooks | Description |
 |--------|-------|-------------|
+| `smart-router` | RequestRouter | Uses a decision model to choose among configured models per turn; supports warm-start, cost-aware prompts, fallback, and compact decision history |
 | `task-router` | RequestRouter | Classifies LLM requests (chat/code/reasoning/vision) and selects best model by cost/quality/latency/load |
 | `otel-genai` | Middleware, Health | Enriches OTel spans with gen_ai.* / llm.* attributes; records GenAI Prometheus metrics |
 | `ratelimit` | Middleware | Global + per-key rate limiting (token bucket) |
 | `audit` | AuditSink | Structured log + SQLite audit store |
+
+## Experiment Reports
+
+- [Smart Router Experiment Report](docs/smart-router-experiment-report.html) — blog-style summary of the smart-router benchmark runs, decision replay studies, cost/quality tradeoffs, and next-step recommendations.
+- [V4 Experiment Plan 中文](docs/experiment-plan-v4.zh.md) — current reduced-scope benchmark design for comparing smart routing against public leaderboard baselines.
+- [Router Decision Lab Notes](docs/router-decision-lab.md) — notes for replaying router decisions under different prompt designs.
+- [Benchmark Cost Report](docs/benchmark-cost.html) — static benchmark cost reference.
 
 ### Writing a Custom Plugin
 
@@ -234,6 +245,38 @@ The `task-router` plugin:
 
 If no router plugin decides (or none registered), falls back to static route→pool mapping.
 
+## Smart Routing
+
+The `smart-router` plugin asks a small decision model to choose between a configured model menu for each request. It records structured decision metadata for audit and replay, can prefer Opus for the first warm-start turns, and can include recent per-session routing history so later choices are not made in isolation.
+
+Typical research configuration:
+
+```yaml
+plugins:
+  smart-router:
+    enabled: true
+    endpoint: https://openrouter.ai/api/v1
+    model: openai/gpt-5.6-sol
+    api_key_env: GW_OPENROUTER_KEY
+    fallback_model: anthropic/claude-opus-5
+    fallback_pool: openrouter
+    decision_history_turns: 5
+    decision_history_context_chars: 900
+    models:
+      - name: z-ai/glm-5.3-flash
+        pool: openrouter
+        capabilities: [chat, code, reasoning]
+        context_window: 1310720
+        input_price: 0.07
+        output_price: 0.25
+      - name: anthropic/claude-opus-5
+        pool: openrouter
+        capabilities: [chat, code, reasoning, vision]
+        context_window: 200000
+        input_price: 5.00
+        output_price: 25.00
+```
+
 ## Project Structure
 
 ```
@@ -258,10 +301,13 @@ aware-gateway/
 │       ├── writer.go                # decisionWriter (stream/buffer) + statusWriter
 │       └── server.go                # Router build, pool manager, health, metrics
 ├── plugins/
+│   ├── smartrouter/plugin.go        # LLM decision router with cost/history-aware prompts
 │   ├── taskrouter/router.go         # Task-aware model routing
 │   ├── otelgenai/plugin.go          # GenAI OTel observability
 │   ├── ratelimit/plugin.go          # Rate limiting
 │   └── audit/plugin.go              # Audit sink (log + SQLite)
+├── scripts/                         # Terminal-Bench experiment runners and report tooling
+├── docs/                            # Design docs, experiment plans, and GitHub Pages reports
 ├── configs/gateway.yaml             # Default config
 ├── go.mod
 └── Makefile

@@ -86,13 +86,14 @@ type AuditRecord struct {
 	ErrorKind     string    `json:"error_kind,omitempty"`
 
 	// --- Task/Step correlation ---
-	// Populated from request headers (X-Trial-Name, X-Step-Name, X-Session-ID).
+	// Populated from request headers (X-Trial-Name, X-Step-Name, X-Session-ID)
+	// or gateway-normalized LiteLLM body metadata.
 	// Allows grouping multiple LLM calls into a single task run / step.
-	// Harbor agents pass these via LiteLLM extra_headers.
-	SessionID  string `json:"session_id,omitempty"`  // X-Session-ID (e.g. "{trial_name}__agent")
-	TrialName  string `json:"trial_name,omitempty"`  // X-Trial-Name (e.g. "trial-abc123")
-	StepName   string `json:"step_name,omitempty"`   // X-Step-Name (e.g. "fix-bug")
-	TaskName   string `json:"task_name,omitempty"`   // X-Task-Name (e.g. "data-anonymization")
+	// Harbor agents pass these via LiteLLM extra_headers or extra_body.
+	SessionID string `json:"session_id,omitempty"` // X-Session-ID (e.g. "{trial_name}__agent")
+	TrialName string `json:"trial_name,omitempty"` // X-Trial-Name (e.g. "trial-abc123")
+	StepName  string `json:"step_name,omitempty"`  // X-Step-Name (e.g. "fix-bug")
+	TaskName  string `json:"task_name,omitempty"`  // X-Task-Name (e.g. "data-anonymization")
 }
 
 // RequestBody is a convenience type for reading and restoring request bodies.

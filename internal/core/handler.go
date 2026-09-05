@@ -11,6 +11,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -119,13 +120,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		traceID = uuid.NewString()
 	}
 
-	// Extract task/step correlation headers (passed by harbor agents via LiteLLM extra_headers)
-	taskCtx := TaskContext{
-		SessionID: r.Header.Get("X-Session-ID"),
-		TrialName: r.Header.Get("X-Trial-Name"),
-		StepName:  r.Header.Get("X-Step-Name"),
-		TaskName:  r.Header.Get("X-Task-Name"),
+	// --- 1b. Buffer request body early — needed for session_id extraction ---
+	var bodyBytes []byte
+	if cached := routing.GetBodyBytes(r); cached != nil {
+		bodyBytes = cached
+	} else if r.Body != nil {
+		limited := io.LimitReader(r.Body, maxBodySize+1)
+		var err error
+		bodyBytes, err = io.ReadAll(limited)
+		r.Body.Close()
+		if err != nil {
+			slog.Error("failed to read request body", "error", err)
+			http.Error(w, "failed to read request body", http.StatusBadRequest)
+			return
+		}
+		r = routing.SetBodyBytes(r, bodyBytes)
 	}
+
+	taskCtx := extractTaskContext(r, bodyBytes)
+	normalizeTaskHeaders(r, taskCtx)
+	bodyBytes = stripInternalRequestFields(bodyBytes)
+	r = routing.SetBodyBytes(r, bodyBytes)
+
+	slog.Debug("handler: extracted task context",
+		"session_id", taskCtx.SessionID,
+		"trial_name", taskCtx.TrialName,
+		"step_name", taskCtx.StepName,
+		"task_name", taskCtx.TaskName,
+	)
 
 	// --- 2. Authenticators ---
 	for _, auth := range h.registry.Authenticators() {
@@ -145,25 +167,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// --- 3. Buffer request body ---
-	var bodyBytes []byte
-	if cached := routing.GetBodyBytes(r); cached != nil {
-		bodyBytes = cached
-	} else if r.Body != nil {
-		limited := io.LimitReader(r.Body, maxBodySize+1)
-		var err error
-		bodyBytes, err = io.ReadAll(limited)
-		r.Body.Close()
-		if err != nil {
-			slog.Error("failed to read request body", "error", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		r = routing.SetBodyBytes(r, bodyBytes)
-	}
+	// --- 3. Body already buffered in step 1b ---
 
-	// Extract original model from body (for audit)
-	originalModel := extractModel(bodyBytes, r.Header.Get("Content-Type"))
+	// Extract and normalize original model from body (for audit and pinned-model routing).
+	bodyBytes, originalModel := normalizeModelField(bodyBytes, r.Header.Get("Content-Type"))
+	r = routing.SetBodyBytes(r, bodyBytes)
 
 	// --- 4. Request Routers (chain-of-responsibility) ---
 	routedPool := ""
@@ -232,6 +240,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			finalModel = mapped
 		}
 	}
+
+	bodyBytes = ensureStreamUsage(bodyBytes, r.Header.Get("Content-Type"))
+	bodyBytes = ensureFlashReasoningLow(bodyBytes, r.Header.Get("Content-Type"), finalModel)
+	r = routing.SetBodyBytes(r, bodyBytes)
 
 	// Update Content-Length to match the (possibly rewritten) body.
 	// If Content-Length doesn't match body size, upstream CDNs like
@@ -329,15 +341,6 @@ func (h *Handler) proxyWithRetry(
 				)
 				break
 			}
-			ep.Inc()
-			metrics.ActiveRequests.WithLabelValues(currentPool.Name).Inc()
-
-			if bodyBytes != nil {
-				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			} else {
-				r.Body = http.NoBody
-			}
-
 			routing.SetMeta(r, ep.Name, attempt+1, currentPool != primaryPool)
 
 			span := trace.SpanFromContext(r.Context())
@@ -351,24 +354,60 @@ func (h *Handler) proxyWithRetry(
 			// Reset decisionWriter for this attempt
 			dw.reset()
 
-			breakerErr := error(nil)
-			_, err := ep.ExecuteWithBreaker(func() (struct{}, error) {
-				p := proxy.NewReverseProxy(ep)
-				p.ServeHTTP(dw, r)
-				if dw.code >= 500 || dw.code == http.StatusTooManyRequests {
-					return struct{}{}, fmt.Errorf("upstream returned %d", dw.code)
-				}
-				if dw.code == 0 {
-					return struct{}{}, fmt.Errorf("upstream proxy error")
-				}
-				return struct{}{}, nil
-			})
-			breakerErr = err
+			breakerErr := func() (err error) {
+				ep.Inc()
+				metrics.ActiveRequests.WithLabelValues(currentPool.Name).Inc()
 
-			ep.Dec()
-			metrics.ActiveRequests.WithLabelValues(currentPool.Name).Dec()
+				attemptReq := r
+				var cancel context.CancelFunc
+				if ep.Timeout > 0 {
+					var ctx context.Context
+					ctx, cancel = context.WithTimeout(r.Context(), ep.Timeout)
+					attemptReq = r.WithContext(ctx)
+				}
+				defer func() {
+					if cancel != nil {
+						cancel()
+					}
+					ep.Dec()
+					metrics.ActiveRequests.WithLabelValues(currentPool.Name).Dec()
+					if recovered := recover(); recovered != nil {
+						if recoveredErr, ok := recovered.(error); ok && errors.Is(recoveredErr, http.ErrAbortHandler) {
+							err = fmt.Errorf("proxy aborted: %w", recoveredErr)
+							return
+						}
+						panic(recovered)
+					}
+				}()
+
+				if bodyBytes != nil {
+					attemptReq.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				} else {
+					attemptReq.Body = http.NoBody
+				}
+
+				_, execErr := ep.ExecuteWithBreaker(func() (struct{}, error) {
+					p := proxy.NewReverseProxy(ep)
+					p.ServeHTTP(dw, attemptReq)
+					if dw.code >= 500 || dw.code == http.StatusTooManyRequests {
+						return struct{}{}, fmt.Errorf("upstream returned %d", dw.code)
+					}
+					if dw.code == 0 {
+						return struct{}{}, fmt.Errorf("upstream proxy error")
+					}
+					return struct{}{}, nil
+				})
+				return execErr
+			}()
 
 			if breakerErr != nil {
+				if dw.directMode {
+					slog.Warn("proxy aborted after response started",
+						"endpoint", ep.Name,
+						"error", breakerErr,
+					)
+					return
+				}
 				if errors.Is(breakerErr, gobreaker.ErrOpenState) {
 					slog.Warn("circuit breaker open, skipping endpoint",
 						"endpoint", ep.Name,
@@ -496,7 +535,9 @@ func (h *Handler) recordAudit(
 
 	// Calculate cost from tokens + pricing table
 	cost := 0.0
-	if h.pricing != nil && h.pricing.Enabled() && hasTokens {
+	if dw.hasCost {
+		cost = dw.cost
+	} else if h.pricing != nil && h.pricing.Enabled() && hasTokens {
 		cost = h.pricing.Calculate(finalModel, promptTokens, compTokens)
 	}
 
@@ -541,17 +582,187 @@ func (h *Handler) recordAudit(
 
 // --- Helpers ---
 
-func extractModel(body []byte, contentType string) string {
+func normalizeModelField(body []byte, contentType string) ([]byte, string) {
 	if !strings.HasPrefix(contentType, "application/json") || len(body) == 0 {
+		return body, ""
+	}
+	var req map[string]any
+	if json.Unmarshal(body, &req) != nil {
+		return body, ""
+	}
+	raw, ok := req["model"].(string)
+	if !ok {
+		return body, ""
+	}
+	model := strings.TrimSpace(raw)
+	if model == raw {
+		return body, model
+	}
+	req["model"] = model
+	out, err := json.Marshal(req)
+	if err != nil {
+		return body, model
+	}
+	return out, model
+}
+
+func extractTaskContext(r *http.Request, body []byte) TaskContext {
+	taskCtx := TaskContext{
+		SessionID: r.Header.Get("X-Session-ID"),
+		TrialName: r.Header.Get("X-Trial-Name"),
+		StepName:  r.Header.Get("X-Step-Name"),
+		TaskName:  r.Header.Get("X-Task-Name"),
+	}
+
+	if taskCtx.SessionID == "" {
+		if sid := sessionIDFromBody(body); sid != "" {
+			taskCtx.SessionID = sid
+		}
+	}
+	if taskCtx.TrialName == "" && taskCtx.SessionID != "" {
+		taskCtx.TrialName = trialNameFromSessionID(taskCtx.SessionID)
+	}
+	return taskCtx
+}
+
+func sessionIDFromBody(body []byte) string {
+	if len(body) == 0 {
 		return ""
 	}
-	var req struct {
-		Model string `json:"model"`
+	var req map[string]any
+	if json.Unmarshal(body, &req) != nil {
+		return ""
 	}
-	if json.Unmarshal(body, &req) == nil {
-		return req.Model
+	if sid, ok := req["session_id"].(string); ok {
+		return sid
+	}
+	if extraBody, ok := req["extra_body"].(map[string]any); ok {
+		if sid, ok := extraBody["session_id"].(string); ok {
+			return sid
+		}
 	}
 	return ""
+}
+
+func trialNameFromSessionID(sessionID string) string {
+	if trialName, ok := strings.CutSuffix(sessionID, "__agent"); ok {
+		return trialName
+	}
+	idx := strings.LastIndex(sessionID, "__")
+	if idx <= 0 {
+		return ""
+	}
+	return sessionID[:idx]
+}
+
+func normalizeTaskHeaders(r *http.Request, taskCtx TaskContext) {
+	// Normalize body-derived correlation values back into headers so routers,
+	// transformers, and audit sinks all see the same task context. The reverse
+	// proxy strips these internal headers before forwarding upstream.
+	if taskCtx.SessionID != "" {
+		r.Header.Set("X-Session-ID", taskCtx.SessionID)
+	}
+	if taskCtx.TrialName != "" {
+		r.Header.Set("X-Trial-Name", taskCtx.TrialName)
+	}
+	if taskCtx.StepName != "" {
+		r.Header.Set("X-Step-Name", taskCtx.StepName)
+	}
+	if taskCtx.TaskName != "" {
+		r.Header.Set("X-Task-Name", taskCtx.TaskName)
+	}
+}
+
+func stripInternalRequestFields(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	var req map[string]any
+	if json.Unmarshal(body, &req) != nil {
+		return body
+	}
+
+	changed := false
+	if _, ok := req["session_id"]; ok {
+		delete(req, "session_id")
+		changed = true
+	}
+	if extraBody, ok := req["extra_body"].(map[string]any); ok {
+		if _, ok := extraBody["session_id"]; ok {
+			delete(extraBody, "session_id")
+			changed = true
+		}
+		if len(extraBody) == 0 {
+			delete(req, "extra_body")
+		}
+	}
+	if !changed {
+		return body
+	}
+	out, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+func ensureStreamUsage(body []byte, contentType string) []byte {
+	if !strings.HasPrefix(contentType, "application/json") || len(body) == 0 {
+		return body
+	}
+	var req map[string]any
+	if json.Unmarshal(body, &req) != nil {
+		return body
+	}
+	stream, ok := req["stream"].(bool)
+	if !ok || !stream {
+		return body
+	}
+
+	streamOptions, ok := req["stream_options"].(map[string]any)
+	if !ok {
+		streamOptions = map[string]any{}
+		req["stream_options"] = streamOptions
+	}
+	if includeUsage, ok := streamOptions["include_usage"].(bool); ok && includeUsage {
+		return body
+	}
+
+	streamOptions["include_usage"] = true
+	out, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+func ensureFlashReasoningLow(body []byte, contentType, finalModel string) []byte {
+	if !strings.HasPrefix(contentType, "application/json") || len(body) == 0 {
+		return body
+	}
+	if finalModel != "z-ai/glm-5.3-flash" {
+		return body
+	}
+	var req map[string]any
+	if json.Unmarshal(body, &req) != nil {
+		return body
+	}
+	if _, ok := req["reasoning"]; ok {
+		return body
+	}
+	if _, ok := req["reasoning_effort"]; ok {
+		return body
+	}
+
+	req["reasoning"] = map[string]any{
+		"effort":  "low",
+		"exclude": true,
+	}
+	out, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 func rewriteModel(body []byte, newModel string) []byte {
