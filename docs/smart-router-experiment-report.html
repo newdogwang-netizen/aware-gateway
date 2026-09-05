@@ -36,7 +36,7 @@
         p { margin: 0 0 14px; }
         h1, h2, h3 { letter-spacing: 0; }
         h1 {
-            max-width: 880px;
+            max-width: 1000px;
             font-size: 2.5rem;
             line-height: 1.13;
             margin: 10px 0 14px;
@@ -224,6 +224,43 @@
             display: block;
             margin-bottom: 6px;
         }
+        .diagram-block {
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            margin: 18px 0 24px;
+            overflow: hidden;
+        }
+        .diagram-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 14px;
+            padding: 14px 16px 10px;
+            border-bottom: 1px solid var(--line);
+        }
+        .diagram-head h3 { margin: 0; }
+        .diagram-head p {
+            color: var(--muted);
+            font-size: 0.91rem;
+            margin: 4px 0 0;
+        }
+        .diagram-link {
+            flex: 0 0 auto;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            padding: 5px 10px;
+            font-size: 0.84rem;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .diagram-frame {
+            display: block;
+            width: 100%;
+            height: 620px;
+            border: 0;
+            background: #0f172a;
+        }
         .pass { color: var(--green); font-weight: 700; }
         .fail { color: var(--red); font-weight: 700; }
         .warn-text { color: var(--yellow); font-weight: 700; }
@@ -269,6 +306,9 @@
             .metrics, .flow, .grid-2, .grid-3 { grid-template-columns: 1fr; }
             table { display: block; overflow-x: auto; white-space: nowrap; }
             .bar-row { grid-template-columns: 1fr; gap: 5px; }
+            .diagram-head { display: block; }
+            .diagram-link { display: inline-flex; margin-top: 8px; }
+            .diagram-frame { height: 520px; }
         }
     </style>
 </head>
@@ -279,6 +319,8 @@
         <a href="https://github.com/newdogwang-netizen/aware-gateway">GitHub</a>
         <a href="experiment-plan-v4.zh.md">V4 方案</a>
         <a href="router-decision-lab.md">Decision Lab 设计</a>
+        <a href="aware-gateway-architecture.html">网关架构图</a>
+        <a href="prompt-routing-experiment.html">实验架构图</a>
     </nav>
 
     <section class="hero">
@@ -365,6 +407,17 @@
             <h3>Trace + Audit</h3>
             <p>记录 routed model、token、provider cost、status 和 decision reason。</p>
         </div>
+    </section>
+
+    <section class="diagram-block" aria-label="aware-gateway architecture diagram">
+        <div class="diagram-head">
+            <div>
+                <h3>aware-gateway 请求路由架构图</h3>
+                <p>从 agent 的 OpenAI-compatible 请求，到 smart-router 决策、provider 转发和 trace/audit 落盘。</p>
+            </div>
+            <a class="diagram-link" href="aware-gateway-architecture.html">打开大图</a>
+        </div>
+        <iframe class="diagram-frame" src="aware-gateway-architecture.html?embed=1" title="aware-gateway 请求路由架构图" loading="lazy"></iframe>
     </section>
 
     <div class="grid-2">
@@ -460,6 +513,17 @@
         真实执行后我们缩小范围。关键不是“跑了多少行表格”，而是 smart-router 相对强模型参照
         是否有清晰、可解释的质量/成本信号。
     </p>
+
+    <section class="diagram-block" aria-label="prompt routing experiment architecture diagram">
+        <div class="diagram-head">
+            <div>
+                <h3>Prompt 决策路由实验架构图</h3>
+                <p>上半部分是真实 benchmark trial；下半部分是冻结历史上下文后替换 prompt 的 replay 研究回路。</p>
+            </div>
+            <a class="diagram-link" href="prompt-routing-experiment.html">打开大图</a>
+        </div>
+        <iframe class="diagram-frame" src="prompt-routing-experiment.html?embed=1" title="Prompt 决策路由实验架构图" loading="lazy"></iframe>
+    </section>
 
     <section class="grid-3">
         <div class="panel">

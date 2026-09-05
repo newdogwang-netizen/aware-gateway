@@ -1,0 +1,263 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "aware-gateway 请求路由架构",
+    "output": "aware-gateway-architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/newdogwang-netizen/aware-gateway.git",
+      "revision": "af86eb4ec76b73f4f002f8c5d7f839d20a9947ec"
+    },
+    "views": [
+      {
+        "id": "request_path",
+        "label": "主请求链路",
+        "focus": ["agent", "server", "handler", "smart_router", "proxy_pool", "providers"],
+        "note": "从 agent 的 OpenAI-compatible 请求一路看到被选中的模型供应商。"
+      },
+      {
+        "id": "routing_policy",
+        "label": "路由决策",
+        "focus": ["handler", "plugin_registry", "smart_router", "decision_model", "task_router"],
+        "note": "smart-router 优先决策；失败或跳过时由 task-router 兜底。"
+      },
+      {
+        "id": "observability",
+        "label": "归因与观测",
+        "focus": ["handler", "proxy_pool", "audit_trace", "metrics"],
+        "note": "session、token、成本、状态和路由理由在请求结束时落入审计链路。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "agent",
+      "type": "external",
+      "label": "Coding Agent",
+      "sublabel": "OpenAI-compatible client",
+      "pos": [40, 250],
+      "size": [140, 72]
+    },
+    {
+      "id": "server",
+      "type": "backend",
+      "label": "HTTP Server",
+      "sublabel": "/v1/* routes",
+      "pos": [245, 250],
+      "size": [140, 72],
+      "sources": [
+        { "path": "cmd/gateway/main.go", "line": 110, "label": "server" }
+      ]
+    },
+    {
+      "id": "handler",
+      "type": "backend",
+      "label": "Core Handler",
+      "sublabel": "auth -> route -> transform",
+      "pos": [450, 250],
+      "size": [150, 72],
+      "sources": [
+        { "path": "internal/core/handler.go", "line": 89, "label": "ServeHTTP" }
+      ]
+    },
+    {
+      "id": "plugin_registry",
+      "type": "backend",
+      "label": "Plugin Registry",
+      "sublabel": "priority ordered hooks",
+      "pos": [450, 80],
+      "size": [150, 72],
+      "sources": [
+        { "path": "cmd/gateway/main.go", "line": 65, "label": "register" }
+      ]
+    },
+    {
+      "id": "smart_router",
+      "type": "backend",
+      "label": "Smart Router",
+      "sublabel": "prompt decision router",
+      "tag": "priority 50",
+      "pos": [680, 150],
+      "size": [160, 76],
+      "sources": [
+        { "path": "plugins/smartrouter/plugin.go", "line": 188, "label": "route" },
+        { "path": "plugins/smartrouter/plugin.go", "line": 1048, "label": "prompt" }
+      ]
+    },
+    {
+      "id": "decision_model",
+      "type": "cloud",
+      "label": "Decision Model",
+      "sublabel": "gpt-5.6-sol via OpenRouter",
+      "pos": [910, 70],
+      "size": [170, 76],
+      "sources": [
+        { "path": "configs/gateway-openrouter.yaml", "line": 69, "label": "config" }
+      ]
+    },
+    {
+      "id": "task_router",
+      "type": "backend",
+      "label": "Task Router",
+      "sublabel": "rule-based fallback",
+      "tag": "priority 100",
+      "pos": [680, 330],
+      "size": [160, 76],
+      "sources": [
+        { "path": "plugins/taskrouter/router.go", "label": "fallback" }
+      ]
+    },
+    {
+      "id": "proxy_pool",
+      "type": "backend",
+      "label": "Proxy + Pool",
+      "sublabel": "model-aware endpoint select",
+      "pos": [910, 250],
+      "size": [170, 76],
+      "sources": [
+        { "path": "internal/core/handler.go", "line": 243, "label": "proxy" },
+        { "path": "internal/proxy/reverse.go", "label": "reverse proxy" }
+      ]
+    },
+    {
+      "id": "providers",
+      "type": "external",
+      "label": "Model Providers",
+      "sublabel": "OpenRouter / OpenAI / vLLM",
+      "pos": [1140, 250],
+      "size": [170, 76]
+    },
+    {
+      "id": "audit_trace",
+      "type": "database",
+      "label": "Audit + Trace",
+      "sublabel": "session, token, cost, reason",
+      "pos": [910, 455],
+      "size": [170, 76],
+      "sources": [
+        { "path": "internal/core/handler.go", "line": 361, "label": "audit" },
+        { "path": "plugins/audit/plugin.go", "label": "audit sink" }
+      ]
+    },
+    {
+      "id": "metrics",
+      "type": "messagebus",
+      "label": "Metrics / OTel",
+      "sublabel": "Prometheus + traces",
+      "pos": [1140, 455],
+      "size": [170, 76],
+      "sources": [
+        { "path": "internal/metrics/metrics.go", "label": "metrics" },
+        { "path": "plugins/otelgenai/plugin.go", "label": "otel" }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "aware-gateway process",
+      "wraps": ["server", "handler", "plugin_registry", "smart_router", "task_router", "proxy_pool", "audit_trace"],
+      "pad": 24
+    },
+    {
+      "kind": "region",
+      "label": "model API layer",
+      "wraps": ["decision_model", "providers"],
+      "pad": 24
+    }
+  ],
+  "connections": [
+    {
+      "id": "agent_to_server",
+      "from": "agent",
+      "to": "server",
+      "label": "OpenAI API",
+      "variant": "emphasis"
+    },
+    {
+      "id": "server_to_handler",
+      "from": "server",
+      "to": "handler"
+    },
+    {
+      "id": "handler_to_registry",
+      "from": "handler",
+      "to": "plugin_registry",
+      "label": "load hooks"
+    },
+    {
+      "id": "registry_to_smart",
+      "from": "plugin_registry",
+      "to": "smart_router"
+    },
+    {
+      "id": "smart_to_decision",
+      "from": "smart_router",
+      "to": "decision_model",
+      "label": "prompt -> JSON",
+      "labelAt": [850, 135]
+    },
+    {
+      "id": "smart_to_proxy",
+      "from": "smart_router",
+      "to": "proxy_pool"
+    },
+    {
+      "id": "registry_to_task",
+      "from": "plugin_registry",
+      "to": "task_router",
+      "variant": "dashed"
+    },
+    {
+      "id": "task_to_proxy",
+      "from": "task_router",
+      "to": "proxy_pool",
+      "variant": "dashed"
+    },
+    {
+      "id": "proxy_to_providers",
+      "from": "proxy_pool",
+      "to": "providers",
+      "label": "routed API",
+      "labelAt": [1110, 340],
+      "variant": "emphasis"
+    },
+    {
+      "id": "proxy_to_audit",
+      "from": "proxy_pool",
+      "to": "audit_trace"
+    },
+    {
+      "id": "audit_to_metrics",
+      "from": "audit_trace",
+      "to": "metrics"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "路由层",
+      "items": [
+        "smart-router 先用 prompt 决策模型选择 pool/model",
+        "task-router 保留为规则兜底"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "代理层",
+      "items": [
+        "Core Handler 重写 model 字段并维护 session metadata",
+        "Proxy + Pool 选择真正服务该模型的 endpoint"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "实验归因",
+      "items": [
+        "每次 agent call 和 decision call 都进入 audit/trace",
+        "成本优先取 provider upstream_inference_cost"
+      ]
+    }
+  ]
+}

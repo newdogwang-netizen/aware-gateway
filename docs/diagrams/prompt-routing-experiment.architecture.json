@@ -1,0 +1,293 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Prompt 决策路由实验架构",
+    "output": "prompt-routing-experiment.html",
+    "quality_profile": "showcase",
+    "viewBox": [1540, 650],
+    "repository": {
+      "url": "https://github.com/newdogwang-netizen/aware-gateway.git",
+      "revision": "af86eb4ec76b73f4f002f8c5d7f839d20a9947ec"
+    },
+    "views": [
+      {
+        "id": "live_trial",
+        "label": "真实 trial",
+        "focus": ["task_scope", "runner", "terminus_agent", "gateway", "providers", "verifier", "run_artifacts"],
+        "note": "Harbor/Terminal-Bench task 通过 gateway 真实调用模型，再由 verifier 判定 reward。"
+      },
+      {
+        "id": "decision_capture",
+        "label": "决策数据",
+        "focus": ["gateway", "decision_model", "decision_dataset", "run_artifacts"],
+        "note": "每次 router prompt 决策都保存上下文、模型选择、理由和成本。"
+      },
+      {
+        "id": "replay_loop",
+        "label": "Replay 回路",
+        "focus": ["prompt_variants", "decision_replay", "decision_dataset", "reports"],
+        "note": "冻结已有上下文，只替换 router prompt，先离线比较模型分配。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "task_scope",
+      "type": "external",
+      "label": "任务选择",
+      "sublabel": "shadow-relay + stress task",
+      "pos": [40, 190],
+      "size": [150, 76],
+      "sources": [
+        { "path": "docs/experiment-plan-v4.zh.md", "label": "V4 plan" }
+      ]
+    },
+    {
+      "id": "runner",
+      "type": "backend",
+      "label": "V4 Runner",
+      "sublabel": "run_v4_matrix.sh",
+      "pos": [300, 190],
+      "size": [150, 76],
+      "sources": [
+        { "path": "scripts/run_v4_matrix.sh", "label": "runner" }
+      ]
+    },
+    {
+      "id": "terminus_agent",
+      "type": "external",
+      "label": "Terminus Agent",
+      "sublabel": "benchmark solver",
+      "pos": [560, 190],
+      "size": [150, 76]
+    },
+    {
+      "id": "gateway",
+      "type": "backend",
+      "label": "aware-gateway",
+      "sublabel": "smart-router enabled",
+      "pos": [820, 190],
+      "size": [160, 76],
+      "sources": [
+        { "path": "configs/gateway-openrouter.yaml", "line": 66, "label": "smart-router" },
+        { "path": "plugins/smartrouter/plugin.go", "line": 1048, "label": "prompt" }
+      ]
+    },
+    {
+      "id": "decision_model",
+      "type": "cloud",
+      "label": "Decision Model",
+      "sublabel": "gpt-5.6-sol",
+      "pos": [820, 50],
+      "size": [160, 72]
+    },
+    {
+      "id": "providers",
+      "type": "external",
+      "label": "模型菜单",
+      "sublabel": "GLM flash / Opus 5",
+      "pos": [1090, 190],
+      "size": [160, 76]
+    },
+    {
+      "id": "verifier",
+      "type": "security",
+      "label": "Verifier",
+      "sublabel": "reward + hidden tests",
+      "pos": [1360, 190],
+      "size": [150, 76]
+    },
+    {
+      "id": "run_artifacts",
+      "type": "database",
+      "label": "Run Artifacts",
+      "sublabel": "trajectory / ctrf / CSV",
+      "pos": [1360, 390],
+      "size": [150, 76],
+      "sources": [
+        { "path": "scripts/analyze_v3_results.py", "label": "analysis" },
+        { "path": "scripts/render_v4_blog_report.py", "label": "report" }
+      ]
+    },
+    {
+      "id": "decision_dataset",
+      "type": "database",
+      "label": "Decision Dataset",
+      "sublabel": "router-decisions.json",
+      "pos": [815, 390],
+      "size": [170, 76],
+      "sources": [
+        { "path": "scripts/build_router_decision_lab.py", "label": "dataset" }
+      ]
+    },
+    {
+      "id": "decision_replay",
+      "type": "backend",
+      "label": "Decision Replay",
+      "sublabel": "freeze context, rerun prompt",
+      "pos": [815, 520],
+      "size": [170, 64],
+      "sources": [
+        { "path": "scripts/replay_router_decisions.py", "label": "replay" }
+      ]
+    },
+    {
+      "id": "prompt_variants",
+      "type": "backend",
+      "label": "Prompt 变体",
+      "sublabel": "cost / critical path / history",
+      "pos": [560, 520],
+      "size": [170, 64]
+    },
+    {
+      "id": "reports",
+      "type": "frontend",
+      "label": "HTML Reports",
+      "sublabel": "blog + decision lab",
+      "pos": [1360, 520],
+      "size": [150, 64],
+      "sources": [
+        { "path": "docs/smart-router-experiment-report.html", "label": "blog" },
+        { "path": "docs/router-decision-lab.md", "label": "lab notes" }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "live benchmark loop",
+      "wraps": ["task_scope", "runner", "terminus_agent", "gateway", "decision_model", "providers", "verifier", "run_artifacts"],
+      "pad": 24
+    },
+    {
+      "kind": "region",
+      "label": "offline prompt research loop",
+      "wraps": ["decision_dataset", "decision_replay", "prompt_variants", "reports"],
+      "pad": 24
+    }
+  ],
+  "connections": [
+    {
+      "id": "task_to_runner",
+      "from": "task_scope",
+      "to": "runner",
+      "label": "task set",
+      "labelAt": [245, 178],
+      "variant": "emphasis"
+    },
+    {
+      "id": "runner_to_agent",
+      "from": "runner",
+      "to": "terminus_agent",
+      "label": "start trial",
+      "labelAt": [505, 178]
+    },
+    {
+      "id": "agent_to_gateway",
+      "from": "terminus_agent",
+      "to": "gateway",
+      "label": "model=auto",
+      "labelAt": [765, 178]
+    },
+    {
+      "id": "gateway_to_decision",
+      "from": "gateway",
+      "to": "decision_model",
+      "label": "router prompt",
+      "labelAt": [900, 150]
+    },
+    {
+      "id": "gateway_to_providers",
+      "from": "gateway",
+      "to": "providers",
+      "label": "routed call",
+      "labelAt": [1035, 178],
+      "variant": "emphasis"
+    },
+    {
+      "id": "providers_to_verifier",
+      "from": "providers",
+      "to": "verifier",
+      "label": "task output",
+      "labelAt": [1300, 178]
+    },
+    {
+      "id": "verifier_to_artifacts",
+      "from": "verifier",
+      "to": "run_artifacts",
+      "label": "reward + tests",
+      "labelAt": [1435, 340]
+    },
+    {
+      "id": "gateway_to_dataset",
+      "from": "gateway",
+      "to": "decision_dataset",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight",
+      "label": "context + route",
+      "labelAt": [900, 340]
+    },
+    {
+      "id": "artifacts_to_reports",
+      "from": "run_artifacts",
+      "to": "reports",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight",
+      "variant": "dashed"
+    },
+    {
+      "id": "dataset_to_replay",
+      "from": "decision_dataset",
+      "to": "decision_replay",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight",
+      "label": "frozen contexts",
+      "labelAt": [1000, 495]
+    },
+    {
+      "id": "variants_to_replay",
+      "from": "prompt_variants",
+      "to": "decision_replay",
+      "label": "new prompt",
+      "labelAt": [775, 500]
+    },
+    {
+      "id": "replay_to_reports",
+      "from": "decision_replay",
+      "to": "reports",
+      "label": "allocation stats",
+      "labelAt": [1170, 500],
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "真实运行",
+      "items": [
+        "trial 真实调用模型并产生 reward、成本和轨迹",
+        "质量判断只看 verifier，不看 router 自己的理由"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Prompt 决策",
+      "items": [
+        "router prompt 每次只输出 pool/model/reason",
+        "决策上下文被保存，后续可复放"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Replay 研究",
+      "items": [
+        "冻结历史上下文，替换 prompt 比较模型分配",
+        "replay 只筛 prompt，再用少量 live trial 验质量"
+      ]
+    }
+  ]
+}
