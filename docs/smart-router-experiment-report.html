@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>aware-gateway - Smart Router 设计与实验</title>
+    <title>aware-gateway - 第一阶段 Prompt 决策路由复盘</title>
     <style>
         :root {
             color-scheme: light;
@@ -283,15 +283,15 @@
 
     <section class="hero">
         <div class="eyebrow">2026-09-05 · Gateway · Smart Routing</div>
-        <h1>aware-gateway：把模型预算花在关键步骤上</h1>
+        <h1>aware-gateway：第一阶段 Prompt 决策路由复盘</h1>
         <p class="lede">
             Coding agent 在一个任务里往往会调用模型几十次。aware-gateway 放在 agent 和模型供应商之间，
-            把这些调用变成可路由、可计费、可追踪、可复盘的事件。本次实验用 Terminal-Bench 检验一个朴素假设：
-            简单步骤交给便宜模型，关键步骤再升级到强模型，是否能在质量不明显下降的前提下降低成本。
+            把这些调用变成可路由、可计费、可追踪、可复盘的事件。第一阶段没有训练模型，也没有做复杂策略引擎；
+            只做一件事：把每次调用的上下文整理成 prompt，让一个决策模型判断该用便宜模型还是强模型。
         </p>
         <div>
             <span class="tag">OpenAI-compatible reverse proxy</span>
-            <span class="tag">per-turn model routing</span>
+            <span class="tag">prompt-based decision router</span>
             <span class="tag">gateway trace cost accounting</span>
             <span class="tag">decision replay</span>
         </div>
@@ -299,32 +299,32 @@
 
     <section class="metrics">
         <div class="metric">
-            <div class="label">Primary signal</div>
+            <div class="label">主信号</div>
             <span class="value">4/4 pass</span>
             <div class="note"><code>shadow-relay</code> V4 smart-router + warmstart 主矩阵全部通过。</div>
         </div>
         <div class="metric">
-            <div class="label">Best live pilot</div>
+            <div class="label">最好真实 pilot</div>
             <span class="value">$2.68</span>
             <div class="note">critical-path-budget-v2 在 <code>shadow-relay</code> 上通过，14 次 agent 调用。</div>
         </div>
         <div class="metric">
-            <div class="label">Decision data</div>
+            <div class="label">决策数据</div>
             <span class="value">976</span>
             <div class="note">累计 smart-router decision calls，可用于离线 prompt replay。</div>
         </div>
         <div class="metric">
-            <div class="label">Current direction</div>
+            <div class="label">下一步方向</div>
             <span class="value">stateful</span>
-            <div class="note">router 需要任务阶段和最近历史，不只是“看到成本就省钱”。</div>
+            <div class="note">prompt 需要任务阶段和最近历史，不只是“看到成本就省钱”。</div>
         </div>
     </section>
 
     <div class="callout good">
         <p>
-            结论先说清楚：<strong>smart-router 有价值，但它不是一个简单的“便宜优先”开关。</strong>
-            好的 router 要把强模型调用集中到关键假设、恢复和最终收敛阶段；把便宜模型放在读取上下文、
-            机械探查和 bounded validation 上。否则，它要么过度保守、成本降不下来，要么盲目省钱、质量掉下来。
+            第一阶段的核心经验：<strong>prompt 决策可以跑通，但 prompt 必须描述“任务状态”，不能只描述“模型价格”。</strong>
+            只告诉决策模型 Opus 很贵，通常会得到保守选择；告诉它当前是探索、关键假设、恢复还是收尾，
+            才会开始形成可解释的路由行为。
         </p>
     </div>
 
@@ -378,23 +378,69 @@
         </div>
     </div>
 
-    <h2>2. Smart Router 的策略空间</h2>
+    <h2>2. 第一阶段 Prompt 决策架构</h2>
     <p>
-        当前实验故意把菜单收窄到两档模型：<code>z-ai/glm-5.3-flash</code> 和
-        <code>anthropic/claude-opus-5</code>。这让实验更容易解释：每次决策基本都在回答
-        “这一步值不值得花 Opus 的钱”。
+        第一阶段的 smart-router 是一个 prompt-based router。它不改 agent 的规划方式，也不训练新的 classifier。
+        每次 agent 发起模型调用，网关把当前调用压缩成一个结构化 prompt，交给决策模型，然后把返回的 JSON
+        解析成最终路由决策。
     </p>
 
     <table>
         <tr>
-            <th>Component</th>
-            <th>Current choice</th>
-            <th>Reason</th>
+            <th>Prompt block</th>
+            <th>包含什么</th>
+            <th>为什么需要</th>
+        </tr>
+        <tr>
+            <td>Request snapshot</td>
+            <td>最新用户/agent 消息、system prompt 片段、message count、粗略 token 规模。</td>
+            <td>判断这一步是在读上下文、写代码、恢复错误，还是准备最终收敛。</td>
+        </tr>
+        <tr>
+            <td>Model menu</td>
+            <td><code>z-ai/glm-5.3-flash</code> 与 <code>anthropic/claude-opus-5</code> 的价格、能力和上下文窗口。</td>
+            <td>把选择空间固定成“便宜档 vs 强模型档”，避免中间模型干扰实验解释。</td>
+        </tr>
+        <tr>
+            <td>Decision policy</td>
+            <td>便宜优先、关键路径升级、连续恢复要控制预算、最终验证不要省错钱。</td>
+            <td>把“省钱”改写成更具体的操作规则，而不是一句模糊目标。</td>
+        </tr>
+        <tr>
+            <td>Recent memory</td>
+            <td>最近 5 轮的 selected model、turn type、hypothesis state、critical path、context summary、reason。</td>
+            <td>避免每次决策都像第一次见到任务；让 router 知道刚才已经试过什么。</td>
+        </tr>
+        <tr>
+            <td>Output schema</td>
+            <td><code>model</code>、<code>turn_type</code>、<code>hypothesis_state</code>、<code>critical_path</code>、<code>recoverability</code>、<code>context_summary</code>、<code>reason</code>。</td>
+            <td>保证结果可解析、可审计、可 replay，而不是只得到一段自然语言解释。</td>
+        </tr>
+    </table>
+
+    <pre><code>agent request
+  -> gateway extracts request snapshot
+  -> prompt = model menu + policy + recent memory + output schema
+  -> decision model returns JSON
+  -> parser validates selected model
+  -> proxy sends request to selected provider
+  -> trace/audit stores cost, route, reason, and session id</code></pre>
+
+    <p>
+        当前实验故意把菜单收窄到两档模型：<code>z-ai/glm-5.3-flash</code> 和
+        <code>anthropic/claude-opus-5</code>。这让每次决策都足够清楚：这一步到底值不值得花 Opus 的钱。
+    </p>
+
+    <table>
+        <tr>
+            <th>运行时选择</th>
+            <th>当前配置</th>
+            <th>用途</th>
         </tr>
         <tr>
             <td>Decision model</td>
             <td><code>openai/gpt-5.6-sol</code></td>
-            <td>替代已移除的 Qwen3-27B endpoint，用稳定外部模型产生结构化路由决策。</td>
+            <td>产生结构化路由决策，替代已移除的 Qwen3-27B endpoint。</td>
         </tr>
         <tr>
             <td>Cheap model</td>
@@ -404,17 +450,7 @@
         <tr>
             <td>Premium model</td>
             <td><code>anthropic/claude-opus-5</code></td>
-            <td>作为质量锚点，用在高风险推理、恢复和最终收敛。</td>
-        </tr>
-        <tr>
-            <td>Warm-start</td>
-            <td>前 5 次 agent 调用强制 Opus</td>
-            <td>先用强模型建立方向和任务状态，再让 router 自由选择。</td>
-        </tr>
-        <tr>
-            <td>Recent memory</td>
-            <td>最近 5 轮决策摘要</td>
-            <td>让 router 知道刚才是否已经升级过、是否连续恢复失败、是否该降级做便宜验证。</td>
+            <td>质量锚点，用在高风险推理、恢复和最终收敛。</td>
         </tr>
     </table>
 
@@ -442,9 +478,9 @@
 
     <table>
         <tr>
-            <th>Design decision</th>
-            <th>Final scope</th>
-            <th>Why</th>
+            <th>设计取舍</th>
+            <th>最终范围</th>
+            <th>原因</th>
         </tr>
         <tr>
             <td>External baseline</td>
@@ -484,9 +520,9 @@
 
     <table>
         <tr>
-            <th>Question</th>
-            <th>Evidence</th>
-            <th>Developer takeaway</th>
+            <th>问题</th>
+            <th>证据</th>
+            <th>读法</th>
         </tr>
         <tr>
             <td><code>shadow-relay</code> 是否适合作主任务？</td>
@@ -515,54 +551,61 @@
         </tr>
     </table>
 
-    <h2>5. Shadow Relay 上的策略成本</h2>
+    <h2>5. 有效的几轮数据</h2>
     <p>
-        下面只看已经通过的 <code>shadow-relay</code> live runs。旧 canary、失败排查和无效早期矩阵不放入主表，
-        因为它们会把工程排查噪声混进实验结论。
+        第一阶段真正有参考价值的是几轮能够说明 prompt 决策变化的数据。下面只保留
+        <code>shadow-relay</code> 上通过的 live runs 和公开强模型参照；旧 canary、失败排查和无效早期矩阵不放入主表。
+        模型分配按 analysis CSV 里的 agent 实际路由口径汇总。
     </p>
 
     <table>
         <tr>
-            <th>Strategy family</th>
+            <th>轮次</th>
             <th class="num">Reward</th>
             <th class="num">Cost</th>
-            <th class="num">Agent calls</th>
-            <th>What changed</th>
+            <th>模型分配</th>
+            <th>决策记录</th>
+            <th>这轮说明什么</th>
         </tr>
         <tr>
-            <td>Public Opus 5 reference</td>
+            <td>公开 Opus 5 参照</td>
             <td class="num pass">5/5</td>
             <td class="num">$1.58-$2.94</td>
-            <td class="num">n/a</td>
-            <td>外部强模型锚点，不含我们的 router decision logs。</td>
+            <td>纯 Opus，公开榜单无 router 日志</td>
+            <td>无</td>
+            <td>这是质量和成本锚点：<code>shadow-relay</code> 对强模型是可解题。</td>
         </tr>
         <tr>
-            <td>V4 smart-router</td>
+            <td>V4 普通 smart-router</td>
             <td class="num pass">2/2</td>
             <td class="num">avg $4.56</td>
-            <td class="num">avg 20.5</td>
-            <td>质量达标，但 router 仍偏保守。</td>
+            <td>Opus 36 / Flash 5</td>
+            <td>39 条</td>
+            <td>prompt 决策能保住质量，但没有自动省到公开 Opus 成本区间。</td>
         </tr>
         <tr>
-            <td>V4 smart-router-warmstart</td>
+            <td>V4 warm-start</td>
             <td class="num pass">2/2</td>
             <td class="num">avg $3.39</td>
-            <td class="num">avg 21.0</td>
-            <td>前 5 步 Opus 建立上下文后，成本更稳定。</td>
+            <td>Opus 40 / Flash 2</td>
+            <td>33 条，加前 5 步强制 Opus</td>
+            <td>先用强模型建立方向，再让 prompt router 接管，比完全自由选择更稳。</td>
         </tr>
         <tr>
-            <td>Critical-path-budget-v2 pilot</td>
+            <td>Critical-path-budget-v2</td>
             <td class="num pass">1/1</td>
             <td class="num">$2.68</td>
-            <td class="num">14</td>
-            <td>目前最接近公开 Opus 成本区间，同时保住 reward。</td>
+            <td>Opus 9 / Flash 5</td>
+            <td>13 条</td>
+            <td>第一阶段最好的 live 信号：把 Opus 留给关键路径，成本接近公开参照。</td>
         </tr>
         <tr>
-            <td>History-aware live pilot</td>
+            <td>History-aware live</td>
             <td class="num pass">1/1</td>
             <td class="num">$4.45</td>
-            <td class="num">23</td>
-            <td>Flash 14 / Opus 8，给出更强的状态化路由信号。</td>
+            <td>Opus 7 / Flash 16</td>
+            <td>22 条，带最近 5 轮摘要</td>
+            <td>成本不是最低，但说明最近 5 轮记忆会显著改变路由行为。</td>
         </tr>
     </table>
 
@@ -595,28 +638,28 @@
 
     <table>
         <tr>
-            <th>Router prompt idea</th>
-            <th>Live signal</th>
-            <th>What it teaches</th>
+            <th>Prompt 思路</th>
+            <th>真实 run 信号</th>
+            <th>这轮学到什么</th>
         </tr>
         <tr>
             <td>Cost-aware</td>
-            <td><code>shadow-relay</code> 通过，但成本 $6.26，Flash 2 / Opus 25。</td>
+            <td><code>shadow-relay</code> 通过，但成本 $6.26，agent 路由 Opus 24 / Flash 4。</td>
             <td>把价格写进 prompt 会提醒 router，但不会自动形成好策略。模型为了安全仍会大量选 Opus。</td>
         </tr>
         <tr>
             <td>Flash = Opus 75% intelligence</td>
-            <td><code>shadow-relay</code> 通过，但成本 $6.87，Flash 5 / Opus 22。</td>
+            <td><code>shadow-relay</code> 通过，但成本 $6.87，agent 路由 Opus 21 / Flash 7。</td>
             <td>能力先验有用，但仍然太粗。router 需要知道任务阶段，而不是只知道两个模型强弱比例。</td>
         </tr>
         <tr>
             <td>Critical-path budget</td>
-            <td><code>shadow-relay</code> 通过，成本 $2.68，14 次 agent 调用。</td>
+            <td><code>shadow-relay</code> 通过，成本 $2.68，agent 路由 Opus 9 / Flash 5。</td>
             <td>最好的 live 信号：把 Opus 留给关键假设和收敛，把 flash 用于机械探查和便宜验证。</td>
         </tr>
         <tr>
             <td>History-aware</td>
-            <td><code>shadow-relay</code> 通过，Flash 14 / Opus 8，成本 $4.45。</td>
+            <td><code>shadow-relay</code> 通过，agent 路由 Opus 7 / Flash 16，成本 $4.45。</td>
             <td>最近 5 轮决策摘要让 router 有“路线感”。即使成本不是最低，它给出了更可泛化的控制结构。</td>
         </tr>
     </table>
@@ -629,9 +672,9 @@
 
     <table>
         <tr>
-            <th>Replay family</th>
-            <th>Observed allocation</th>
-            <th>Interpretation</th>
+            <th>Replay 方向</th>
+            <th>模型分配</th>
+            <th>读法</th>
         </tr>
         <tr>
             <td>Cost-aware</td>
@@ -657,7 +700,7 @@
         </p>
     </div>
 
-    <h2>8. 工程结论</h2>
+    <h2>8. 第一阶段经验</h2>
     <ol>
         <li>
             <strong>先修 trace，再谈 benchmark。</strong>
