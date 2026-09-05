@@ -282,12 +282,12 @@
     </nav>
 
     <section class="hero">
-        <div class="eyebrow">2026-09-05 · AI Gateway · Smart Routing</div>
-        <h1>aware-gateway 设计案例：让 AI Agent 更会花模型预算</h1>
+        <div class="eyebrow">2026-09-05 · Gateway · Smart Routing</div>
+        <h1>aware-gateway：把模型预算花在关键步骤上</h1>
         <p class="lede">
-            这是一篇给外部开发者看的工程 case study。我们把一个 OpenAI-compatible 网关放在 agent 和模型供应商之间，
-            让每一次模型调用都可以被路由、计费、追踪和复盘。然后用 Terminal-Bench 检验一个具体假设：
-            能不能把简单步骤交给便宜模型，把关键步骤交给强模型，在质量不明显下降的前提下降低成本。
+            Coding agent 在一个任务里往往会调用模型几十次。aware-gateway 放在 agent 和模型供应商之间，
+            把这些调用变成可路由、可计费、可追踪、可复盘的事件。本次实验用 Terminal-Bench 检验一个朴素假设：
+            简单步骤交给便宜模型，关键步骤再升级到强模型，是否能在质量不明显下降的前提下降低成本。
         </p>
         <div>
             <span class="tag">OpenAI-compatible reverse proxy</span>
@@ -328,7 +328,7 @@
         </p>
     </div>
 
-    <h2>1. 为什么需要一个 AI Gateway</h2>
+    <h2>1. 为什么需要一个模型网关</h2>
     <p>
         Coding agent 做一个任务时，通常不是一次模型调用结束。它会读文件、搜索线索、改代码、跑测试、
         解释失败、再继续修。一个 trial 里几十次模型调用很常见，而这些调用的风险和价值并不一样。
@@ -421,8 +421,8 @@
     <h2>3. 实验设计：少跑，但对照点要清楚</h2>
     <p>
         最早的设计想跑大矩阵：多个任务、all-flash、all-premium、smart-router、多次重复。
-        真实执行后我们缩小范围，因为外部开发者真正关心的不是“跑了多少行表格”，而是 smart-router
-        相对强模型参照是否有可解释的质量/成本信号。
+        真实执行后我们缩小范围。关键不是“跑了多少行表格”，而是 smart-router 相对强模型参照
+        是否有清晰、可解释的质量/成本信号。
     </p>
 
     <section class="grid-3">
@@ -462,9 +462,9 @@
             <td>公开 Opus 5 5/5，但本地 reduced-time 下暴露长路径、provider tail 和上下文膨胀。</td>
         </tr>
         <tr>
-            <td>Removed from headline</td>
+            <td>不放入主结论</td>
             <td>all-flash、早期 V3、canary、无效 trace 口径</td>
-            <td>这些数据对工程排查有用，但不适合支撑对外结论。</td>
+            <td>这些数据对工程排查有用，但不适合支撑主结论。</td>
         </tr>
     </table>
 
@@ -472,13 +472,13 @@
         <p>
             成本口径也做了收敛：V4 主实验之后优先使用 gateway trace 捕获到的
             <code>upstream_inference_cost</code>，并把 decision model 自己的成本计入总成本。
-            早期 trajectory 重算成本只保留为调试历史，不作为本文 headline evidence。
+            早期 trajectory 重算成本只保留为调试历史，不作为主证据。
         </p>
     </div>
 
     <h2>4. 核心结果：把对照点合在一张表里</h2>
     <p>
-        这张表是本文最重要的证据。它不是 run log，而是回答一个产品化问题：
+        这张表是核心证据。它不是 run log，而是回答一个产品化问题：
         如果把 aware-gateway 接到 agent 前面，smart-router 在可解任务上能不能保持质量，成本是否进入可接受区间？
     </p>
 
@@ -518,7 +518,7 @@
     <h2>5. Shadow Relay 上的策略成本</h2>
     <p>
         下面只看已经通过的 <code>shadow-relay</code> live runs。旧 canary、失败排查和无效早期矩阵不放入主表，
-        因为它们会让读者把工程噪声误读成实验结论。
+        因为它们会把工程排查噪声混进实验结论。
     </p>
 
     <table>
@@ -657,7 +657,7 @@
         </p>
     </div>
 
-    <h2>8. 给 LLM 网关开发者的工程结论</h2>
+    <h2>8. 工程结论</h2>
     <ol>
         <li>
             <strong>先修 trace，再谈 benchmark。</strong>
@@ -699,8 +699,8 @@
 
     <section class="footnote">
         <p>
-            Reproducibility: 本文有意只保留支撑 developer-facing 论证的证据。历史 V3/canary runs、
-            原始 run logs 和生成的 lab 页面仍可用于审计，但不作为 headline evidence。公开参照来自 Harbor
+            Reproducibility: 这份报告只保留支撑主线判断的证据。历史 V3/canary runs、
+            原始 run logs 和生成的 lab 页面仍可用于审计，但不作为主证据。公开参照来自 Harbor
             leaderboard 的 task-level Opus 5 明细；本地成本优先来自 gateway trace 的
             <code>upstream_inference_cost</code>。
         </p>
