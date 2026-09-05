@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>aware-gateway - Smart Router 实验阶段报告</title>
+    <title>aware-gateway - Smart Router 完整实验故事</title>
     <style>
         :root {
             --bg: #0d1117;
@@ -143,6 +143,98 @@
             border-left-color: var(--yellow);
             background: rgba(210, 153, 34, 0.09);
         }
+        .section-lead {
+            color: #c9d1d9;
+            font-size: 1.02rem;
+        }
+        .storyline {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 12px;
+            margin: 16px 0 22px;
+        }
+        .story-step {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-top: 3px solid var(--accent);
+            border-radius: 8px;
+            padding: 14px;
+            min-height: 150px;
+        }
+        .story-step:nth-child(2) { border-top-color: var(--cyan); }
+        .story-step:nth-child(3) { border-top-color: var(--yellow); }
+        .story-step:nth-child(4) { border-top-color: var(--green); }
+        .story-step .small-label {
+            color: var(--muted);
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            margin-bottom: 6px;
+        }
+        .story-step strong {
+            display: block;
+            margin-bottom: 6px;
+        }
+        .gateway-map {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 10px;
+            margin: 18px 0 20px;
+        }
+        .gateway-node {
+            min-height: 136px;
+            background: linear-gradient(180deg, rgba(31, 36, 45, 0.96), rgba(22, 27, 34, 0.98));
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px;
+        }
+        .gateway-node .num {
+            color: var(--cyan);
+            font-size: 0.78rem;
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+        .gateway-node strong {
+            display: block;
+            margin-bottom: 6px;
+        }
+        .design-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+            margin: 14px 0 20px;
+        }
+        .design-item {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--cyan);
+            border-radius: 0 8px 8px 0;
+            padding: 14px;
+        }
+        .design-item:nth-child(2) { border-left-color: var(--green); }
+        .design-item:nth-child(3) { border-left-color: var(--yellow); }
+        .design-item:nth-child(4) { border-left-color: var(--accent); }
+        .design-item strong {
+            display: block;
+            margin-bottom: 6px;
+        }
+        .equation {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+            margin: 16px 0 20px;
+        }
+        .equation > div {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px;
+        }
+        .equation strong {
+            color: var(--cyan);
+            display: block;
+            margin-bottom: 6px;
+        }
         .pass { color: var(--green); font-weight: 600; }
         .fail { color: var(--red); font-weight: 600; }
         .warn-text { color: var(--yellow); font-weight: 600; }
@@ -180,6 +272,7 @@
             body { padding: 28px 14px 44px; }
             h1 { font-size: 1.55rem; }
             .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .storyline, .gateway-map, .design-grid, .equation { grid-template-columns: 1fr; }
             table { display: block; overflow-x: auto; white-space: nowrap; }
             .bar-row { grid-template-columns: 1fr; gap: 5px; }
         }
@@ -195,12 +288,12 @@
 
 <section class="hero">
     <p class="muted">2026-09-05 · aware-gateway · Terminal-Bench · smart-router</p>
-    <h1>Smart Router 实验阶段报告：我们到底学到了什么</h1>
+    <h1>从 aware-gateway 到 Smart Router：一次省钱路由实验的完整故事</h1>
     <p>
-        这是一份把迄今为止本仓库相关实验数据统一整理后的阶段 blog。它覆盖 V3 早期矩阵、
-        V4 主实验、后续 prompt 变体 pilot、离线 decision replay、以及已经生成的 HTML 数据报告。
-        这不是 leaderboard 提交，也不是最终论文结论；它更像一次工程实验复盘：哪些数据能信，
-        哪些只是诊断噪声，以及下一步该把研究力气放在哪里。
+        这篇 blog 从头讲清楚：为什么要做 aware-gateway，网关怎么把模型调用、路由、成本和 trace 串起来，
+        smart-router 为什么有可能省钱，以及我们怎样从 V3 的粗实验一路收敛到 V4 的可解释 benchmark。
+        它不是 leaderboard 提交，也不是最终论文结论；它是一份工程实验复盘，重点是哪些数据能信，
+        哪些只是噪声，以及下一步该怎么把 smart-router 做成可泛化的决策系统。
     </p>
     <div>
         <span class="tag">60 logical trial rows</span>
@@ -243,6 +336,148 @@
     </p>
 </div>
 
+<h2>先把来龙去脉讲清楚</h2>
+<p class="section-lead">
+    我们一开始不是为了“又造一个代理服务器”。真正的问题是：今天的 agent 做一个任务会调用模型几十次，
+    每次都用最强模型很贵；每次都用便宜模型又可能在关键步骤翻车。aware-gateway 的作用，就是站在
+    agent 和模型供应商之间，把每一次调用都变成可路由、可计费、可追踪、可复盘的数据。
+</p>
+
+<section class="storyline">
+    <div class="story-step">
+        <div class="small-label">背景</div>
+        <strong>模型调用需要一个控制面</strong>
+        <p>agent 只管发 OpenAI-compatible 请求；网关负责选择实际模型、转发请求、记录成本和结果。</p>
+    </div>
+    <div class="story-step">
+        <div class="small-label">假设</div>
+        <strong>不是每一步都需要 Opus</strong>
+        <p>读文件、跑测试、做局部验证可能适合 flash；关键推理、复杂修复和最终收敛更适合 Opus。</p>
+    </div>
+    <div class="story-step">
+        <div class="small-label">实验</div>
+        <strong>用 benchmark 检验质量</strong>
+        <p>Terminal-Bench/Harbor 给出任务、环境和 verifier。我们看 reward、cost、调用次数和路由决策。</p>
+    </div>
+    <div class="story-step">
+        <div class="small-label">结论</div>
+        <strong>路由要像状态机</strong>
+        <p>只告诉 router “省钱”不够。它还要知道当前处于探索、关键假设、恢复、验证还是收尾阶段。</p>
+    </div>
+</section>
+
+<h2>aware-gateway 的设计：它站在哪里</h2>
+<p>
+    aware-gateway 是一个 OpenAI-compatible reverse proxy。外部 agent 仍然像平时一样调用
+    <code>/v1/chat/completions</code>；区别是，请求先经过网关。网关可以在不改 agent 主逻辑的情况下，
+    增加限流、审计、OpenTelemetry、模型池、重试、fallback，以及本次实验最关键的 smart-router。
+</p>
+
+<section class="gateway-map" aria-label="aware-gateway request flow">
+    <div class="gateway-node">
+        <div class="num">01</div>
+        <strong>Agent</strong>
+        <p>发起一次模型调用。它可以只说 <code>model=auto</code>，不用提前知道该用 flash 还是 Opus。</p>
+    </div>
+    <div class="gateway-node">
+        <div class="num">02</div>
+        <strong>Core Handler</strong>
+        <p>读取请求、挂载 session metadata，按插件优先级执行 middleware 和 router。</p>
+    </div>
+    <div class="gateway-node">
+        <div class="num">03</div>
+        <strong>Smart Router</strong>
+        <p>用决策模型读取当前上下文、最近几轮路由记忆、模型成本和能力，返回要使用的模型。</p>
+    </div>
+    <div class="gateway-node">
+        <div class="num">04</div>
+        <strong>Proxy + Pool</strong>
+        <p>把请求转发到 OpenRouter 或其他后端；按模型选择对应 endpoint，并处理 retry / fallback。</p>
+    </div>
+    <div class="gateway-node">
+        <div class="num">05</div>
+        <strong>Trace + Audit</strong>
+        <p>记录 routed model、status、token、provider cost、decision reason，之后能做 replay 和可视化。</p>
+    </div>
+</section>
+
+<div class="design-grid">
+    <div class="design-item">
+        <strong>插件化，而不是写死逻辑</strong>
+        <p>router、audit、metrics、middleware 都是插件。smart-router 跑在 task-router 前面；它不决策时，规则路由还能兜底。</p>
+    </div>
+    <div class="design-item">
+        <strong>session 级归因</strong>
+        <p>每个 benchmark trial 都需要一个稳定 trace key。否则 agent 轨迹、gateway trace 和 provider cost 对不上，实验会失真。</p>
+    </div>
+    <div class="design-item">
+        <strong>成本是一等指标</strong>
+        <p>网关同时记录 agent call 和 router decision call。省钱实验不能只算完成任务的模型调用，也要算“派单员”自己的成本。</p>
+    </div>
+    <div class="design-item">
+        <strong>决策可回放</strong>
+        <p>每次 smart-router 的输入上下文和输出理由都会保存。这样可以冻结 agent 轨迹，只改提示词，离线比较不同 router prompt。</p>
+    </div>
+</div>
+
+<h2>Smart Router 到底在做什么</h2>
+<p>
+    可以把 smart-router 想成一个“模型调度员”。每当 agent 要走下一步，它先看这一步像不像关键步骤：
+    是在读信息、机械搜索、跑便宜验证，还是在做高风险推理和收尾修复。然后它从菜单里选一个模型。
+    当前 V4 菜单故意只保留两档：<code>z-ai/glm-5.3-flash</code> 和
+    <code>anthropic/claude-opus-5</code>。这样结果比较干净：不是三四个模型混在一起，而是明确观察
+    “便宜档”和“强模型档”如何分工。
+</p>
+
+<table>
+    <tr>
+        <th>组件</th>
+        <th>当前选择</th>
+        <th>为什么这样设计</th>
+    </tr>
+    <tr>
+        <td>决策模型</td>
+        <td><code>openai/gpt-5.6-sol</code></td>
+        <td>替代已移除的 Qwen3-27B endpoint，用稳定的外部模型产生结构化路由决策。</td>
+    </tr>
+    <tr>
+        <td>候选模型</td>
+        <td><code>glm-5.3-flash</code> / <code>claude-opus-5</code></td>
+        <td>只保留便宜和最强两档，避免中间模型把实验解释搅混。</td>
+    </tr>
+    <tr>
+        <td>Warm-start</td>
+        <td>任务前 5 次 agent 调用强制 Opus</td>
+        <td>先让强模型建立方向和上下文，再观察后续自由路由是否能省钱。</td>
+    </tr>
+    <tr>
+        <td>最近记忆</td>
+        <td>最近 5 轮决策摘要</td>
+        <td>让 router 知道前面是否已经升级过、是否连续恢复失败、是否该降级做便宜验证。</td>
+    </tr>
+</table>
+
+<h2>实验问题：我们到底想证明什么</h2>
+<p>
+    这轮设计的核心不是“smart-router 看起来很聪明”，而是更朴素的 GQM 结构：
+    先定义目标，再把目标拆成问题，最后只收集能回答这些问题的指标。
+</p>
+
+<section class="equation">
+    <div>
+        <strong>Goal</strong>
+        <p>验证 smart-router 能否在不明显降低任务完成质量的前提下，降低每个 solved trial 的成本。</p>
+    </div>
+    <div>
+        <strong>Questions</strong>
+        <p>它能做对吗？比公开 Opus 参照贵还是便宜？它什么时候选 flash，什么时候选 Opus？失败是路由问题还是环境/provider 问题？</p>
+    </div>
+    <div>
+        <strong>Metrics</strong>
+        <p><code>reward</code>、<code>cost per solved</code>、agent calls、decision calls、模型选择比例、provider 5xx、trace 覆盖率。</p>
+    </div>
+</section>
+
 <h2>统计口径</h2>
 <p>
     数据来自两个位置：仓库内 <code>artifacts/</code> 的 V3 记录，以及
@@ -255,6 +490,52 @@
     V4 主实验及之后的 live pilot 使用 <code>gateway_trace_upstream_cost</code>，
     agent cost 和 decision cost 都能归因到 session，因此可信度更高。
 </p>
+
+<h2>实验是怎么一步步收敛的</h2>
+<p>
+    这轮实验不是一开始就长成现在这样。我们先试了更大的矩阵，发现真实 bottleneck 不是“能不能启动 benchmark”，
+    而是长任务成本、provider tail、trace 归因和失败解释。后来才把设计收窄成：少量代表性任务、
+    只比较 smart-router 和公开强模型参照，把预算集中花在真正能回答问题的地方。
+</p>
+
+<table>
+    <tr>
+        <th>阶段</th>
+        <th>当时的想法</th>
+        <th>发现的问题</th>
+        <th>后来的调整</th>
+    </tr>
+    <tr>
+        <td>V2 / V3</td>
+        <td>用 5 个任务 × 3 个策略 × 多次重复，直接比较 all-flash、all-premium、smart-router。</td>
+        <td>矩阵太大；trace/session 归因一旦不稳，成本和质量就对不上；部分任务单条就会拖很久。</td>
+        <td>先修 gateway trace 归因，再降低实验规模。</td>
+    </tr>
+    <tr>
+        <td>V4 主设计</td>
+        <td>借公开 leaderboard 做外部参照，只在本地跑必要的 smart-router 对照。</td>
+        <td>公开榜单够看 aggregate，但看不到每一步 run log 和 router 决策理由。</td>
+        <td>本地只跑 smart-router 相关策略，同时保留每次 decision context。</td>
+    </tr>
+    <tr>
+        <td>任务选择</td>
+        <td>原本想覆盖 5 个任务。</td>
+        <td>代表性不等于数量越多越好；长任务会把预算烧在 provider tail 和 agent 搜索路径上。</td>
+        <td>收敛到 <code>shadow-relay</code> 和 <code>vpp-loss-divergence</code>，前者做主研究台架，后者做压力边界。</td>
+    </tr>
+    <tr>
+        <td>策略选择</td>
+        <td>考虑继续跑 all-flash。</td>
+        <td>all-flash 既慢又很难保证质量，而且公开榜单已能提供强模型参照；本实验真正要检验的是 smart-route。</td>
+        <td>放弃 all-flash，把预算转向 smart-router、warm-start 和 prompt 变体。</td>
+    </tr>
+    <tr>
+        <td>Prompt 研究</td>
+        <td>先把“成本”直接写进提示词。</td>
+        <td>只写成本会让离线 replay 更偏 flash，但 live run 仍可能保守；有时还会牺牲泛化。</td>
+        <td>转向 critical-path 和 history-aware：让 router 根据任务阶段、最近决策和恢复状态做选择。</td>
+    </tr>
+</table>
 
 <h2>全部数据总览</h2>
 <table>
