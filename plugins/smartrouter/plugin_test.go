@@ -324,6 +324,66 @@ func TestWarmStartRoutesFirstNCallsBySessionThenUsesDecisionModel(t *testing.T) 
 	if decisionServerCalls != 1 {
 		t.Fatalf("decision server calls = %d, want 1", decisionServerCalls)
 	}
+
+	third, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("third Route returned error: %v", err)
+	}
+	if third == nil || third.Skip {
+		t.Fatalf("third Route skipped; want decision-model route after one local escalation")
+	}
+	if strings.Contains(third.Reason, "rule_id=repeated_error_upgrade") {
+		t.Fatalf("third reason = %q, repeated-error rule should not auto-upgrade same fingerprint twice", third.Reason)
+	}
+	if decisionServerCalls != 2 {
+		t.Fatalf("decision server calls = %d, want 2 after third fallthrough", decisionServerCalls)
+	}
+}
+
+func TestSafeControlErrorFingerprintPrefersSpecificTracebackLine(t *testing.T) {
+	got := safeControlErrorFingerprint("Traceback (most recent call last):\n  File \"solver.py\", line 10, in <module>\nAssertionError: expected relay id 7 got 8")
+	if strings.Contains(got, "traceback") {
+		t.Fatalf("fingerprint = %q, want specific error line instead of generic traceback header", got)
+	}
+	if !strings.Contains(got, "assertionerror") {
+		t.Fatalf("fingerprint = %q, want assertion error detail", got)
+	}
+}
+
+func TestSafeControlDoesNotTreatImplementationProtocolAsFixedFormatOnly(t *testing.T) {
+	decisionServerCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"message": {"content": "{\"model\":\"anthropic/claude-opus-5\",\"reason\":\"implementation protocol needs semantic routing\"}"}}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+		}`)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "safe-fixed-format-implementation")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Respond with JSON only, then implement the parser fix by editing solver.py."}]}`)
+
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decision == nil || decision.Skip {
+		t.Fatalf("Route skipped; want decision-model route")
+	}
+	if decision.Model != "anthropic/claude-opus-5" {
+		t.Fatalf("model = %q, want Opus from decision model", decision.Model)
+	}
+	if decisionServerCalls != 1 {
+		t.Fatalf("decision server calls = %d, want 1", decisionServerCalls)
+	}
+	if strings.Contains(decision.Reason, "safe-control") {
+		t.Fatalf("reason = %q, implementation protocol should not be a local safe-control decision", decision.Reason)
+	}
 }
 
 func TestTaskCompletionConfirmationRoutesToStrongestConfiguredModel(t *testing.T) {

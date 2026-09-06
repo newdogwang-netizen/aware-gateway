@@ -41,6 +41,23 @@ V4 把本地预算集中到核心问题：**smart-router 到底有没有用**。
 - 正式 10-trial matrix 还没启动，但 `shadow-relay` 现在是 V4 core 里替换
   `bun-sourcemap-leak` 的首选任务。
 
+2026-09-06 Phase 2 追加验证：
+
+- 方向从继续调 prompt，转为把 smart-router 当控制系统做：高置信、低风险动作先由
+  本地 safe-control 规则处理，只有不确定请求才进入 semantic decision model。
+- 确定性 probe 9/9 通过，覆盖 cheap probe、重复错误升级、假设反证升级、
+  premium cooldown、completion guardrail 和 ambiguous fallthrough。
+- 修复前真实 `shadow-relay` pilot 手动中断在 21 次 agent 调用，未作为质量证据；
+  它暴露了 traceback 指纹太粗、固定格式规则误判实现类请求两个问题。
+- 修复后真实 `shadow-relay / smart-router` pilot 通过 hidden verifier：
+  `reward=1.0`，耗时 861.775s，22 次 agent 调用，成本 `$2.24684421`。
+  其中 Opus 6 次、Flash 16 次；semantic decision 10 次、safe-control 规则命中
+  11 次、completion guardrail 1 次。
+- 这轮最重要的结论不是“规则越多越好”，而是：确定性动作应从 prompt 决策里剥离；
+  真正关键的假设修正、恢复和最终确认仍然要交给强模型。
+- 下一阶段主要矛盾变成单次调用预算：cheap route 还需要携带 `max_tokens`、超时和
+  长输出限制，否则便宜模型仍可能消耗大量时间和上下文。
+
 ## 实验目标
 
 检验 `smart-router` 是否能在尽量保持 Terminal-Bench 任务完成质量的同时，

@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,9 @@ HARBOR_MODEL_TO_GATEWAY = {
     "openai/openai/gpt-5.6-sol": "openai/gpt-5.6-sol",
     "openai/anthropic/claude-opus-5": "anthropic/claude-opus-5",
 }
+
+SAFE_CONTROL_REASON_PREFIX = "smart-router safe-control:"
+SAFE_CONTROL_RULE_RE = re.compile(r"\brule_id=([A-Za-z0-9_.-]+)")
 
 
 def main() -> None:
@@ -79,6 +84,9 @@ def main() -> None:
             "total_tokens",
             "agent_call_count",
             "decision_call_count",
+            "safe_control_rule_call_count",
+            "safe_control_rule_ids",
+            "safe_control_bypass_rate",
             "guardrail_call_count",
             "warm_start_call_count",
             "premium_upgrade_rate",
@@ -176,6 +184,14 @@ def build_row(
     guardrail_calls = sum(
         1 for t in agent_traces if str(t.get("routing_reason") or "").startswith("smart-router guardrail")
     )
+    safe_control_rule_counts = Counter(
+        rule_id
+        for rule_id in (
+            safe_control_rule_id(str(t.get("routing_reason") or "")) for t in agent_traces
+        )
+        if rule_id
+    )
+    safe_control_calls = sum(safe_control_rule_counts.values())
     warm_start_calls = sum(
         1 for t in agent_traces if str(t.get("routing_reason") or "").startswith("smart-router warm-start:")
     )
@@ -221,6 +237,11 @@ def build_row(
         "total_tokens": usage["total_tokens"] + decision_prompt + decision_completion,
         "agent_call_count": agent_count,
         "decision_call_count": len(decision_traces),
+        "safe_control_rule_call_count": safe_control_calls,
+        "safe_control_rule_ids": ";".join(
+            f"{rule_id}:{count}" for rule_id, count in sorted(safe_control_rule_counts.items())
+        ),
+        "safe_control_bypass_rate": round(safe_control_calls / agent_count, 4) if agent_count else "",
         "guardrail_call_count": guardrail_calls,
         "warm_start_call_count": warm_start_calls,
         "premium_upgrade_rate": round(premium_calls / agent_count, 4) if agent_count else "",
@@ -362,6 +383,13 @@ def infer_strategy(model_sent: str, job_name: str) -> str:
     return ""
 
 
+def safe_control_rule_id(reason: str) -> str:
+    if not reason.startswith(SAFE_CONTROL_REASON_PREFIX):
+        return ""
+    match = SAFE_CONTROL_RULE_RE.search(reason)
+    return match.group(1) if match else "unknown"
+
+
 def infer_attempt(job_name: str) -> str:
     marker = "-a"
     idx = job_name.rfind(marker)
@@ -419,8 +447,12 @@ def validate_rows(rows: list[dict[str, Any]], expected_rows: int | None) -> list
                 problems.append(f"{label} has non-binary reward {row.get('reward')!r}")
         except (TypeError, ValueError):
             problems.append(f"{label} has missing/non-numeric reward {row.get('reward')!r}")
-        if row.get("strategy") == "smart-router" and int(row.get("decision_call_count") or 0) == 0:
-            problems.append(f"{label} has no router decision calls")
+        if row.get("strategy") == "smart-router":
+            routed_by_router = int(row.get("decision_call_count") or 0) + int(
+                row.get("safe_control_rule_call_count") or 0
+            )
+            if routed_by_router == 0:
+                problems.append(f"{label} has no router decision or safe-control rule calls")
         expected_model = ""
         if row.get("strategy") in ("all-premium", "all-flash"):
             expected_model = str(row.get("model_sent") or "")

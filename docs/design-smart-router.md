@@ -214,6 +214,28 @@ non-Skip decision wins. Smart-router can route directly to a configured
 fallback model for decision failures, or fall through to task-router when no
 fallback is configured.
 
+### Phase 2 Safe-Control Layer
+
+The Phase 2 experiment treats the router as a control system, not only a
+classifier. High-confidence, low-risk turns should not pay a decision-model
+tax. The local safe-control layer therefore runs before the semantic decision
+prompt and handles only narrow cases:
+
+- Route bounded file inspection, search, existing test execution, and fixed
+  format output to the cheapest configured model.
+- Upgrade repeated identical task errors and contradicted core hypotheses to
+  the strongest configured model.
+- Apply a short cheap-model cooldown after consecutive premium calls.
+- Force task-completion confirmation through the strongest configured model.
+
+The layer is deliberately conservative. Implementation/edit requests do not
+qualify for file-read or fixed-format cheap rules, even if they mention JSON or
+search terms. Traceback fingerprints prefer the specific error line instead of
+generic headers such as `Traceback (most recent call last):`, and the same
+fingerprint is auto-upgraded only once before control returns to the semantic
+router. This came directly from a real `shadow-relay` pilot where overly broad
+fingerprints and fixed-format matches produced misleading local decisions.
+
 ### Latency Budget
 
 ```

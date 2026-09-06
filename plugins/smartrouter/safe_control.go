@@ -26,10 +26,11 @@ type SafeControlConfig struct {
 }
 
 type safeControlState struct {
-	LastErrorFingerprint string
-	SameFailureCount     int
-	ConsecutivePremium   int
-	CooldownRemaining    int
+	LastErrorFingerprint     string
+	LastEscalatedFingerprint string
+	SameFailureCount         int
+	ConsecutivePremium       int
+	CooldownRemaining        int
 }
 
 type safeControlObservation struct {
@@ -52,7 +53,10 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 	obs := s.observeSafeControlState(req, parsed)
 	message := normalizeForRules(parsed.LatestUserMsg)
 
-	if obs.ErrorFingerprint != "" && obs.State.SameFailureCount >= cfg.RepeatedErrorThreshold {
+	if obs.ErrorFingerprint != "" &&
+		obs.State.SameFailureCount >= cfg.RepeatedErrorThreshold &&
+		obs.State.LastEscalatedFingerprint != obs.ErrorFingerprint {
+		s.markSafeControlEscalation(req, obs.ErrorFingerprint)
 		return s.safeControlRoute(
 			"repeated_error_upgrade",
 			"premium_recover",
@@ -233,6 +237,7 @@ func (s *SmartRouter) observeSafeControlState(req *http.Request, parsed *parsedR
 		}
 	} else if looksLikeProgressEvidence(parsed.LatestUserMsg) {
 		state.LastErrorFingerprint = ""
+		state.LastEscalatedFingerprint = ""
 		state.SameFailureCount = 0
 	}
 
@@ -240,6 +245,25 @@ func (s *SmartRouter) observeSafeControlState(req *http.Request, parsed *parsedR
 		ErrorFingerprint: fingerprint,
 		State:            *state,
 	}
+}
+
+func (s *SmartRouter) markSafeControlEscalation(req *http.Request, fingerprint string) {
+	key := decisionHistoryKey(req)
+	if key == "" || fingerprint == "" {
+		return
+	}
+
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	if s.controlStates == nil {
+		s.controlStates = make(map[string]*safeControlState)
+	}
+	state := s.controlStates[key]
+	if state == nil {
+		state = &safeControlState{}
+		s.controlStates[key] = state
+	}
+	state.LastEscalatedFingerprint = fingerprint
 }
 
 func (s *SmartRouter) recordSafeControlOutcome(req *http.Request, selectedModel string) {
@@ -315,6 +339,9 @@ func normalizeForRules(message string) string {
 }
 
 func looksLikeFileReadOrSearch(message string) bool {
+	if looksLikeImplementationOrEdit(message) {
+		return false
+	}
 	if containsAny(message, []string{
 		"root cause",
 		"debug",
@@ -394,7 +421,7 @@ func looksLikeExistingTestExecution(message string) bool {
 }
 
 func looksLikeFixedFormatOutput(message string) bool {
-	if looksLikePremiumRequired(message) {
+	if looksLikePremiumRequired(message) || looksLikeImplementationOrEdit(message) {
 		return false
 	}
 	return containsAny(message, []string{
@@ -465,6 +492,30 @@ func looksLikePremiumRequired(message string) bool {
 	})
 }
 
+func looksLikeImplementationOrEdit(message string) bool {
+	return containsAny(message, []string{
+		"implement",
+		"implementation",
+		"write code",
+		"write the code",
+		"edit ",
+		"modify ",
+		"patch",
+		"apply_patch",
+		"create file",
+		"create the file",
+		"update file",
+		"update the file",
+		"change code",
+		"rewrite",
+		"refactor",
+		"修复",
+		"实现",
+		"改代码",
+		"编辑",
+	})
+}
+
 func looksLikeProgressEvidence(message string) bool {
 	message = normalizeForRules(message)
 	return containsAny(message, []string{
@@ -484,28 +535,30 @@ func safeControlErrorFingerprint(message string) string {
 		return ""
 	}
 
+	fallback := ""
 	for _, line := range strings.Split(message, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
-		if containsAny(line, []string{
-			"error:",
-			"exception",
-			"traceback",
-			"panic:",
-			"failed",
-			"failure",
-			"assert",
-			"exit status",
-			"exit code",
-			"segmentation fault",
-			"timed out",
-		}) {
-			return normalizeErrorFingerprint(line)
+		if !looksLikeErrorSignalLine(line) {
+			continue
+		}
+		normalized := normalizeErrorFingerprint(line)
+		if isGenericErrorSignalLine(line) {
+			if fallback == "" {
+				fallback = normalized
+			}
+			continue
+		}
+		if looksLikeSpecificErrorLine(line) {
+			return normalized
+		}
+		if fallback == "" {
+			fallback = normalized
 		}
 	}
-	return ""
+	return fallback
 }
 
 func looksLikeProviderFailure(message string) bool {
@@ -522,6 +575,50 @@ func looksLikeProviderFailure(message string) bool {
 		"rate limit",
 		"429 too many requests",
 		"upstream eof",
+	})
+}
+
+func looksLikeErrorSignalLine(line string) bool {
+	return containsAny(line, []string{
+		"error:",
+		"exception",
+		"traceback",
+		"panic:",
+		"failed",
+		"failure",
+		"assert",
+		"exit status",
+		"exit code",
+		"segmentation fault",
+		"timed out",
+	})
+}
+
+func isGenericErrorSignalLine(line string) bool {
+	line = strings.TrimSpace(line)
+	return line == "traceback (most recent call last):" ||
+		line == "error:" ||
+		line == "exception:" ||
+		line == "failed" ||
+		line == "failure"
+}
+
+func looksLikeSpecificErrorLine(line string) bool {
+	return containsAny(line, []string{
+		"assertionerror",
+		"valueerror",
+		"keyerror",
+		"typeerror",
+		"runtimeerror",
+		"modulenotfounderror",
+		"importerror",
+		"panic:",
+		"error:",
+		"exception:",
+		"exit status",
+		"exit code",
+		"segmentation fault",
+		"timed out",
 	})
 }
 
