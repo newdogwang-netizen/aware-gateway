@@ -142,6 +142,13 @@ plugins:
     include_system_prompt: true   # include system message preview
     include_message_count: true   # include conversation depth
 
+    # Phase 2 safe-control: deterministic high-confidence routes before judge
+    safe_control:
+      enabled: true
+      repeated_error_threshold: 2
+      premium_cooldown_after: 2
+      premium_cooldown_turns: 1
+
     # Model menu (same format as task-router, or leave empty to
     # auto-populate from pool discovery)
     models: []
@@ -189,8 +196,9 @@ emit an AuditRecord itself.
 
 ```
 Priority 50: smart-router
-  → LLM decision success → return RoutingDecision
+  → safe-control rule hit → return RoutingDecision
   → cache hit → return RoutingDecision
+  → LLM decision success → return RoutingDecision
   → decision failure → return configured fallback model, if set
   → no configured fallback → return Skip=true
 

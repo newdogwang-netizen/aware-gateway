@@ -66,7 +66,7 @@ Built by refactoring the heidi model-gateway into a core engine + plugin system.
 
 | Plugin | Hooks | Description |
 |--------|-------|-------------|
-| `smart-router` | RequestRouter | Uses a decision model to choose among configured models per turn; supports warm-start, cost-aware prompts, fallback, and compact decision history |
+| `smart-router` | RequestRouter | Uses safe-control rules plus a decision model to choose among configured models per turn; supports warm-start, cost-aware prompts, fallback, and compact decision history |
 | `task-router` | RequestRouter | Classifies LLM requests (chat/code/reasoning/vision) and selects best model by cost/quality/latency/load |
 | `otel-genai` | Middleware, Health | Enriches OTel spans with gen_ai.* / llm.* attributes; records GenAI Prometheus metrics |
 | `ratelimit` | Middleware | Global + per-key rate limiting (token bucket) |
@@ -262,6 +262,11 @@ plugins:
     fallback_pool: openrouter
     decision_history_turns: 5
     decision_history_context_chars: 900
+    safe_control:
+      enabled: true
+      repeated_error_threshold: 2
+      premium_cooldown_after: 2
+      premium_cooldown_turns: 1
     models:
       - name: z-ai/glm-5.3-flash
         pool: openrouter
@@ -276,6 +281,13 @@ plugins:
         input_price: 5.00
         output_price: 25.00
 ```
+
+With `safe_control.enabled`, a conservative local controller runs before the
+decision model. It routes file reads/search, known test execution, and ordinary
+fixed-format replies to the cheapest configured model; it upgrades repeated
+identical failures and contradicted core hypotheses to the strongest configured
+model; and it inserts a short cheap cooldown after consecutive premium calls.
+Requests outside those rules continue through the prompt-based smart-router.
 
 ## Project Structure
 

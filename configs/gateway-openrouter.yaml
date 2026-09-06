@@ -94,6 +94,13 @@ plugins:
     # sees at most the latest 5 records.
     decision_history_turns: 5
     decision_history_context_chars: 220
+    # Phase 2 safe-control: high-confidence local rules run before the
+    # semantic decision model. Unmatched requests still use the prompt router.
+    safe_control:
+      enabled: true
+      repeated_error_threshold: 2
+      premium_cooldown_after: 2
+      premium_cooldown_turns: 1
     # Disable decision caching for measurement runs so each turn records an
     # independent decision-model routing decision. Re-enable for product smoke tests.
     cache_ttl_seconds: -1

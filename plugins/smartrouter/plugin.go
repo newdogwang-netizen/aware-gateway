@@ -50,26 +50,27 @@ type ModelEntry struct {
 
 // Config is the plugin-specific configuration.
 type Config struct {
-	Enabled                     bool            `yaml:"enabled" json:"enabled"`
-	Endpoint                    string          `yaml:"endpoint" json:"endpoint"`                         // OpenAI-compatible base URL
-	Model                       string          `yaml:"model" json:"model"`                               // decision model name
-	APIKey                      string          `yaml:"api_key" json:"api_key"`                           // optional
-	APIKeyEnv                   string          `yaml:"api_key_env" json:"api_key_env"`                   // optional env var for API key
-	MaxTokens                   int             `yaml:"max_tokens" json:"max_tokens"`                     // default 100
-	Temperature                 float64         `yaml:"temperature" json:"temperature"`                   // default 0
-	TimeoutMs                   int             `yaml:"timeout_ms" json:"timeout_ms"`                     // default 2000
-	DisableThinking             bool            `yaml:"disable_thinking" json:"disable_thinking"`         // add Qwen/vLLM thinking-disable param
-	DecisionRetries             int             `yaml:"decision_retries" json:"decision_retries"`         // retry transient decision model failures
-	PromptPreviewChars          int             `yaml:"prompt_preview_chars" json:"prompt_preview_chars"` // default 500
-	IncludeSystemPrompt         bool            `yaml:"include_system_prompt" json:"include_system_prompt"`
-	IncludeMessageCount         bool            `yaml:"include_message_count" json:"include_message_count"`
-	DecisionHistoryTurns        int             `yaml:"decision_history_turns" json:"decision_history_turns"`                 // default 5; <0 disables
-	DecisionHistoryContextChars int             `yaml:"decision_history_context_chars" json:"decision_history_context_chars"` // default 220
-	CacheTTLSeconds             int             `yaml:"cache_ttl_seconds" json:"cache_ttl_seconds"`                           // default 300
-	CacheMaxEntries             int             `yaml:"cache_max_entries" json:"cache_max_entries"`                           // default 10000
-	FallbackModel               string          `yaml:"fallback_model" json:"fallback_model"`
-	FallbackPool                string          `yaml:"fallback_pool" json:"fallback_pool"`
-	WarmStart                   WarmStartConfig `yaml:"warm_start" json:"warm_start"`
+	Enabled                     bool              `yaml:"enabled" json:"enabled"`
+	Endpoint                    string            `yaml:"endpoint" json:"endpoint"`                         // OpenAI-compatible base URL
+	Model                       string            `yaml:"model" json:"model"`                               // decision model name
+	APIKey                      string            `yaml:"api_key" json:"api_key"`                           // optional
+	APIKeyEnv                   string            `yaml:"api_key_env" json:"api_key_env"`                   // optional env var for API key
+	MaxTokens                   int               `yaml:"max_tokens" json:"max_tokens"`                     // default 100
+	Temperature                 float64           `yaml:"temperature" json:"temperature"`                   // default 0
+	TimeoutMs                   int               `yaml:"timeout_ms" json:"timeout_ms"`                     // default 2000
+	DisableThinking             bool              `yaml:"disable_thinking" json:"disable_thinking"`         // add Qwen/vLLM thinking-disable param
+	DecisionRetries             int               `yaml:"decision_retries" json:"decision_retries"`         // retry transient decision model failures
+	PromptPreviewChars          int               `yaml:"prompt_preview_chars" json:"prompt_preview_chars"` // default 500
+	IncludeSystemPrompt         bool              `yaml:"include_system_prompt" json:"include_system_prompt"`
+	IncludeMessageCount         bool              `yaml:"include_message_count" json:"include_message_count"`
+	DecisionHistoryTurns        int               `yaml:"decision_history_turns" json:"decision_history_turns"`                 // default 5; <0 disables
+	DecisionHistoryContextChars int               `yaml:"decision_history_context_chars" json:"decision_history_context_chars"` // default 220
+	CacheTTLSeconds             int               `yaml:"cache_ttl_seconds" json:"cache_ttl_seconds"`                           // default 300
+	CacheMaxEntries             int               `yaml:"cache_max_entries" json:"cache_max_entries"`                           // default 10000
+	FallbackModel               string            `yaml:"fallback_model" json:"fallback_model"`
+	FallbackPool                string            `yaml:"fallback_pool" json:"fallback_pool"`
+	WarmStart                   WarmStartConfig   `yaml:"warm_start" json:"warm_start"`
+	SafeControl                 SafeControlConfig `yaml:"safe_control" json:"safe_control"`
 	// Decision model pricing ($/M tokens). For self-hosted vLLM, leave as 0
 	// (cost is GPU amortization, not per-token). For commercial decision
 	// models, set these to enable cost tracking in audit trail.
@@ -89,18 +90,20 @@ type WarmStartConfig struct {
 
 // SmartRouter implements plugin.RequestRouter.
 type SmartRouter struct {
-	cfg        Config
-	menu       []ModelEntry
-	menuJSON   string // pre-serialized menu for prompt
-	client     *http.Client
-	cache      *DecisionCache
-	logger     *slog.Logger
-	ctx        *plugin.Context
-	auditSinks []plugin.AuditSink
-	warmMu     sync.Mutex
-	warmCounts map[string]int
-	historyMu  sync.Mutex
-	histories  map[string][]DecisionHistory
+	cfg           Config
+	menu          []ModelEntry
+	menuJSON      string // pre-serialized menu for prompt
+	client        *http.Client
+	cache         *DecisionCache
+	logger        *slog.Logger
+	ctx           *plugin.Context
+	auditSinks    []plugin.AuditSink
+	warmMu        sync.Mutex
+	warmCounts    map[string]int
+	historyMu     sync.Mutex
+	histories     map[string][]DecisionHistory
+	controlMu     sync.Mutex
+	controlStates map[string]*safeControlState
 }
 
 func (s *SmartRouter) Name() string { return "smart-router" }
@@ -181,6 +184,7 @@ func (s *SmartRouter) Init(ctx *plugin.Context) error {
 	s.cache = NewDecisionCache(s.cfg.CacheMaxEntries, time.Duration(s.cfg.CacheTTLSeconds)*time.Second)
 	s.warmCounts = make(map[string]int)
 	s.histories = make(map[string][]DecisionHistory)
+	s.controlStates = make(map[string]*safeControlState)
 
 	s.logger.Info("smart-router initialized",
 		"endpoint", s.cfg.Endpoint,
@@ -192,6 +196,7 @@ func (s *SmartRouter) Init(ctx *plugin.Context) error {
 		"decision_retries", s.cfg.DecisionRetries,
 		"fallback_model", s.cfg.FallbackModel,
 		"warm_start_steps", s.cfg.WarmStart.Steps,
+		"safe_control_enabled", s.cfg.SafeControl.Enabled,
 		"decision_history_turns", s.cfg.DecisionHistoryTurns,
 	)
 	return nil
@@ -233,11 +238,12 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 	if isTaskCompletionConfirmation(parsed.LatestUserMsg) {
 		if strongest, ok := s.strongestConfiguredModel(); ok {
 			s.clearDecisionHistory(req)
-			return &plugin.RoutingDecision{
+			decision := &plugin.RoutingDecision{
 				Pool:   strongest.Pool,
 				Model:  strongest.Name,
 				Reason: "smart-router guardrail: task completion confirmation requires exact agent-control output",
-			}, nil
+			}
+			return decision, nil
 		}
 	}
 
@@ -249,6 +255,13 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 			ContextSummary:  "front-loaded premium reasoning",
 			Reason:          decision.Reason,
 		})
+		s.recordSafeControlOutcome(req, decision.Model)
+		return decision, nil
+	}
+
+	if decision, decisionHistory, ok := s.safeControlDecision(req, parsed); ok {
+		s.appendDecisionHistory(req, decision.Model, decisionHistory)
+		s.recordSafeControlOutcome(req, decision.Model)
 		return decision, nil
 	}
 
@@ -269,6 +282,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 				ContextSummary: "cached route for repeated context",
 				Reason:         cached.Reason,
 			})
+			s.recordSafeControlOutcome(req, cached.Model)
 			return &plugin.RoutingDecision{
 				Pool:   cached.Pool,
 				Model:  cached.Model,
@@ -296,6 +310,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 				ContextSummary: "decision model failed",
 				Reason:         "decision-model-error",
 			})
+			s.recordSafeControlOutcome(req, fallback.Model)
 		}
 		return fallback, nil
 	}
@@ -325,6 +340,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 				ContextSummary: "decision model returned unknown model",
 				Reason:         "unknown-model",
 			})
+			s.recordSafeControlOutcome(req, fallback.Model)
 		}
 		return fallback, nil
 	}
@@ -355,6 +371,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 		)
 	}
 	s.appendDecisionHistory(req, selectedModel, decision)
+	s.recordSafeControlOutcome(req, selectedModel)
 
 	return &plugin.RoutingDecision{
 		Pool:   pool,
@@ -500,6 +517,10 @@ func (s *SmartRouter) clearDecisionHistory(req *http.Request) {
 	s.warmMu.Lock()
 	delete(s.warmCounts, key)
 	s.warmMu.Unlock()
+
+	s.controlMu.Lock()
+	delete(s.controlStates, key)
+	s.controlMu.Unlock()
 }
 
 func (s *SmartRouter) renderDecisionHistory(history []DecisionHistory) string {

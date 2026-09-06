@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aware/gateway/internal/config"
 )
 
 func TestRouteFallsBackToConfiguredModelWhenDecisionModelFails(t *testing.T) {
@@ -447,6 +449,362 @@ func TestRouteFeedsRecentDecisionHistoryIntoNextPrompt(t *testing.T) {
 	}
 }
 
+func TestSafeControlRoutesCheapHighConfidenceRequestsWithoutDecisionModel(t *testing.T) {
+	tests := []struct {
+		name       string
+		message    string
+		wantRuleID string
+	}{
+		{
+			name:       "file read and search",
+			message:    "Use rg to search for the handler and inspect the matching files.",
+			wantRuleID: "file_read_search_cheap",
+		},
+		{
+			name:       "existing test execution",
+			message:    "Run the existing go test ./... command and report the output.",
+			wantRuleID: "existing_test_execution_cheap",
+		},
+		{
+			name:       "fixed format output",
+			message:    "Respond with JSON only: {\"cmd\":\"pwd\"}. Do not include any text outside the JSON.",
+			wantRuleID: "fixed_format_output_cheap",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			decisionServerCalled := false
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				decisionServerCalled = true
+				http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+			}))
+			defer server.Close()
+
+			router := newTestSmartRouter(server.URL)
+			enableSafeControl(router)
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			req.Header.Set("X-Session-ID", "safe-cheap-"+tt.name)
+			body := []byte(fmt.Sprintf(`{"model":"auto","messages":[{"role":"user","content":%q}]}`, tt.message))
+
+			decision, err := router.Route(req, body)
+			if err != nil {
+				t.Fatalf("Route returned error: %v", err)
+			}
+			if decisionServerCalled {
+				t.Fatal("decision server was called; want local safe-control decision")
+			}
+			if decision == nil || decision.Skip {
+				t.Fatalf("Route skipped; want safe-control cheap route")
+			}
+			if decision.Model != "z-ai/glm-5.3-flash" {
+				t.Fatalf("model = %q, want z-ai/glm-5.3-flash", decision.Model)
+			}
+			for _, want := range []string{"decision_source=rule", "action=cheap", "rule_id=" + tt.wantRuleID} {
+				if !strings.Contains(decision.Reason, want) {
+					t.Fatalf("reason = %q, want %q", decision.Reason, want)
+				}
+			}
+		})
+	}
+}
+
+func TestSafeControlRepeatedErrorUpgradesWithoutSecondDecisionModelCall(t *testing.T) {
+	decisionServerCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"message": {"content": "{\"model\":\"z-ai/glm-5.3-flash\",\"turn_type\":\"validation\",\"hypothesis_state\":\"stable\",\"critical_path\":false,\"recoverability\":\"easy\",\"context_summary\":\"first failure observed\",\"reason\":\"collect evidence\"}"}}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+		}`)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.CacheTTLSeconds = -1
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "safe-repeated-error")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"pytest failed\nAssertionError: expected 1 got 2"}]}`)
+
+	first, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("first Route returned error: %v", err)
+	}
+	if first == nil || first.Skip {
+		t.Fatalf("first Route skipped; want decision-model route")
+	}
+	if first.Model != "z-ai/glm-5.3-flash" {
+		t.Fatalf("first model = %q, want flash from decision model", first.Model)
+	}
+
+	second, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("second Route returned error: %v", err)
+	}
+	if second == nil || second.Skip {
+		t.Fatalf("second Route skipped; want repeated-error upgrade")
+	}
+	if second.Model != "anthropic/claude-opus-5" {
+		t.Fatalf("second model = %q, want Opus", second.Model)
+	}
+	if !strings.Contains(second.Reason, "rule_id=repeated_error_upgrade") {
+		t.Fatalf("second reason = %q, want repeated error rule", second.Reason)
+	}
+	if decisionServerCalls != 1 {
+		t.Fatalf("decision server calls = %d, want 1", decisionServerCalls)
+	}
+}
+
+func TestSafeControlDoesNotTreatProviderFailureAsRepeatedModelError(t *testing.T) {
+	decisionServerCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"message": {"content": "{\"model\":\"z-ai/glm-5.3-flash\",\"reason\":\"provider issue is infrastructure\"}"}}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+		}`)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.CacheTTLSeconds = -1
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "safe-provider-failure")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"OpenRouter 502 Bad Gateway\nprovider timeout while calling upstream"}]}`)
+
+	for i := 0; i < 2; i++ {
+		decision, err := router.Route(req, body)
+		if err != nil {
+			t.Fatalf("Route %d returned error: %v", i+1, err)
+		}
+		if decision == nil || decision.Skip {
+			t.Fatalf("Route %d skipped; want decision-model route", i+1)
+		}
+		if decision.Model != "z-ai/glm-5.3-flash" {
+			t.Fatalf("Route %d model = %q, want flash from decision model", i+1, decision.Model)
+		}
+		if strings.Contains(decision.Reason, "repeated_error_upgrade") {
+			t.Fatalf("Route %d reason = %q, provider failure must not become model-ability repeated error", i+1, decision.Reason)
+		}
+	}
+	if decisionServerCalls != 2 {
+		t.Fatalf("decision server calls = %d, want 2", decisionServerCalls)
+	}
+}
+
+func TestSafeControlHypothesisContradictionUpgradesWithoutDecisionModel(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "safe-contradiction")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"The core hypothesis was contradicted by a counterexample; recover before editing more files."}]}`)
+
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local contradiction upgrade")
+	}
+	if decision == nil || decision.Skip {
+		t.Fatalf("Route skipped; want premium route")
+	}
+	if decision.Model != "anthropic/claude-opus-5" {
+		t.Fatalf("model = %q, want Opus", decision.Model)
+	}
+	if !strings.Contains(decision.Reason, "rule_id=hypothesis_contradiction_upgrade") {
+		t.Fatalf("reason = %q, want contradiction rule", decision.Reason)
+	}
+}
+
+func TestSafeControlPremiumCooldownRoutesAmbiguousCallCheap(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "safe-cooldown")
+	premiumBody := []byte(`{"model":"auto","messages":[{"role":"user","content":"The current hypothesis was contradicted; use recovery reasoning."}]}`)
+
+	for i := 0; i < 2; i++ {
+		decision, err := router.Route(req, premiumBody)
+		if err != nil {
+			t.Fatalf("premium Route %d returned error: %v", i+1, err)
+		}
+		if decision == nil || decision.Model != "anthropic/claude-opus-5" {
+			t.Fatalf("premium Route %d = %#v, want Opus", i+1, decision)
+		}
+	}
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue with the next bounded step."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("cooldown Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local cooldown route")
+	}
+	if decision == nil || decision.Skip {
+		t.Fatalf("Route skipped; want cooldown cheap route")
+	}
+	if decision.Model != "z-ai/glm-5.3-flash" {
+		t.Fatalf("model = %q, want flash", decision.Model)
+	}
+	if !strings.Contains(decision.Reason, "rule_id=premium_cooldown") {
+		t.Fatalf("reason = %q, want cooldown rule", decision.Reason)
+	}
+}
+
+func TestTaskCompletionConfirmationClearsSafeControlState(t *testing.T) {
+	decisionServerCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"message": {"content": "{\"model\":\"z-ai/glm-5.3-flash\",\"reason\":\"fresh task after completion\"}"}}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+		}`)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "safe-completion-reset")
+	premiumBody := []byte(`{"model":"auto","messages":[{"role":"user","content":"The current hypothesis was contradicted; use recovery reasoning."}]}`)
+
+	for i := 0; i < 2; i++ {
+		decision, err := router.Route(req, premiumBody)
+		if err != nil {
+			t.Fatalf("premium Route %d returned error: %v", i+1, err)
+		}
+		if decision == nil || decision.Model != "anthropic/claude-opus-5" {
+			t.Fatalf("premium Route %d = %#v, want Opus", i+1, decision)
+		}
+	}
+
+	completionBody := []byte(`{
+		"model": "auto",
+		"messages": [
+			{"role": "user", "content": "Are you sure you want to mark the task as complete? Include \"task_complete\": true."}
+		]
+	}`)
+	if decision, err := router.Route(req, completionBody); err != nil {
+		t.Fatalf("completion Route returned error: %v", err)
+	} else if decision == nil || decision.Model != "anthropic/claude-opus-5" {
+		t.Fatalf("completion Route = %#v, want Opus", decision)
+	}
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue with the next bounded step."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("post-completion Route returned error: %v", err)
+	}
+	if decision == nil || decision.Skip {
+		t.Fatalf("post-completion Route skipped; want decision-model route")
+	}
+	if decisionServerCalls != 1 {
+		t.Fatalf("decision server calls = %d, want 1 after completion reset", decisionServerCalls)
+	}
+	if strings.Contains(decision.Reason, "premium_cooldown") {
+		t.Fatalf("reason = %q, stale cooldown state leaked after completion", decision.Reason)
+	}
+}
+
+func TestSafeControlFallsThroughToDecisionModelForAmbiguousRequests(t *testing.T) {
+	decisionServerCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"message": {"content": "{\"model\":\"anthropic/claude-opus-5\",\"reason\":\"semantic judge decides\"}"}}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+		}`)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "safe-fallthrough")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Design the state transition model for task episodes."}]}`)
+
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decision == nil || decision.Skip {
+		t.Fatalf("Route skipped; want decision-model route")
+	}
+	if decision.Model != "anthropic/claude-opus-5" {
+		t.Fatalf("model = %q, want Opus from decision model", decision.Model)
+	}
+	if decisionServerCalls != 1 {
+		t.Fatalf("decision server calls = %d, want 1", decisionServerCalls)
+	}
+	if strings.Contains(decision.Reason, "safe-control") {
+		t.Fatalf("reason = %q, want semantic smart-router route", decision.Reason)
+	}
+}
+
+func TestConfigParsesSafeControl(t *testing.T) {
+	cfg, err := config.LoadFromBytes([]byte(`
+routes:
+  - pattern: /v1/chat/completions
+    pool: openrouter
+pools:
+  openrouter:
+    endpoints:
+      - name: fake
+        url: http://127.0.0.1:1
+plugins:
+  smart-router:
+    enabled: true
+    endpoint: http://127.0.0.1:2/v1
+    model: decision-model
+    safe_control:
+      enabled: true
+      repeated_error_threshold: 3
+      premium_cooldown_after: 4
+      premium_cooldown_turns: 2
+`))
+	if err != nil {
+		t.Fatalf("LoadFromBytes returned error: %v", err)
+	}
+	smartCfg, ok := config.PluginConfig[Config](cfg, "smart-router")
+	if !ok {
+		t.Fatal("smart-router config missing")
+	}
+	if !smartCfg.SafeControl.Enabled {
+		t.Fatal("safe_control.enabled = false, want true")
+	}
+	if smartCfg.SafeControl.RepeatedErrorThreshold != 3 {
+		t.Fatalf("repeated_error_threshold = %d, want 3", smartCfg.SafeControl.RepeatedErrorThreshold)
+	}
+	if smartCfg.SafeControl.PremiumCooldownAfter != 4 {
+		t.Fatalf("premium_cooldown_after = %d, want 4", smartCfg.SafeControl.PremiumCooldownAfter)
+	}
+	if smartCfg.SafeControl.PremiumCooldownTurns != 2 {
+		t.Fatalf("premium_cooldown_turns = %d, want 2", smartCfg.SafeControl.PremiumCooldownTurns)
+	}
+}
+
 func newTestSmartRouter(endpoint string) *SmartRouter {
 	router := &SmartRouter{
 		cfg: Config{
@@ -481,11 +839,21 @@ func newTestSmartRouter(endpoint string) *SmartRouter {
 				ContextWindow: 200000,
 			},
 		},
-		client:    &http.Client{Timeout: time.Second},
-		cache:     NewDecisionCache(10000, 300*time.Second),
-		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
-		histories: map[string][]DecisionHistory{},
+		client:        &http.Client{Timeout: time.Second},
+		cache:         NewDecisionCache(10000, 300*time.Second),
+		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		histories:     map[string][]DecisionHistory{},
+		controlStates: map[string]*safeControlState{},
 	}
 	router.menuJSON = router.buildMenuText()
 	return router
+}
+
+func enableSafeControl(router *SmartRouter) {
+	router.cfg.SafeControl = SafeControlConfig{
+		Enabled:                true,
+		RepeatedErrorThreshold: 2,
+		PremiumCooldownAfter:   2,
+		PremiumCooldownTurns:   1,
+	}
 }
