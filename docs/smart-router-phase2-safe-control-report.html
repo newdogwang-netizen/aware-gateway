@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>aware-gateway - 第二阶段 Safe Control 实验</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --bg: #f7f8fa;
+            --paper: #ffffff;
+            --ink: #1f2937;
+            --muted: #667085;
+            --line: #d9dee8;
+            --soft: #eef4ff;
+            --accent: #175cd3;
+            --good: #067647;
+            --warn: #9a6700;
+            --bad: #b42318;
+            --code: #111827;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: var(--bg);
+            color: var(--ink);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, "PingFang SC", "Noto Sans CJK SC", sans-serif;
+            line-height: 1.72;
+        }
+        .wrap {
+            width: min(980px, calc(100vw - 36px));
+            margin: 0 auto;
+        }
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        code {
+            background: #f1f4f9;
+            border: 1px solid var(--line);
+            border-radius: 5px;
+            padding: 1px 5px;
+            font-size: 0.92em;
+        }
+        pre {
+            background: var(--code);
+            color: #f9fafb;
+            border-radius: 8px;
+            margin: 14px 0 20px;
+            overflow-x: auto;
+            padding: 16px;
+            line-height: 1.55;
+        }
+        h1, h2, h3 { letter-spacing: 0; }
+        h1 {
+            max-width: 880px;
+            font-size: 2.45rem;
+            line-height: 1.14;
+            margin: 10px 0 14px;
+        }
+        h2 {
+            color: #102a56;
+            font-size: 1.38rem;
+            line-height: 1.28;
+            margin: 34px 0 12px;
+        }
+        h3 {
+            font-size: 1.05rem;
+            margin: 0 0 8px;
+        }
+        p { margin: 0 0 14px; }
+        ul, ol { margin: 10px 0 18px 22px; }
+        li { margin: 7px 0; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0 24px;
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            overflow: hidden;
+            font-size: 0.94rem;
+        }
+        th, td {
+            border-bottom: 1px solid var(--line);
+            padding: 11px 12px;
+            vertical-align: top;
+        }
+        tr:last-child td { border-bottom: 0; }
+        th {
+            background: #f8fafc;
+            color: #475467;
+            font-size: 0.79rem;
+            font-weight: 750;
+            text-align: left;
+        }
+        td.num, th.num {
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+        .nav {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 14px;
+            padding: 22px 0 10px;
+            font-size: 0.94rem;
+        }
+        .hero {
+            padding: 28px 0 24px;
+            border-bottom: 1px solid var(--line);
+        }
+        .eyebrow {
+            color: var(--accent);
+            font-size: 0.84rem;
+            font-weight: 800;
+        }
+        .lede {
+            max-width: 840px;
+            color: #344054;
+            font-size: 1.11rem;
+        }
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 12px;
+            margin: 22px 0 28px;
+        }
+        .metric {
+            min-height: 124px;
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 15px;
+        }
+        .metric .label {
+            color: var(--muted);
+            font-size: 0.78rem;
+            font-weight: 800;
+        }
+        .metric .value {
+            display: block;
+            margin-top: 8px;
+            font-size: 1.52rem;
+            font-weight: 780;
+            line-height: 1.18;
+        }
+        .metric .note {
+            color: var(--muted);
+            font-size: 0.86rem;
+            margin-top: 8px;
+        }
+        .callout {
+            background: var(--soft);
+            border-left: 4px solid var(--accent);
+            border-radius: 0 8px 8px 0;
+            margin: 18px 0 22px;
+            padding: 14px 16px;
+        }
+        .callout.good {
+            background: #edfcf2;
+            border-left-color: var(--good);
+        }
+        .callout.warn {
+            background: #fff8db;
+            border-left-color: var(--warn);
+        }
+        .grid-2 {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+            margin: 16px 0 24px;
+        }
+        .panel {
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 16px;
+        }
+        .pass { color: var(--good); font-weight: 750; }
+        .warn-text { color: var(--warn); font-weight: 750; }
+        .small { color: var(--muted); font-size: 0.88rem; }
+        .diagram {
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            margin: 18px 0 24px;
+            overflow: hidden;
+        }
+        .diagram-head {
+            padding: 14px 16px 10px;
+            border-bottom: 1px solid var(--line);
+        }
+        .diagram-head p {
+            color: var(--muted);
+            font-size: 0.9rem;
+            margin: 4px 0 0;
+        }
+        .diagram-frame {
+            display: block;
+            width: 100%;
+            height: 560px;
+            border: 0;
+            background: #0f172a;
+        }
+        .footnote {
+            color: var(--muted);
+            font-size: 0.88rem;
+            margin: 34px 0 50px;
+            padding-top: 22px;
+            border-top: 1px solid var(--line);
+        }
+        @media (max-width: 820px) {
+            .wrap { width: min(100vw - 24px, 980px); }
+            h1 { font-size: 1.82rem; }
+            .metrics, .grid-2 { grid-template-columns: 1fr; }
+            table { display: block; overflow-x: auto; white-space: nowrap; }
+            .diagram-frame { height: 500px; }
+        }
+    </style>
+</head>
+<body>
+<main class="wrap">
+    <nav class="nav">
+        <a href="../index.html">aware-gateway</a>
+        <a href="smart-router-experiment-report.html">第一阶段报告</a>
+        <a href="https://github.com/newdogwang-netizen/aware-gateway/issues/1">Issue #1</a>
+        <a href="design-smart-router.md">设计文档</a>
+        <a href="aware-gateway-architecture.html">网关架构图</a>
+        <a href="prompt-routing-experiment.html">实验架构图</a>
+    </nav>
+
+    <section class="hero">
+        <div class="eyebrow">2026-09-07, Gateway, Smart Routing</div>
+        <h1>第二阶段：把 smart-router 从 prompt 判断推进到控制系统</h1>
+        <p class="lede">
+            第一阶段证明了 prompt-based router 能跑通，也留下了一个清楚的问题：
+            每次 agent 请求都问 Decision Model，会带来固定成本、固定延迟和新的故障面。
+            第二阶段不改 agent planner，只在网关层做一件事：用可观测证据判断本次调用最低需要哪一档模型能力。
+        </p>
+    </section>
+
+    <section class="metrics">
+        <div class="metric">
+            <div class="label">修复边界</div>
+            <span class="value">分开</span>
+            <div class="note">第一阶段报告恢复为 prompt-only 复盘，Phase 2 另起本文。</div>
+        </div>
+        <div class="metric">
+            <div class="label">确定性 probe</div>
+            <span class="value">9/9</span>
+            <div class="note">mock provider 下覆盖 safe-control、judge fallback 和 guardrail。</div>
+        </div>
+        <div class="metric">
+            <div class="label">真实 pilot</div>
+            <span class="value">2 pass</span>
+            <div class="note"><code>shadow-relay</code> A1、A3 通过；A2 暴露 provider incomplete。</div>
+        </div>
+        <div class="metric">
+            <div class="label">下一层问题</div>
+            <span class="value">budget</span>
+            <div class="note">质量能保住，但 route action 还缺输出预算和停止条件。</div>
+        </div>
+    </section>
+
+    <div class="callout good">
+        <p>
+            本文只讲第二阶段。第一阶段报告是背景和 baseline，不再混入 safe-control 结果。
+            这条边界很重要：否则读者会分不清 prompt 变体带来的信号，和本地控制规则带来的信号。
+        </p>
+    </div>
+
+    <h2>Issue #1 到底要解决什么</h2>
+    <p>
+        Issue #1 的方向可以浓缩成一句话：把 smart-router 从每轮独立 prompt 判断，演进成
+        <strong>事件驱动的任务状态控制器</strong>。它不替 agent 做计划，也不宣布任务完成；
+        它只根据当前证据，判断这一次模型调用最低需要 cheap 还是 premium。
+    </p>
+    <p>
+        第一阶段的发现给了它出发点：成本不是由单次模型价格决定，而是由完整 agent trajectory 决定。
+        如果 cheap model 在错误路径上多走十步，总成本未必低；如果 premium 用在关键假设和收尾，反而可能更便宜。
+    </p>
+
+    <pre><code>Session: 请求发生在哪里
+Episode: 当前在解决什么
+Event: 实际发生了什么
+State: 基于证据，现在知道什么
+Policy: 当前状态最低需要哪档能力
+Decision: 本次为什么选择这个模型
+Outcome: 这条路径最后有没有产生有效交付</code></pre>
+
+    <h2>第二阶段先抓哪个主要矛盾</h2>
+    <p>
+        完整的 Episode Resolver、Event Store 和 Delivery Feedback 都值得做，但一次全做会把实验拖散。
+        Phase 2 先抓一个最直接的矛盾：很多请求只是读文件、搜索、跑已有测试、按固定格式回答，
+        却仍然要付一次 semantic judge 的成本。
+    </p>
+
+    <div class="grid-2">
+        <div class="panel">
+            <h3>本地规则接管</h3>
+            <p>文件读取、搜索、已有测试执行、普通固定格式输出，直接路由到 cheap model。</p>
+            <p>同一错误重复出现、核心假设被反证、最终完成确认，直接升级到 premium model。</p>
+        </div>
+        <div class="panel">
+            <h3>语义 judge 保留</h3>
+            <p>实现、调试、架构、多文件修改、错误恢复等模糊场景，仍交给原来的 prompt router。</p>
+            <p>本地规则只处理高置信动作。证据不足时，不强行降级。</p>
+        </div>
+    </div>
+
+    <div class="diagram" aria-label="experiment architecture">
+        <div class="diagram-head">
+            <h3>实验链路</h3>
+            <p>真实 benchmark trial 仍走 aware-gateway。差别在于 smart-router 前面多了一层保守的 safe-control。</p>
+        </div>
+        <iframe class="diagram-frame" src="prompt-routing-experiment.html?embed=1" title="Prompt routing experiment architecture" loading="lazy"></iframe>
+    </div>
+
+    <h2>验证一：先用 probe 排除控制面幻觉</h2>
+    <p>
+        真实模型实验很贵，所以先做一个确定性 probe。它启动 mock provider、mock decision endpoint 和真实 gateway binary。
+        这样不花真实 LLM 成本，也能验证 router、audit trace、规则命中和分析脚本是否一致。
+    </p>
+
+    <table>
+        <tr>
+            <th>场景</th>
+            <th>预期</th>
+            <th>结果</th>
+        </tr>
+        <tr>
+            <td>读文件、搜索、跑已有测试、固定格式输出</td>
+            <td>safe-control 直接 cheap</td>
+            <td><span class="pass">通过</span></td>
+        </tr>
+        <tr>
+            <td>同一错误重复、假设被反证</td>
+            <td>safe-control 直接 premium</td>
+            <td><span class="pass">通过</span></td>
+        </tr>
+        <tr>
+            <td>连续 premium 后冷却、最终完成确认、模糊实现请求</td>
+            <td>分别进入 cooldown、guardrail、semantic judge</td>
+            <td><span class="pass">通过</span></td>
+        </tr>
+    </table>
+
+    <p class="small">
+        Probe 汇总：9 个场景全部命中预期；9 条 agent trace；2 条 decision trace；6 条 safe-control；
+        1 条 completion guardrail。mock 成本只用于检查计费链路，不当作经济结论。
+    </p>
+
+    <h2>验证二：真实 Harbor pilot</h2>
+    <p>
+        真实验证继续用 <code>shadow-relay</code>。原因很简单：公开 Opus 参照显示这题对强模型是可解的，
+        第一阶段也已经在这题上留下了多轮可比数据。我们不换题制造解释噪声。
+    </p>
+
+    <table>
+        <tr>
+            <th>Run</th>
+            <th class="num">Reward</th>
+            <th class="num">Cost</th>
+            <th>调用分布</th>
+            <th>读法</th>
+        </tr>
+        <tr>
+            <td>Phase 1 最好 live run</td>
+            <td class="num pass">1</td>
+            <td class="num">$2.6803</td>
+            <td>14 次 agent，13 次 decision，1 次 guardrail</td>
+            <td>prompt router 可以把 Opus 集中到关键路径，已经接近公开参照。</td>
+        </tr>
+        <tr>
+            <td>Phase 2 safe-control A1</td>
+            <td class="num pass">1</td>
+            <td class="num">$2.2468</td>
+            <td>22 次 agent，10 次 decision，11 次 safe-control，1 次 guardrail</td>
+            <td>质量没有下降，decision 固定税下降。Opus 6 次，Flash 16 次。</td>
+        </tr>
+        <tr>
+            <td>Phase 2 safe-control A2</td>
+            <td class="num warn-text">n/a</td>
+            <td class="num">$0.0091</td>
+            <td>5 次 agent，1 次 decision，4 次 safe-control</td>
+            <td>provider incomplete。早期连续 safe-control Flash 暴露 cheap path 需要上限。</td>
+        </tr>
+        <tr>
+            <td>Phase 2 safe-control A3</td>
+            <td class="num pass">1</td>
+            <td class="num">$3.7369</td>
+            <td>24 次 agent，12 次 decision，10 次 safe-control，2 次 guardrail</td>
+            <td>cheap burst 上限生效并通过；但耗时 19 分 49 秒，成本高于 A1。</td>
+        </tr>
+    </table>
+
+    <h2>实验暴露的问题和修复</h2>
+    <p>
+        第二阶段没有只保留好看的 run。A1 证明方向可行，A2 暴露控制边界和 provider 归因问题，
+        A3 验证修复后质量仍可通过，同时暴露新的时间和预算问题。
+    </p>
+
+    <table>
+        <tr>
+            <th>问题</th>
+            <th>修复</th>
+            <th>状态</th>
+        </tr>
+        <tr>
+            <td>分析器看不到 safe-control，无法解释 decision calls 为什么下降。</td>
+            <td>CSV 增加 <code>safe_control_rule_call_count</code>、<code>safe_control_rule_ids</code>、<code>safe_control_bypass_rate</code>。</td>
+            <td><span class="pass">已验证</span></td>
+        </tr>
+        <tr>
+            <td>重复错误升级的 fingerprint 抓到了泛化 traceback 头部。</td>
+            <td>优先使用具体错误行；同一 fingerprint 只自动升级一次，后续交还 semantic judge。</td>
+            <td><span class="pass">已验证</span></td>
+        </tr>
+        <tr>
+            <td>固定格式规则可能误判带 JSON 要求的实现类请求。</td>
+            <td>遇到 implement、edit、patch 等实现语境时不走本地 cheap 规则。</td>
+            <td><span class="pass">已验证</span></td>
+        </tr>
+        <tr>
+            <td>A2 前几步连续交给 Flash，本地 cheap 规则遮住了语义 judge。</td>
+            <td>新增 <code>cheap_probe_burst_limit=3</code>：连续 cheap 探测达到上限后，下一步交回 semantic judge。</td>
+            <td><span class="pass">A3 已验证</span></td>
+        </tr>
+        <tr>
+            <td>A2 的最后一次 agent 调用是 200，但没有 <code>finish_reason</code>、token 和 cost，Harbor 侧报 Timeout。</td>
+            <td>分析器把这类样本标成 <code>provider_incomplete</code>，不再混进普通模型失败。</td>
+            <td><span class="pass">已验证</span></td>
+        </tr>
+        <tr>
+            <td>A3 通过了，但最长单次 agent 调用 164 秒，整条 trial 1189 秒。</td>
+            <td>下一阶段让 route decision 携带输出预算和超时策略。</td>
+            <td><span class="warn-text">待做</span></td>
+        </tr>
+    </table>
+
+    <h2>目前能下什么结论</h2>
+    <ol>
+        <li>safe-control 可以减少不必要的 semantic judge 调用，但它不是自动省钱机器。</li>
+        <li><code>shadow-relay</code> 上 A1 和 A3 都通过，成本分别是 $2.2468 和 $3.7369。</li>
+        <li>A2 说明本地 cheap 规则必须有连续上限，否则会把早期方向判断推迟太久。</li>
+        <li>A3 说明质量可以保住，但下一层瓶颈变成 route action 的预算和停止条件。</li>
+    </ol>
+
+    <div class="callout warn">
+        <p>
+            这还不是泛化结论。现在只有一个任务上的两条通过样本和一条 provider incomplete 样本。
+            下一步可以加一个短任务，但在那之前，先把预算控制补上更重要。
+        </p>
+    </div>
+
+    <h2>下一步</h2>
+    <p>
+        第二阶段后半段应该继续沿着 Issue #1 走，但不要一次性做完所有抽象。建议顺序是：
+        先给 route action 加预算，再补 Episode 级事件记录，最后把 route decision 和 verifier outcome 连接起来。
+    </p>
+    <pre><code>1. Budgeted route action
+   cheap_probe: smaller max_tokens, shorter timeout
+   premium_recover: larger budget, guarded cooldown
+   semantic judge: choose model plus budget
+
+2. Episode event projection
+   file_read, file_modified, test_failed, test_passed, verifier_result
+
+3. Delivery feedback
+   route decision -> file change -> test/verifier outcome</code></pre>
+
+    <section class="footnote">
+        <p>
+            Reproducibility: Phase 2 probe uses <code>scripts/run_safe_control_probe.py</code>.
+            Harbor pilot analysis uses <code>scripts/analyze_v3_results.py</code>.
+            Public task secrets and hidden verifier details are intentionally omitted.
+        </p>
+    </section>
+</main>
+</body>
+</html>

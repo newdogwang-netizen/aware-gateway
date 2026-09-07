@@ -41,7 +41,7 @@ V4 把本地预算集中到核心问题：**smart-router 到底有没有用**。
 - 正式 10-trial matrix 还没启动，但 `shadow-relay` 现在是 V4 core 里替换
   `bun-sourcemap-leak` 的首选任务。
 
-2026-09-06 Phase 2 追加验证：
+2026-09-07 Phase 2 追加验证：
 
 - 方向从继续调 prompt，转为把 smart-router 当控制系统做：高置信、低风险动作先由
   本地 safe-control 规则处理，只有不确定请求才进入 semantic decision model。
@@ -53,10 +53,18 @@ V4 把本地预算集中到核心问题：**smart-router 到底有没有用**。
   `reward=1.0`，耗时 861.775s，22 次 agent 调用，成本 `$2.24684421`。
   其中 Opus 6 次、Flash 16 次；semantic decision 10 次、safe-control 规则命中
   11 次、completion guardrail 1 次。
-- 这轮最重要的结论不是“规则越多越好”，而是：确定性动作应从 prompt 决策里剥离；
-  真正关键的假设修正、恢复和最终确认仍然要交给强模型。
-- 下一阶段主要矛盾变成单次调用预算：cheap route 还需要携带 `max_tokens`、超时和
-  长输出限制，否则便宜模型仍可能消耗大量时间和上下文。
+- A2 复验没有 verifier 结果，归因为 `provider_incomplete`：网关记录到 routed
+  Flash 调用返回 200，但没有 `finish_reason`、token 和 cost，Harbor 侧报 Timeout。
+  这条只花 `$0.00911407`，但暴露了前几步连续 safe-control Flash 过多的问题。
+- 针对 A2，新增 `cheap_probe_burst_limit=3`：连续 cheap 探测达到上限后，本地规则
+  不再继续接管，下一步交回 semantic judge。
+- A3 复验通过 hidden verifier：`reward=1.0`，耗时 1188.956s，24 次 agent 调用，
+  成本 `$3.73694623`。其中 Opus 9 次、Flash 15 次；semantic decision 12 次、
+  safe-control 规则命中 10 次、completion guardrail 2 次。
+- 这轮最重要的结论不是“规则越多越好”，而是：确定性动作可以从 prompt 决策里剥离，
+  但本地 cheap 规则必须有连续上限；真正关键的假设修正、恢复和最终确认仍然要交给强模型。
+- 下一阶段主要矛盾变成 route action 预算：cheap route 还需要携带 `max_tokens`、
+  超时和长输出限制，否则便宜模型仍可能消耗大量时间和上下文。
 
 ## 实验目标
 

@@ -101,6 +101,7 @@ plugins:
       repeated_error_threshold: 2
       premium_cooldown_after: 2
       premium_cooldown_turns: 1
+      cheap_probe_burst_limit: 3
     # Disable decision caching for measurement runs so each turn records an
     # independent decision-model routing decision. Re-enable for product smoke tests.
     cache_ttl_seconds: -1

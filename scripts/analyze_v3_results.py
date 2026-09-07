@@ -211,6 +211,7 @@ def build_row(
     premium_calls = sol_calls + opus_calls
     cached_calls = sum(1 for t in agent_traces if str(t.get("routing_reason") or "").startswith("cached:"))
     provider_error = any(int(t.get("status") or 0) >= 500 for t in agent_traces)
+    incomplete_provider_response = any(is_incomplete_agent_response(t) for t in agent_traces)
     early_failure_marker = job_dir / "early-provider-failure.json"
     if early_failure_marker.exists():
         provider_error = True
@@ -219,7 +220,7 @@ def build_row(
     exception_type = exception_info.get("exception_type") or ""
     if reward is None and exception_info:
         reward = 0.0
-    failure_kind = classify_failure(reward, provider_error, exception_type)
+    failure_kind = classify_failure(reward, provider_error, incomplete_provider_response, exception_type)
 
     return {
         "experiment_id": artifact_dir.name,
@@ -404,9 +405,26 @@ def task_name(result: dict[str, Any]) -> str:
     return raw.rsplit("/", 1)[-1]
 
 
-def classify_failure(reward: Any, provider_error: bool, exception_type: str) -> str:
+def is_incomplete_agent_response(trace: dict[str, Any]) -> bool:
+    return (
+        int(trace.get("status") or 0) == 200
+        and bool(trace.get("routed_model") or trace.get("routing_reason"))
+        and not trace.get("finish_reason")
+        and int(trace.get("total_tokens") or 0) == 0
+        and float(trace.get("cost") or 0) == 0
+    )
+
+
+def classify_failure(
+    reward: Any,
+    provider_error: bool,
+    incomplete_provider_response: bool,
+    exception_type: str,
+) -> str:
     if provider_error:
         return "provider_5xx"
+    if incomplete_provider_response and exception_type:
+        return "provider_incomplete"
     if exception_type == "wall_clock_cap":
         return "wall_clock_cap"
     if exception_type:

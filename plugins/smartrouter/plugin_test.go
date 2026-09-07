@@ -569,6 +569,54 @@ func TestSafeControlRoutesCheapHighConfidenceRequestsWithoutDecisionModel(t *tes
 	}
 }
 
+func TestSafeControlCheapProbeBurstFallsThroughToDecisionModel(t *testing.T) {
+	decisionServerCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"message": {"content": "{\"model\":\"anthropic/claude-opus-5\",\"turn_type\":\"planning\",\"hypothesis_state\":\"forming\",\"critical_path\":true,\"recoverability\":\"hard\",\"context_summary\":\"cheap probes saturated\",\"reason\":\"re-evaluate after repeated cheap probes\"}"}}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+		}`)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.SafeControl.CheapProbeBurstLimit = 2
+	router.cfg.CacheTTLSeconds = -1
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "safe-cheap-burst")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Use rg to search for the handler and inspect the matching files."}]}`)
+
+	for i := 0; i < 2; i++ {
+		decision, err := router.Route(req, body)
+		if err != nil {
+			t.Fatalf("cheap Route %d returned error: %v", i+1, err)
+		}
+		if decision == nil || decision.Model != "z-ai/glm-5.3-flash" {
+			t.Fatalf("cheap Route %d = %#v, want flash", i+1, decision)
+		}
+		if !strings.Contains(decision.Reason, "rule_id=file_read_search_cheap") {
+			t.Fatalf("cheap Route %d reason = %q, want safe-control file/search rule", i+1, decision.Reason)
+		}
+	}
+
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("fallthrough Route returned error: %v", err)
+	}
+	if decision == nil || decision.Model != "anthropic/claude-opus-5" {
+		t.Fatalf("fallthrough Route = %#v, want Opus from decision model", decision)
+	}
+	if strings.Contains(decision.Reason, "safe-control") {
+		t.Fatalf("fallthrough reason = %q, want semantic smart-router route", decision.Reason)
+	}
+	if decisionServerCalls != 1 {
+		t.Fatalf("decision server calls = %d, want 1", decisionServerCalls)
+	}
+}
+
 func TestSafeControlRepeatedErrorUpgradesWithoutSecondDecisionModelCall(t *testing.T) {
 	decisionServerCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -843,6 +891,7 @@ plugins:
       repeated_error_threshold: 3
       premium_cooldown_after: 4
       premium_cooldown_turns: 2
+      cheap_probe_burst_limit: 5
 `))
 	if err != nil {
 		t.Fatalf("LoadFromBytes returned error: %v", err)
@@ -862,6 +911,9 @@ plugins:
 	}
 	if smartCfg.SafeControl.PremiumCooldownTurns != 2 {
 		t.Fatalf("premium_cooldown_turns = %d, want 2", smartCfg.SafeControl.PremiumCooldownTurns)
+	}
+	if smartCfg.SafeControl.CheapProbeBurstLimit != 5 {
+		t.Fatalf("cheap_probe_burst_limit = %d, want 5", smartCfg.SafeControl.CheapProbeBurstLimit)
 	}
 }
 
@@ -915,5 +967,6 @@ func enableSafeControl(router *SmartRouter) {
 		RepeatedErrorThreshold: 2,
 		PremiumCooldownAfter:   2,
 		PremiumCooldownTurns:   1,
+		CheapProbeBurstLimit:   3,
 	}
 }

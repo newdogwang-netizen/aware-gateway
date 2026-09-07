@@ -13,6 +13,7 @@ const (
 	defaultRepeatedErrorThreshold = 2
 	defaultPremiumCooldownAfter   = 2
 	defaultPremiumCooldownTurns   = 1
+	defaultCheapProbeBurstLimit   = 3
 )
 
 // SafeControlConfig enables a local high-confidence routing layer before the
@@ -23,6 +24,7 @@ type SafeControlConfig struct {
 	RepeatedErrorThreshold int  `yaml:"repeated_error_threshold" json:"repeated_error_threshold"`
 	PremiumCooldownAfter   int  `yaml:"premium_cooldown_after" json:"premium_cooldown_after"`
 	PremiumCooldownTurns   int  `yaml:"premium_cooldown_turns" json:"premium_cooldown_turns"`
+	CheapProbeBurstLimit   int  `yaml:"cheap_probe_burst_limit" json:"cheap_probe_burst_limit"`
 }
 
 type safeControlState struct {
@@ -31,6 +33,7 @@ type safeControlState struct {
 	SameFailureCount         int
 	ConsecutivePremium       int
 	CooldownRemaining        int
+	ConsecutiveCheapProbes   int
 }
 
 type safeControlObservation struct {
@@ -88,10 +91,11 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 	}
 
 	if looksLikeFileReadOrSearch(message) {
-		return s.safeControlRoute(
+		return s.safeControlCheapRoute(
+			obs.State,
+			cfg,
 			"file_read_search_cheap",
 			"cheap_probe",
-			false,
 			0.95,
 			[]string{"latest_message=file read or search"},
 			"mechanical_probe",
@@ -102,10 +106,11 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 	}
 
 	if looksLikeExistingTestExecution(message) {
-		return s.safeControlRoute(
+		return s.safeControlCheapRoute(
+			obs.State,
+			cfg,
 			"existing_test_execution_cheap",
 			"cheap_execute",
-			false,
 			0.93,
 			[]string{"latest_message=run known test command"},
 			"validation",
@@ -116,10 +121,11 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 	}
 
 	if looksLikeFixedFormatOutput(message) {
-		return s.safeControlRoute(
+		return s.safeControlCheapRoute(
+			obs.State,
+			cfg,
 			"fixed_format_output_cheap",
 			"cheap_execute",
-			false,
 			0.90,
 			[]string{"latest_message=fixed output protocol"},
 			"fixed_format",
@@ -130,10 +136,11 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 	}
 
 	if obs.State.CooldownRemaining > 0 && !looksLikePremiumRequired(message) {
-		return s.safeControlRoute(
+		return s.safeControlCheapRoute(
+			obs.State,
+			cfg,
 			"premium_cooldown",
 			"cheap_probe",
-			false,
 			0.88,
 			[]string{
 				fmt.Sprintf("cooldown_remaining=%d", obs.State.CooldownRemaining),
@@ -160,7 +167,27 @@ func (s *SmartRouter) safeControlConfig() SafeControlConfig {
 	if cfg.PremiumCooldownTurns <= 0 {
 		cfg.PremiumCooldownTurns = defaultPremiumCooldownTurns
 	}
+	if cfg.CheapProbeBurstLimit <= 0 {
+		cfg.CheapProbeBurstLimit = defaultCheapProbeBurstLimit
+	}
 	return cfg
+}
+
+func (s *SmartRouter) safeControlCheapRoute(state safeControlState, cfg SafeControlConfig, ruleID, action string, confidence float64, evidence []string, turnType, hypothesisState, summary, shortReason string) (*plugin.RoutingDecision, *DecisionResponse, bool) {
+	if state.ConsecutiveCheapProbes >= cfg.CheapProbeBurstLimit {
+		return nil, nil, false
+	}
+	return s.safeControlRoute(
+		ruleID,
+		action,
+		false,
+		confidence,
+		append(evidence, fmt.Sprintf("cheap_probe_streak=%d/%d", state.ConsecutiveCheapProbes, cfg.CheapProbeBurstLimit)),
+		turnType,
+		hypothesisState,
+		summary,
+		shortReason,
+	)
 }
 
 func (s *SmartRouter) safeControlRoute(ruleID, action string, premium bool, confidence float64, evidence []string, turnType, hypothesisState, summary, shortReason string) (*plugin.RoutingDecision, *DecisionResponse, bool) {
@@ -239,6 +266,7 @@ func (s *SmartRouter) observeSafeControlState(req *http.Request, parsed *parsedR
 		state.LastErrorFingerprint = ""
 		state.LastEscalatedFingerprint = ""
 		state.SameFailureCount = 0
+		state.ConsecutiveCheapProbes = 0
 	}
 
 	return safeControlObservation{
@@ -289,6 +317,7 @@ func (s *SmartRouter) recordSafeControlOutcome(req *http.Request, selectedModel 
 
 	if s.isStrongestConfiguredModel(selectedModel) {
 		state.ConsecutivePremium++
+		state.ConsecutiveCheapProbes = 0
 		if state.ConsecutivePremium >= cfg.PremiumCooldownAfter && state.CooldownRemaining == 0 {
 			state.CooldownRemaining = cfg.PremiumCooldownTurns
 		}
@@ -296,6 +325,11 @@ func (s *SmartRouter) recordSafeControlOutcome(req *http.Request, selectedModel 
 	}
 
 	state.ConsecutivePremium = 0
+	if s.isCheapestConfiguredModel(selectedModel) {
+		state.ConsecutiveCheapProbes++
+	} else {
+		state.ConsecutiveCheapProbes = 0
+	}
 	if state.CooldownRemaining > 0 {
 		state.CooldownRemaining--
 	}
@@ -323,6 +357,14 @@ func (s *SmartRouter) isStrongestConfiguredModel(model string) bool {
 		return false
 	}
 	return modelsMatch(model, strongest.Name)
+}
+
+func (s *SmartRouter) isCheapestConfiguredModel(model string) bool {
+	cheapest, ok := s.cheapestConfiguredModel()
+	if !ok {
+		return false
+	}
+	return modelsMatch(model, cheapest.Name)
 }
 
 func modelsMatch(a, b string) bool {

@@ -148,6 +148,7 @@ plugins:
       repeated_error_threshold: 2
       premium_cooldown_after: 2
       premium_cooldown_turns: 1
+      cheap_probe_burst_limit: 3
 
     # Model menu (same format as task-router, or leave empty to
     # auto-populate from pool discovery)
@@ -226,6 +227,8 @@ prompt and handles only narrow cases:
 - Upgrade repeated identical task errors and contradicted core hypotheses to
   the strongest configured model.
 - Apply a short cheap-model cooldown after consecutive premium calls.
+- Send control back to the semantic router after too many consecutive cheap
+  probes, so local rules cannot delay early direction-setting work forever.
 - Force task-completion confirmation through the strongest configured model.
 
 The layer is deliberately conservative. Implementation/edit requests do not

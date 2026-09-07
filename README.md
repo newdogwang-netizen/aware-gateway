@@ -74,10 +74,11 @@ Built by refactoring the heidi model-gateway into a core engine + plugin system.
 
 ## Experiment Reports
 
-- [Smart Router Experiment Report](docs/smart-router-experiment-report.html) — blog-style summary of the smart-router benchmark runs, decision replay studies, cost/quality tradeoffs, and next-step recommendations.
-- [V4 Experiment Plan 中文](docs/experiment-plan-v4.zh.md) — current reduced-scope benchmark design for comparing smart routing against public leaderboard baselines.
-- [Router Decision Lab Notes](docs/router-decision-lab.md) — notes for replaying router decisions under different prompt designs.
-- [Benchmark Cost Report](docs/benchmark-cost.html) — static benchmark cost reference.
+- [Phase 1 Smart Router Experiment Report](docs/smart-router-experiment-report.html) - prompt-based router benchmark runs, decision replay studies, cost/quality tradeoffs, and first-stage lessons.
+- [Phase 2 Safe Control Report](docs/smart-router-phase2-safe-control-report.html) - follow-up validation for Issue #1, covering local safe-control rules, real Harbor pilots, and the next budget-control problem.
+- [V4 Experiment Plan 中文](docs/experiment-plan-v4.zh.md) - current reduced-scope benchmark design for comparing smart routing against public leaderboard baselines.
+- [Router Decision Lab Notes](docs/router-decision-lab.md) - notes for replaying router decisions under different prompt designs.
+- [Benchmark Cost Report](docs/benchmark-cost.html) - static benchmark cost reference.
 
 ### Writing a Custom Plugin
 
@@ -267,6 +268,7 @@ plugins:
       repeated_error_threshold: 2
       premium_cooldown_after: 2
       premium_cooldown_turns: 1
+      cheap_probe_burst_limit: 3
     models:
       - name: z-ai/glm-5.3-flash
         pool: openrouter
@@ -286,7 +288,8 @@ With `safe_control.enabled`, a conservative local controller runs before the
 decision model. It routes file reads/search, known test execution, and ordinary
 fixed-format replies to the cheapest configured model; it upgrades repeated
 identical failures and contradicted core hypotheses to the strongest configured
-model; and it inserts a short cheap cooldown after consecutive premium calls.
+model; it inserts a short cheap cooldown after consecutive premium calls; and
+it returns to the prompt router after too many consecutive cheap probes.
 Requests outside those rules continue through the prompt-based smart-router.
 
 ## Project Structure
