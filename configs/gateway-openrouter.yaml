@@ -102,6 +102,24 @@ plugins:
       premium_cooldown_after: 2
       premium_cooldown_turns: 1
       cheap_probe_burst_limit: 3
+    budgeted_route:
+      enabled: true
+      profiles:
+        cheap_probe:
+          max_tokens: 2048
+          timeout_ms: 60000
+        cheap_execute:
+          max_tokens: 1536
+          timeout_ms: 60000
+        premium_reason:
+          max_tokens: 4096
+          timeout_ms: 180000
+        premium_recover:
+          max_tokens: 4096
+          timeout_ms: 180000
+        completion_guardrail:
+          max_tokens: 1024
+          timeout_ms: 60000
     # Disable decision caching for measurement runs so each turn records an
     # independent decision-model routing decision. Re-enable for product smoke tests.
     cache_ttl_seconds: -1

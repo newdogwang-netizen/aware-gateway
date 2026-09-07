@@ -18,10 +18,13 @@ const (
 // it via WithMeta before invoking the handler chain; the inner pool handler
 // writes the selected endpoint/attempt/fallback into it.
 type Meta struct {
-	Endpoint      string
-	Attempt       int
-	Fallback      bool
-	Pool          string
-	RoutedModel   string
-	RoutingReason string
+	Endpoint       string
+	Attempt        int
+	Fallback       bool
+	Pool           string
+	RoutedModel    string
+	RoutingReason  string
+	BudgetAction   string
+	RouteMaxTokens int
+	RouteTimeoutMs int
 }

@@ -12,12 +12,12 @@
 //  4. Close: Registry.Close() calls Plugin.Close() on graceful shutdown
 //
 // Hook Execution:
-//  - RequestRouter: chain-of-responsibility — first non-Skip decision wins
-//  - RequestTransformer: pipeline — each transformer runs in order
-//  - ResponseTransformer: pipeline — each transformer runs in order
-//  - Authenticator: all must pass (AND logic)
-//  - AuditSink: fan-out — each sink receives every event
-//  - MiddlewareProvider: middleware wrapped in registration order
+//   - RequestRouter: chain-of-responsibility — first non-Skip decision wins
+//   - RequestTransformer: pipeline — each transformer runs in order
+//   - ResponseTransformer: pipeline — each transformer runs in order
+//   - Authenticator: all must pass (AND logic)
+//   - AuditSink: fan-out — each sink receives every event
+//   - MiddlewareProvider: middleware wrapped in registration order
 package plugin
 
 import (
@@ -51,11 +51,14 @@ type RequestRouter interface {
 
 // RoutingDecision is the output of a RequestRouter.
 type RoutingDecision struct {
-	Pool     string // target pool name
-	Model    string // model name override (rewrites request body "model" field)
-	Endpoint string // specific endpoint (empty = use pool load balancer)
-	Reason   string // human-readable explanation for observability
-	Skip     bool   // true = this router declines, try next
+	Pool         string // target pool name
+	Model        string // model name override (rewrites request body "model" field)
+	Endpoint     string // specific endpoint (empty = use pool load balancer)
+	Reason       string // human-readable explanation for observability
+	BudgetAction string // optional route action profile, e.g. cheap_probe
+	MaxTokens    int    // optional request max_tokens override
+	TimeoutMs    int    // optional per-attempt upstream timeout override
+	Skip         bool   // true = this router declines, try next
 }
 
 // RequestTransformer modifies the request body before proxying.
@@ -120,34 +123,37 @@ type HealthReporter interface {
 
 // TraceFilter holds query parameters for trace lookup.
 type TraceFilter struct {
-	TrialName  string
-	TaskName   string
-	StepName   string
-	SessionID  string
-	Limit      int
+	TrialName string
+	TaskName  string
+	StepName  string
+	SessionID string
+	Limit     int
 }
 
 // TraceEntry is a single LLM call record returned by /v1/traces.
 type TraceEntry struct {
-	TraceID       string `json:"trace_id"`
-	Timestamp     string `json:"timestamp"`
-	Model         string `json:"model"`
-	RoutedModel   string `json:"routed_model"`
-	Pool          string `json:"pool"`
-	Endpoint      string `json:"endpoint"`
-	StepName      string `json:"step_name,omitempty"`
-	TaskName      string `json:"task_name,omitempty"`
-	TrialName     string `json:"trial_name,omitempty"`
-	SessionID     string `json:"session_id,omitempty"`
-	PromptTokens  int    `json:"prompt_tokens"`
-	CompTokens    int    `json:"completion_tokens"`
-	TotalTokens   int    `json:"total_tokens"`
-	Cost          float64 `json:"cost"`
-	LatencyMs     int64  `json:"latency_ms"`
-	Status        int    `json:"status"`
-	Streaming     bool   `json:"streaming"`
-	FinishReason  string `json:"finish_reason,omitempty"`
-	RoutingReason string `json:"routing_reason,omitempty"`
+	TraceID        string  `json:"trace_id"`
+	Timestamp      string  `json:"timestamp"`
+	Model          string  `json:"model"`
+	RoutedModel    string  `json:"routed_model"`
+	Pool           string  `json:"pool"`
+	Endpoint       string  `json:"endpoint"`
+	StepName       string  `json:"step_name,omitempty"`
+	TaskName       string  `json:"task_name,omitempty"`
+	TrialName      string  `json:"trial_name,omitempty"`
+	SessionID      string  `json:"session_id,omitempty"`
+	PromptTokens   int     `json:"prompt_tokens"`
+	CompTokens     int     `json:"completion_tokens"`
+	TotalTokens    int     `json:"total_tokens"`
+	Cost           float64 `json:"cost"`
+	LatencyMs      int64   `json:"latency_ms"`
+	Status         int     `json:"status"`
+	Streaming      bool    `json:"streaming"`
+	FinishReason   string  `json:"finish_reason,omitempty"`
+	RoutingReason  string  `json:"routing_reason,omitempty"`
+	BudgetAction   string  `json:"route_budget_action,omitempty"`
+	RouteMaxTokens int     `json:"route_max_tokens,omitempty"`
+	RouteTimeoutMs int     `json:"route_timeout_ms,omitempty"`
 }
 
 // TraceQueryer is an optional interface that AuditSink plugins can implement

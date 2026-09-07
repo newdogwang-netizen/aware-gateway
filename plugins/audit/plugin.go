@@ -124,30 +124,33 @@ func (p *Plugin) Record(record *plugin.AuditRecord) error {
 	if p.cfg.Store == "sqlite" || p.cfg.Store == "both" {
 		if p.store != nil {
 			p.store.Record(Record{
-				TraceID:       record.TraceID,
-				Timestamp:     record.Timestamp,
-				Method:        record.Method,
-				Path:          record.Path,
-				Endpoint:      record.Endpoint,
-				Status:        record.Status,
-				LatencyMs:     record.LatencyMs,
-				Model:         record.Model,
-				RoutedModel:   record.RoutedModel,
-				Pool:          record.Pool,
-				PromptTokens:  record.PromptTokens,
-				CompTokens:    record.CompTokens,
-				TotalTokens:   record.TotalTokens,
-				RetryAttempt:  record.RetryAttempt,
-				Fallback:      record.Fallback,
-				UserID:        record.UserID,
-				APIKey:        record.APIKey,
-				Cost:          record.Cost,
-				SessionID:     record.SessionID,
-				TrialName:     record.TrialName,
-				StepName:      record.StepName,
-				TaskName:      record.TaskName,
-				FinishReason:  record.FinishReason,
-				RoutingReason: record.RoutingReason,
+				TraceID:        record.TraceID,
+				Timestamp:      record.Timestamp,
+				Method:         record.Method,
+				Path:           record.Path,
+				Endpoint:       record.Endpoint,
+				Status:         record.Status,
+				LatencyMs:      record.LatencyMs,
+				Model:          record.Model,
+				RoutedModel:    record.RoutedModel,
+				Pool:           record.Pool,
+				PromptTokens:   record.PromptTokens,
+				CompTokens:     record.CompTokens,
+				TotalTokens:    record.TotalTokens,
+				RetryAttempt:   record.RetryAttempt,
+				Fallback:       record.Fallback,
+				UserID:         record.UserID,
+				APIKey:         record.APIKey,
+				Cost:           record.Cost,
+				BudgetAction:   record.BudgetAction,
+				RouteMaxTokens: record.RouteMaxTokens,
+				RouteTimeoutMs: record.RouteTimeoutMs,
+				SessionID:      record.SessionID,
+				TrialName:      record.TrialName,
+				StepName:       record.StepName,
+				TaskName:       record.TaskName,
+				FinishReason:   record.FinishReason,
+				RoutingReason:  record.RoutingReason,
 			})
 		}
 	}
@@ -171,24 +174,27 @@ func (p *Plugin) logRecord(record *plugin.AuditRecord) {
 // --- SQLite Store ---
 
 type Record struct {
-	TraceID      string    `json:"trace_id"`
-	Timestamp    time.Time `json:"timestamp"`
-	Method       string    `json:"method"`
-	Path         string    `json:"path"`
-	Endpoint     string    `json:"endpoint"`
-	Status       int       `json:"status"`
-	LatencyMs    int64     `json:"latency_ms"`
-	Model        string    `json:"model"`
-	RoutedModel  string    `json:"routed_model"`
-	Pool         string    `json:"pool"`
-	PromptTokens int       `json:"prompt_tokens"`
-	CompTokens   int       `json:"completion_tokens"`
-	TotalTokens  int       `json:"total_tokens"`
-	RetryAttempt int       `json:"retry_attempt"`
-	Fallback     string    `json:"fallback"`
-	UserID       string    `json:"user_id"`
-	APIKey       string    `json:"api_key"`
-	Cost         float64   `json:"cost"`
+	TraceID        string    `json:"trace_id"`
+	Timestamp      time.Time `json:"timestamp"`
+	Method         string    `json:"method"`
+	Path           string    `json:"path"`
+	Endpoint       string    `json:"endpoint"`
+	Status         int       `json:"status"`
+	LatencyMs      int64     `json:"latency_ms"`
+	Model          string    `json:"model"`
+	RoutedModel    string    `json:"routed_model"`
+	Pool           string    `json:"pool"`
+	PromptTokens   int       `json:"prompt_tokens"`
+	CompTokens     int       `json:"completion_tokens"`
+	TotalTokens    int       `json:"total_tokens"`
+	RetryAttempt   int       `json:"retry_attempt"`
+	Fallback       string    `json:"fallback"`
+	UserID         string    `json:"user_id"`
+	APIKey         string    `json:"api_key"`
+	Cost           float64   `json:"cost"`
+	BudgetAction   string    `json:"route_budget_action"`
+	RouteMaxTokens int       `json:"route_max_tokens"`
+	RouteTimeoutMs int       `json:"route_timeout_ms"`
 
 	// Task/step correlation
 	SessionID string `json:"session_id,omitempty"`
@@ -242,7 +248,10 @@ func Open(path string) (*Store, error) {
 		step_name TEXT DEFAULT '',
 		task_name TEXT DEFAULT '',
 		finish_reason TEXT DEFAULT '',
-		routing_reason TEXT DEFAULT ''
+		routing_reason TEXT DEFAULT '',
+		route_budget_action TEXT DEFAULT '',
+		route_max_tokens INTEGER DEFAULT 0,
+		route_timeout_ms INTEGER DEFAULT 0
 	);
 	CREATE INDEX IF NOT EXISTS idx_audit_trace ON audit(trace_id);
 	CREATE INDEX IF NOT EXISTS idx_audit_time ON audit(timestamp);
@@ -256,6 +265,19 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "route_budget_action", definition: "TEXT DEFAULT ''"},
+		{name: "route_max_tokens", definition: "INTEGER DEFAULT 0"},
+		{name: "route_timeout_ms", definition: "INTEGER DEFAULT 0"},
+	} {
+		if err := ensureColumn(db, "audit", column.name, column.definition); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 
 	s := &Store{
 		db:            db,
@@ -265,6 +287,35 @@ func Open(path string) (*Store, error) {
 	}
 	go s.flushLoop()
 	return s, nil
+}
+
+func ensureColumn(db *sql.DB, table, column, definition string) error {
+	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return fmt.Errorf("scan %s schema: %w", table, err)
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate %s schema: %w", table, err)
+	}
+
+	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)); err != nil {
+		return fmt.Errorf("add %s.%s: %w", table, column, err)
+	}
+	return nil
 }
 
 func (s *Store) Record(r Record) {
@@ -303,8 +354,9 @@ func (s *Store) flush(records []Record) {
 	stmt, err := tx.Prepare(`INSERT INTO audit
 		(trace_id, timestamp, method, path, endpoint, status, latency_ms, model, routed_model, pool,
 		 prompt_tokens, completion_tokens, total_tokens, retry_attempt, fallback, user_id, api_key, cost,
-		 session_id, trial_name, step_name, task_name, finish_reason, routing_reason)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		 session_id, trial_name, step_name, task_name, finish_reason, routing_reason,
+		 route_budget_action, route_max_tokens, route_timeout_ms)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		slog.Error("audit: prepare failed", "error", err)
 		tx.Rollback()
@@ -320,6 +372,7 @@ func (s *Store) flush(records []Record) {
 			r.UserID, r.APIKey, r.Cost,
 			r.SessionID, r.TrialName, r.StepName, r.TaskName,
 			r.FinishReason, r.RoutingReason,
+			r.BudgetAction, r.RouteMaxTokens, r.RouteTimeoutMs,
 		)
 		if err != nil {
 			slog.Error("audit: insert failed", "error", err)
@@ -360,7 +413,8 @@ func (s *Store) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, err
 	query := `SELECT trace_id, timestamp, model, routed_model, pool, endpoint,
 		step_name, task_name, trial_name, session_id,
 		prompt_tokens, completion_tokens, total_tokens, cost,
-		latency_ms, status, finish_reason, routing_reason
+		latency_ms, status, finish_reason, routing_reason,
+		route_budget_action, route_max_tokens, route_timeout_ms
 		FROM audit WHERE 1=1`
 	args := []any{}
 
@@ -401,6 +455,7 @@ func (s *Store) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, err
 			&e.StepName, &e.TaskName, &e.TrialName, &sessionID,
 			&e.PromptTokens, &e.CompTokens, &e.TotalTokens, &e.Cost,
 			&e.LatencyMs, &e.Status, &finishReason, &routingReason,
+			&e.BudgetAction, &e.RouteMaxTokens, &e.RouteTimeoutMs,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan trace row: %w", err)

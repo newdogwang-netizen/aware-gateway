@@ -250,13 +250,13 @@
         </div>
         <div class="metric">
             <div class="label">真实 pilot</div>
-            <span class="value">2 pass</span>
-            <div class="note"><code>shadow-relay</code> A1、A3 通过；A2 暴露 provider incomplete。</div>
+            <span class="value">3 pass</span>
+            <div class="note"><code>shadow-relay</code> A1、A3、A4 通过；A2 暴露 provider incomplete。</div>
         </div>
         <div class="metric">
             <div class="label">下一层问题</div>
-            <span class="value">budget</span>
-            <div class="note">质量能保住，但 route action 还缺输出预算和停止条件。</div>
+            <span class="value">profile</span>
+            <div class="note">Budgeted Route Action A4 通过，但 21/44 次输出被截断。</div>
         </div>
     </section>
 
@@ -326,8 +326,8 @@ Outcome: 这条路径最后有没有产生有效交付</code></pre>
         </tr>
         <tr>
             <td>Budgeted Route Action</td>
-            <td><span class="warn-text">未完成</span></td>
-            <td>路由结果目前主要是模型选择，还不能同时控制 max_tokens、timeout 和输出长度。</td>
+            <td><span class="pass">第一版已验证</span></td>
+            <td>A4 真实 pilot 通过；但截断率偏高，profile 还需要 outcome 校准。</td>
         </tr>
         <tr>
             <td>Delivery Feedback</td>
@@ -344,7 +344,7 @@ Outcome: 这条路径最后有没有产生有效交付</code></pre>
     <div class="callout warn">
         <p>
             所以验收边界很窄：Phase 2 Safe Control 子里程碑可以标记完成；Issue #1 的总体目标必须保持 open。
-            下一步不宜继续添加更多关键词规则，应先实现 Budgeted Route Action，然后进入最小 Episode/Event 模型。
+            后续不宜继续添加更多关键词规则；Budgeted Route Action 第一版已经接上，下一步进入最小 Episode/Event 模型。
         </p>
     </div>
 
@@ -452,12 +452,20 @@ Outcome: 这条路径最后有没有产生有效交付</code></pre>
             <td>24 次 agent，12 次 decision，10 次 safe-control，2 次 guardrail</td>
             <td>cheap burst 上限生效并通过；但耗时 19 分 49 秒，成本高于 A1。</td>
         </tr>
+        <tr>
+            <td>Phase 2 budgeted-route A4</td>
+            <td class="num pass">1</td>
+            <td class="num">$3.4808</td>
+            <td>44 次 agent，23 次 decision，20 次 safe-control，44 次 budgeted route</td>
+            <td>最长单次调用压到 60 秒附近；但 21 次 length 截断让路径变碎。</td>
+        </tr>
     </table>
 
     <h2>实验暴露的问题和修复</h2>
     <p>
         第二阶段没有只保留好看的 run。A1 证明方向可行，A2 暴露控制边界和 provider 归因问题，
-        A3 验证修复后质量仍可通过，同时暴露新的时间和预算问题。
+        A3 验证修复后质量仍可通过，同时暴露新的时间和预算问题。A4 接上预算控制后继续通过，
+        但也暴露了 profile 过紧会把任务切成更多小步。
     </p>
 
     <table>
@@ -493,7 +501,12 @@ Outcome: 这条路径最后有没有产生有效交付</code></pre>
         </tr>
         <tr>
             <td>A3 通过了，但最长单次 agent 调用 164 秒，整条 trial 1189 秒。</td>
-            <td>下一阶段让 route decision 携带输出预算和超时策略。</td>
+            <td>新增 Budgeted Route Action：路由动作可改写 <code>max_tokens</code>，并缩短本次 upstream timeout。</td>
+            <td><span class="pass">A4 已验证</span></td>
+        </tr>
+        <tr>
+            <td>A4 成本低于 A3、耗时低于 A3，但 44 次 agent 里 21 次被 token 上限截断。</td>
+            <td>下一轮要把 profile 从粗粒度 action 调成 outcome-aware：premium_reason 和 cheap_execute 不能一刀切。</td>
             <td><span class="warn-text">待做</span></td>
         </tr>
     </table>
@@ -501,15 +514,16 @@ Outcome: 这条路径最后有没有产生有效交付</code></pre>
     <h2>目前能下什么结论</h2>
     <ol>
         <li>safe-control 可以减少不必要的 semantic judge 调用，但它不是自动省钱机器。</li>
-        <li><code>shadow-relay</code> 上 A1 和 A3 都通过，成本分别是 $2.2468 和 $3.7369。</li>
+        <li><code>shadow-relay</code> 上 A1、A3、A4 都通过，成本分别是 $2.2468、$3.7369、$3.4808。</li>
         <li>A2 说明本地 cheap 规则必须有连续上限，否则会把早期方向判断推迟太久。</li>
         <li>A3 说明质量可以保住，但下一层瓶颈变成 route action 的预算和停止条件。</li>
         <li>现在完成的是“减少每轮 judge”的实验目标，还没有完成“状态化智能决策层”的架构目标。</li>
+        <li>Budgeted Route Action A4 没有伤害质量，但 profile 过紧会增加碎片化迭代。</li>
     </ol>
 
     <div class="callout warn">
         <p>
-            这还不是泛化结论。现在只有一个任务上的两条通过样本和一条 provider incomplete 样本。
+            这还不是泛化结论。现在只有一个任务上的三条通过样本和一条 provider incomplete 样本。
             至少覆盖 5 到 10 个不同任务类型后，才适合判断它是否真的提高了智能决策水平。
         </p>
     </div>
@@ -518,7 +532,8 @@ Outcome: 这条路径最后有没有产生有效交付</code></pre>
     <p>
         第二阶段后半段应该继续沿着 Issue #1 走，但不要一次性做完所有抽象。
         还差三根主梁：Episode Runtime 负责识别任务线，Event Projection 负责记录已经发生了什么，
-        Outcome Loop 负责用最终交付反向验证策略。落地顺序应该从最影响实验可行性的预算控制开始。
+        Outcome Loop 负责用最终交付反向验证策略。预算控制面已经接上并通过一条真实 pilot，
+        下一步要让 profile 接入 Episode/Event 信号，而不是继续手工加规则。
     </p>
     <pre><code>1. Budgeted route action
    cheap_probe: smaller max_tokens, shorter timeout

@@ -149,6 +149,24 @@ plugins:
       premium_cooldown_after: 2
       premium_cooldown_turns: 1
       cheap_probe_burst_limit: 3
+    budgeted_route:
+      enabled: true
+      profiles:
+        cheap_probe:
+          max_tokens: 2048
+          timeout_ms: 60000
+        cheap_execute:
+          max_tokens: 1536
+          timeout_ms: 60000
+        premium_reason:
+          max_tokens: 4096
+          timeout_ms: 180000
+        premium_recover:
+          max_tokens: 4096
+          timeout_ms: 180000
+        completion_guardrail:
+          max_tokens: 1024
+          timeout_ms: 60000
 
     # Model menu (same format as task-router, or leave empty to
     # auto-populate from pool discovery)
@@ -238,6 +256,21 @@ generic headers such as `Traceback (most recent call last):`, and the same
 fingerprint is auto-upgraded only once before control returns to the semantic
 router. This came directly from a real `shadow-relay` pilot where overly broad
 fingerprints and fixed-format matches produced misleading local decisions.
+
+### Budgeted Route Action
+
+The first Issue #1 follow-up turns routing output into an execution action, not
+only a model label. A `RoutingDecision` can now carry:
+
+- `budget_action`, such as `cheap_probe`, `cheap_execute`, `premium_reason`,
+  `premium_recover`, or `completion_guardrail`
+- `max_tokens`, which rewrites the upstream chat request
+- `timeout_ms`, which can shorten the endpoint timeout for that routed call
+
+The audit trace exposes these as `route_budget_action`, `route_max_tokens`, and
+`route_timeout_ms`. This is intentionally small: it does not solve Episode
+Runtime or Delivery Feedback yet, but it creates the control surface needed for
+those layers.
 
 ### Latency Budget
 

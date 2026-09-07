@@ -440,6 +440,8 @@ func TestBuildPromptIncludesCostQualityTurnRiskGuidance(t *testing.T) {
 		"Use the strongest model for finalization or submission turns after local checks pass",
 		"Do not upgrade merely because the terminal agent must reply in JSON",
 		"Prefer the cheaper model when it can safely advance the task",
+		"Budget actions:",
+		"budget_action",
 		"context_summary",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -509,6 +511,48 @@ func TestRouteFeedsRecentDecisionHistoryIntoNextPrompt(t *testing.T) {
 	}
 }
 
+func TestSmartRouterAppliesBudgetActionFromDecisionModel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"message": {"content": "{\"model\":\"z-ai/glm-5.3-flash\",\"turn_type\":\"validation\",\"hypothesis_state\":\"stable\",\"critical_path\":false,\"recoverability\":\"easy\",\"budget_action\":\"cheap_execute\",\"context_summary\":\"known test command\",\"reason\":\"bounded validation\"}"}}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+		}`)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	router.cfg.CacheTTLSeconds = -1
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionCheapExecute: {MaxTokens: 777, TimeoutMs: 888},
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Run the known test command."}]}`)
+
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decision == nil || decision.Skip {
+		t.Fatal("Route skipped; want budgeted decision")
+	}
+	if decision.BudgetAction != budgetActionCheapExecute {
+		t.Fatalf("budget action = %q, want %s", decision.BudgetAction, budgetActionCheapExecute)
+	}
+	if decision.MaxTokens != 777 {
+		t.Fatalf("max tokens = %d, want 777", decision.MaxTokens)
+	}
+	if decision.TimeoutMs != 888 {
+		t.Fatalf("timeout ms = %d, want 888", decision.TimeoutMs)
+	}
+	if !strings.Contains(decision.Reason, "budget_action=cheap_execute") {
+		t.Fatalf("reason = %q, want budget action marker", decision.Reason)
+	}
+}
+
 func TestSafeControlRoutesCheapHighConfidenceRequestsWithoutDecisionModel(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -566,6 +610,45 @@ func TestSafeControlRoutesCheapHighConfidenceRequestsWithoutDecisionModel(t *tes
 				}
 			}
 		})
+	}
+}
+
+func TestSafeControlAppliesBudgetProfile(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionCheapProbe: {MaxTokens: 321, TimeoutMs: 654},
+		},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "safe-budget-profile")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Use rg to search for the handler and inspect the matching files."}]}`)
+
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decision == nil || decision.Skip {
+		t.Fatal("Route skipped; want safe-control decision")
+	}
+	if decision.BudgetAction != budgetActionCheapProbe {
+		t.Fatalf("budget action = %q, want %s", decision.BudgetAction, budgetActionCheapProbe)
+	}
+	if decision.MaxTokens != 321 {
+		t.Fatalf("max tokens = %d, want 321", decision.MaxTokens)
+	}
+	if decision.TimeoutMs != 654 {
+		t.Fatalf("timeout ms = %d, want 654", decision.TimeoutMs)
+	}
+	if !strings.Contains(decision.Reason, "route_max_tokens=321") {
+		t.Fatalf("reason = %q, want route max tokens marker", decision.Reason)
 	}
 }
 
@@ -892,6 +975,12 @@ plugins:
       premium_cooldown_after: 4
       premium_cooldown_turns: 2
       cheap_probe_burst_limit: 5
+    budgeted_route:
+      enabled: true
+      profiles:
+        cheap_probe:
+          max_tokens: 111
+          timeout_ms: 222
 `))
 	if err != nil {
 		t.Fatalf("LoadFromBytes returned error: %v", err)
@@ -914,6 +1003,15 @@ plugins:
 	}
 	if smartCfg.SafeControl.CheapProbeBurstLimit != 5 {
 		t.Fatalf("cheap_probe_burst_limit = %d, want 5", smartCfg.SafeControl.CheapProbeBurstLimit)
+	}
+	if !smartCfg.BudgetedRoute.Enabled {
+		t.Fatal("budgeted_route.enabled = false, want true")
+	}
+	if got := smartCfg.BudgetedRoute.Profiles[budgetActionCheapProbe].MaxTokens; got != 111 {
+		t.Fatalf("cheap_probe max_tokens = %d, want 111", got)
+	}
+	if got := smartCfg.BudgetedRoute.Profiles[budgetActionCheapProbe].TimeoutMs; got != 222 {
+		t.Fatalf("cheap_probe timeout_ms = %d, want 222", got)
 	}
 }
 

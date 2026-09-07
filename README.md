@@ -269,6 +269,24 @@ plugins:
       premium_cooldown_after: 2
       premium_cooldown_turns: 1
       cheap_probe_burst_limit: 3
+    budgeted_route:
+      enabled: true
+      profiles:
+        cheap_probe:
+          max_tokens: 2048
+          timeout_ms: 60000
+        cheap_execute:
+          max_tokens: 1536
+          timeout_ms: 60000
+        premium_reason:
+          max_tokens: 4096
+          timeout_ms: 180000
+        premium_recover:
+          max_tokens: 4096
+          timeout_ms: 180000
+        completion_guardrail:
+          max_tokens: 1024
+          timeout_ms: 60000
     models:
       - name: z-ai/glm-5.3-flash
         pool: openrouter
@@ -291,6 +309,9 @@ identical failures and contradicted core hypotheses to the strongest configured
 model; it inserts a short cheap cooldown after consecutive premium calls; and
 it returns to the prompt router after too many consecutive cheap probes.
 Requests outside those rules continue through the prompt-based smart-router.
+With `budgeted_route.enabled`, the router also attaches a route action profile
+to each decision. The gateway rewrites `max_tokens`, shortens the upstream
+timeout when configured, and records the budget action in audit traces.
 
 ## Project Structure
 

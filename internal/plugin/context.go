@@ -61,29 +61,32 @@ func (m *MetricsRegistry) MustRegister(c ...prometheus.Collector) {
 // AuditRecord is the structured event passed to AuditSink.Record().
 // Plugins that implement AuditSink receive this after each request completes.
 type AuditRecord struct {
-	TraceID       string    `json:"trace_id"`
-	Timestamp     time.Time `json:"timestamp"`
-	Method        string    `json:"method"`
-	Path          string    `json:"path"`
-	Endpoint      string    `json:"endpoint,omitempty"`
-	Status        int       `json:"status"`
-	LatencyMs     int64     `json:"latency_ms"`
-	Model         string    `json:"model,omitempty"`
-	RoutedModel   string    `json:"routed_model,omitempty"` // model after router plugin decision
-	Pool          string    `json:"pool,omitempty"`
-	PromptTokens  int       `json:"prompt_tokens,omitempty"`
-	CompTokens    int       `json:"completion_tokens,omitempty"`
-	TotalTokens   int       `json:"total_tokens,omitempty"`
-	RetryAttempt  int       `json:"retry_attempt,omitempty"`
-	Fallback      string    `json:"fallback,omitempty"`
-	UserID        string    `json:"user_id,omitempty"`
-	APIKey        string    `json:"api_key,omitempty"`
-	Cost          float64   `json:"cost,omitempty"`
-	RoutingReason string    `json:"routing_reason,omitempty"` // why this model was chosen
-	ContentLength int64     `json:"content_length,omitempty"`
-	Streaming     bool      `json:"streaming,omitempty"`
-	FinishReason  string    `json:"finish_reason,omitempty"`
-	ErrorKind     string    `json:"error_kind,omitempty"`
+	TraceID        string    `json:"trace_id"`
+	Timestamp      time.Time `json:"timestamp"`
+	Method         string    `json:"method"`
+	Path           string    `json:"path"`
+	Endpoint       string    `json:"endpoint,omitempty"`
+	Status         int       `json:"status"`
+	LatencyMs      int64     `json:"latency_ms"`
+	Model          string    `json:"model,omitempty"`
+	RoutedModel    string    `json:"routed_model,omitempty"` // model after router plugin decision
+	Pool           string    `json:"pool,omitempty"`
+	PromptTokens   int       `json:"prompt_tokens,omitempty"`
+	CompTokens     int       `json:"completion_tokens,omitempty"`
+	TotalTokens    int       `json:"total_tokens,omitempty"`
+	RetryAttempt   int       `json:"retry_attempt,omitempty"`
+	Fallback       string    `json:"fallback,omitempty"`
+	UserID         string    `json:"user_id,omitempty"`
+	APIKey         string    `json:"api_key,omitempty"`
+	Cost           float64   `json:"cost,omitempty"`
+	RoutingReason  string    `json:"routing_reason,omitempty"` // why this model was chosen
+	BudgetAction   string    `json:"route_budget_action,omitempty"`
+	RouteMaxTokens int       `json:"route_max_tokens,omitempty"`
+	RouteTimeoutMs int       `json:"route_timeout_ms,omitempty"`
+	ContentLength  int64     `json:"content_length,omitempty"`
+	Streaming      bool      `json:"streaming,omitempty"`
+	FinishReason   string    `json:"finish_reason,omitempty"`
+	ErrorKind      string    `json:"error_kind,omitempty"`
 
 	// --- Task/Step correlation ---
 	// Populated from request headers (X-Trial-Name, X-Step-Name, X-Session-ID)

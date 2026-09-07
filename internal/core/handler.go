@@ -178,6 +178,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	routedModel := ""
 	routedEndpoint := ""
 	routingReason := ""
+	routeBudgetAction := ""
+	routeMaxTokens := 0
+	routeTimeoutMs := 0
 
 	routers := h.registry.Routers()
 	if len(routers) > 0 && len(bodyBytes) > 0 && len(bodyBytes) <= maxBodySize {
@@ -195,12 +198,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				routedModel = decision.Model
 				routedEndpoint = decision.Endpoint
 				routingReason = decision.Reason
+				routeBudgetAction = decision.BudgetAction
+				routeMaxTokens = decision.MaxTokens
+				routeTimeoutMs = decision.TimeoutMs
 				slog.Info("routing decision",
 					"router", router.Name(),
 					"pool", routedPool,
 					"model", routedModel,
 					"endpoint", routedEndpoint,
 					"reason", routingReason,
+					"budget_action", routeBudgetAction,
+					"max_tokens", routeMaxTokens,
+					"timeout_ms", routeTimeoutMs,
 				)
 				metrics.RoutingDecisionTotal.WithLabelValues(
 					router.Name(), routedPool, routedModel, routingReason,
@@ -240,6 +249,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			finalModel = mapped
 		}
 	}
+	if routeMaxTokens > 0 {
+		bodyBytes = applyMaxTokensOverride(bodyBytes, r.Header.Get("Content-Type"), routeMaxTokens)
+		r = routing.SetBodyBytes(r, bodyBytes)
+	}
 
 	bodyBytes = ensureStreamUsage(bodyBytes, r.Header.Get("Content-Type"))
 	bodyBytes = ensureFlashReasoningLow(bodyBytes, r.Header.Get("Content-Type"), finalModel)
@@ -278,6 +291,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if finalModel != "" {
 		routing.SetRoutedModel(r, finalModel, routingReason)
 	}
+	if meta != nil {
+		meta.BudgetAction = routeBudgetAction
+		meta.RouteMaxTokens = routeMaxTokens
+		meta.RouteTimeoutMs = routeTimeoutMs
+	}
 
 	dw := &decisionWriter{
 		real:      w,
@@ -285,11 +303,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		header:    make(http.Header),
 	}
 
-	h.proxyWithRetry(dw, r, primaryPool, h.pp, bodyBytes, routedEndpoint, finalModel, meta, targetPool)
+	h.proxyWithRetry(dw, r, primaryPool, h.pp, bodyBytes, routedEndpoint, finalModel, meta, targetPool, routeTimeoutMs)
 
 	// --- 9. Audit ---
 	h.recordAudit(
-		traceID, start, r, dw, meta, targetPool, originalModel, finalModel, routingReason, taskCtx,
+		traceID, start, r, dw, meta, targetPool, originalModel, finalModel, routingReason, routeBudgetAction, routeMaxTokens, routeTimeoutMs, taskCtx,
 	)
 }
 
@@ -307,6 +325,7 @@ func (h *Handler) proxyWithRetry(
 	routedModel string,
 	meta *routing.Meta,
 	poolName string,
+	routeTimeoutMs int,
 ) {
 	fallbackPoolName := primaryPool.Fallback
 	var fallbackPool *pool.Pool
@@ -360,9 +379,16 @@ func (h *Handler) proxyWithRetry(
 
 				attemptReq := r
 				var cancel context.CancelFunc
-				if ep.Timeout > 0 {
+				timeout := ep.Timeout
+				if routeTimeoutMs > 0 {
+					routeTimeout := time.Duration(routeTimeoutMs) * time.Millisecond
+					if timeout == 0 || routeTimeout < timeout {
+						timeout = routeTimeout
+					}
+				}
+				if timeout > 0 {
 					var ctx context.Context
-					ctx, cancel = context.WithTimeout(r.Context(), ep.Timeout)
+					ctx, cancel = context.WithTimeout(r.Context(), timeout)
 					attemptReq = r.WithContext(ctx)
 				}
 				defer func() {
@@ -480,6 +506,9 @@ func (h *Handler) recordAudit(
 	meta *routing.Meta,
 	poolName string,
 	originalModel, finalModel, routingReason string,
+	routeBudgetAction string,
+	routeMaxTokens int,
+	routeTimeoutMs int,
 	taskCtx TaskContext,
 ) {
 	endpoint, retryAttempt, isFallback := routing.GetRoutingMeta(r)
@@ -543,30 +572,33 @@ func (h *Handler) recordAudit(
 
 	// Build audit record
 	record := &plugin.AuditRecord{
-		TraceID:       traceID,
-		Timestamp:     start,
-		Method:        r.Method,
-		Path:          r.URL.Path,
-		Endpoint:      endpoint,
-		Status:        dw.code,
-		LatencyMs:     time.Since(start).Milliseconds(),
-		Model:         originalModel,
-		RoutedModel:   finalModel,
-		Pool:          poolName,
-		PromptTokens:  promptTokens,
-		CompTokens:    compTokens,
-		TotalTokens:   totalTokens,
-		Cost:          cost,
-		RetryAttempt:  retryAttempt,
-		Fallback:      isFallback,
-		Streaming:     dw.streaming,
-		FinishReason:  finishReason,
-		RoutingReason: routingReason,
-		ErrorKind:     classifyError(dw.code),
-		SessionID:     taskCtx.SessionID,
-		TrialName:     taskCtx.TrialName,
-		StepName:      taskCtx.StepName,
-		TaskName:      taskCtx.TaskName,
+		TraceID:        traceID,
+		Timestamp:      start,
+		Method:         r.Method,
+		Path:           r.URL.Path,
+		Endpoint:       endpoint,
+		Status:         dw.code,
+		LatencyMs:      time.Since(start).Milliseconds(),
+		Model:          originalModel,
+		RoutedModel:    finalModel,
+		Pool:           poolName,
+		PromptTokens:   promptTokens,
+		CompTokens:     compTokens,
+		TotalTokens:    totalTokens,
+		Cost:           cost,
+		BudgetAction:   routeBudgetAction,
+		RouteMaxTokens: routeMaxTokens,
+		RouteTimeoutMs: routeTimeoutMs,
+		RetryAttempt:   retryAttempt,
+		Fallback:       isFallback,
+		Streaming:      dw.streaming,
+		FinishReason:   finishReason,
+		RoutingReason:  routingReason,
+		ErrorKind:      classifyError(dw.code),
+		SessionID:      taskCtx.SessionID,
+		TrialName:      taskCtx.TrialName,
+		StepName:       taskCtx.StepName,
+		TaskName:       taskCtx.TaskName,
 	}
 
 	// Dispatch to audit sinks
@@ -758,6 +790,22 @@ func ensureFlashReasoningLow(body []byte, contentType, finalModel string) []byte
 		"effort":  "low",
 		"exclude": true,
 	}
+	out, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+func applyMaxTokensOverride(body []byte, contentType string, maxTokens int) []byte {
+	if !strings.HasPrefix(contentType, "application/json") || len(body) == 0 || maxTokens <= 0 {
+		return body
+	}
+	var req map[string]any
+	if json.Unmarshal(body, &req) != nil {
+		return body
+	}
+	req["max_tokens"] = maxTokens
 	out, err := json.Marshal(req)
 	if err != nil {
 		return body

@@ -364,6 +364,25 @@ plugins:
       repeated_error_threshold: 2
       premium_cooldown_after: 2
       premium_cooldown_turns: 1
+      cheap_probe_burst_limit: 3
+    budgeted_route:
+      enabled: true
+      profiles:
+        cheap_probe:
+          max_tokens: 2048
+          timeout_ms: 60000
+        cheap_execute:
+          max_tokens: 1536
+          timeout_ms: 60000
+        premium_reason:
+          max_tokens: 4096
+          timeout_ms: 180000
+        premium_recover:
+          max_tokens: 4096
+          timeout_ms: 180000
+        completion_guardrail:
+          max_tokens: 1024
+          timeout_ms: 60000
     models:
       - name: "{CHEAP_MODEL}"
         pool: "mock"
@@ -443,6 +462,7 @@ def run_probe(port: int) -> dict[str, Any]:
         reason = str(agent_trace.get("routing_reason") or "")
         source = classify_source(reason)
         routed_model = agent_trace.get("routed_model") or response.get("model") or ""
+        has_route_budget = bool(agent_trace.get("route_budget_action"))
         cases.append(
             {
                 "index": index,
@@ -451,7 +471,10 @@ def run_probe(port: int) -> dict[str, Any]:
                 "expected_model": case.expected_model,
                 "actual_source": source,
                 "actual_model": routed_model,
-                "pass": source == case.expected_source and routed_model == case.expected_model,
+                "route_budget_action": agent_trace.get("route_budget_action") or "",
+                "route_max_tokens": agent_trace.get("route_max_tokens") or "",
+                "route_timeout_ms": agent_trace.get("route_timeout_ms") or "",
+                "pass": source == case.expected_source and routed_model == case.expected_model and has_route_budget,
                 "routing_reason": reason,
                 "response_model": response.get("model"),
             }
@@ -490,9 +513,13 @@ def summarize(cases: list[dict[str, Any]], traces: list[dict[str, Any]]) -> dict
     source_counts: dict[str, int] = {}
     model_counts: dict[str, int] = {}
     rule_counts: dict[str, int] = {}
+    budget_counts: dict[str, int] = {}
     for case in cases:
         source_counts[case["actual_source"]] = source_counts.get(case["actual_source"], 0) + 1
         model_counts[case["actual_model"]] = model_counts.get(case["actual_model"], 0) + 1
+        budget_action = str(case.get("route_budget_action") or "")
+        if budget_action:
+            budget_counts[budget_action] = budget_counts.get(budget_action, 0) + 1
         if case["actual_source"] == "safe-control":
             rule_id = extract_rule_id(case["routing_reason"])
             rule_counts[rule_id] = rule_counts.get(rule_id, 0) + 1
@@ -500,11 +527,13 @@ def summarize(cases: list[dict[str, Any]], traces: list[dict[str, Any]]) -> dict
         "cases": len(cases),
         "passed_expectations": sum(1 for case in cases if case["pass"]),
         "failed_expectations": [case["name"] for case in cases if not case["pass"]],
+        "missing_route_budget": [case["name"] for case in cases if not case.get("route_budget_action")],
         "agent_traces": len(agent_traces),
         "decision_traces": len(decision_traces),
         "source_counts": source_counts,
         "model_counts": model_counts,
         "safe_control_rule_counts": rule_counts,
+        "route_budget_action_counts": budget_counts,
         "total_cost_usd": round(sum(float(trace.get("cost") or 0) for trace in traces), 8),
     }
 
@@ -531,6 +560,9 @@ def write_outputs(out_dir: Path, result: dict[str, Any]) -> None:
                 "expected_model",
                 "actual_source",
                 "actual_model",
+                "route_budget_action",
+                "route_max_tokens",
+                "route_timeout_ms",
                 "pass",
                 "routing_reason",
                 "response_model",

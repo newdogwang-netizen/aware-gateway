@@ -107,6 +107,92 @@ func TestHandlerBodySessionIDFeedsRouterAuditAndIsStrippedUpstream(t *testing.T)
 	}
 }
 
+func TestHandlerAppliesRouteBudgetToBodyAndAudit(t *testing.T) {
+	var upstreamBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"finish_reason": "stop", "message": {"content": "ok"}}],
+			"usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+		}`)
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		Retry: config.RetryConfig{MaxRetries: 1},
+		Routes: []config.RouteConfig{
+			{Pattern: "/v1/chat/completions", Pool: "openrouter"},
+		},
+	}
+	openrouterPool, err := pool.NewPool("openrouter", config.PoolConfig{
+		Strategy: "round_robin",
+		Endpoints: []config.EndpointConfig{
+			{Name: "upstream", URL: upstream.URL, Weight: 1, Timeout: time.Second},
+		},
+	}, config.CircuitBreakerConfig{})
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	router := &capturingRouter{
+		model:        "z-ai/glm-5.3-flash",
+		budgetAction: "cheap_probe",
+		maxTokens:    1234,
+		timeoutMs:    45000,
+	}
+	audit := &capturingAuditSink{}
+	reg := plugin.NewRegistry(logger)
+	for _, p := range []plugin.Plugin{router, audit} {
+		if err := reg.Register(p); err != nil {
+			t.Fatalf("register plugin %s: %v", p.Name(), err)
+		}
+	}
+	if err := reg.Init(&plugin.Context{Config: cfg, Logger: logger}); err != nil {
+		t.Fatalf("init registry: %v", err)
+	}
+
+	handler := NewHandler(cfg, MapPoolProvider{"openrouter": openrouterPool}, reg, logger)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/chat/completions",
+		bytes.NewBufferString(`{
+			"model": "auto",
+			"max_tokens": 9999,
+			"messages": [{"role": "user", "content": "inspect files"}]
+		}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := upstreamBody["model"]; got != "z-ai/glm-5.3-flash" {
+		t.Fatalf("upstream model = %v, want z-ai/glm-5.3-flash", got)
+	}
+	if got := upstreamBody["max_tokens"]; got != float64(1234) {
+		t.Fatalf("upstream max_tokens = %v, want 1234", got)
+	}
+	if len(audit.records) != 1 {
+		t.Fatalf("audit records = %d, want 1", len(audit.records))
+	}
+	if audit.records[0].BudgetAction != "cheap_probe" {
+		t.Fatalf("audit budget action = %q, want cheap_probe", audit.records[0].BudgetAction)
+	}
+	if audit.records[0].RouteMaxTokens != 1234 {
+		t.Fatalf("audit route max tokens = %d, want 1234", audit.records[0].RouteMaxTokens)
+	}
+	if audit.records[0].RouteTimeoutMs != 45000 {
+		t.Fatalf("audit route timeout ms = %d, want 45000", audit.records[0].RouteTimeoutMs)
+	}
+}
+
 func TestHandlerForcesIdentityEncodingSoUsageCanBeAudited(t *testing.T) {
 	var upstreamAcceptEncoding string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -178,6 +264,61 @@ func TestHandlerForcesIdentityEncodingSoUsageCanBeAudited(t *testing.T) {
 	}
 	if got.Cost != 0.0123 {
 		t.Fatalf("audit cost = %v, want 0.0123", got.Cost)
+	}
+}
+
+func TestHandlerRouteTimeoutCanShortenEndpointTimeout(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"finish_reason":"stop","message":{"content":"late"}}]}`)
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		Retry: config.RetryConfig{MaxRetries: 1},
+		Routes: []config.RouteConfig{
+			{Pattern: "/v1/chat/completions", Pool: "openrouter"},
+		},
+	}
+	openrouterPool, err := pool.NewPool("openrouter", config.PoolConfig{
+		Strategy: "round_robin",
+		Endpoints: []config.EndpointConfig{
+			{Name: "upstream", URL: upstream.URL, Weight: 1, Timeout: time.Second},
+		},
+	}, config.CircuitBreakerConfig{})
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	router := &capturingRouter{budgetAction: "cheap_probe", timeoutMs: 50}
+	reg := plugin.NewRegistry(logger)
+	if err := reg.Register(router); err != nil {
+		t.Fatalf("register router: %v", err)
+	}
+	if err := reg.Init(&plugin.Context{Config: cfg, Logger: logger}); err != nil {
+		t.Fatalf("init registry: %v", err)
+	}
+
+	handler := NewHandler(cfg, MapPoolProvider{"openrouter": openrouterPool}, reg, logger)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/chat/completions",
+		bytes.NewBufferString(`{"model":"auto","messages":[{"role":"user","content":"hi"}]}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	start := time.Now()
+	handler.ServeHTTP(rec, req)
+	elapsed := time.Since(start)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body = %q", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	if elapsed > 180*time.Millisecond {
+		t.Fatalf("handler returned after %s, want route timeout before upstream sleep completes", elapsed)
 	}
 }
 
@@ -472,9 +613,13 @@ func TestHandlerReleasesInFlightOnNonStreamingBodyTimeout(t *testing.T) {
 }
 
 type capturingRouter struct {
-	sessionID string
-	trialName string
-	body      map[string]any
+	sessionID    string
+	trialName    string
+	body         map[string]any
+	model        string
+	budgetAction string
+	maxTokens    int
+	timeoutMs    int
 }
 
 func (r *capturingRouter) Name() string { return "capturing-router" }
@@ -487,10 +632,17 @@ func (r *capturingRouter) Route(req *http.Request, body []byte) (*plugin.Routing
 	r.sessionID = req.Header.Get("X-Session-ID")
 	r.trialName = req.Header.Get("X-Trial-Name")
 	_ = json.Unmarshal(body, &r.body)
+	model := r.model
+	if model == "" {
+		model = "openai/gpt-5.6-sol"
+	}
 	return &plugin.RoutingDecision{
-		Pool:   "openrouter",
-		Model:  "openai/gpt-5.6-sol",
-		Reason: "test route",
+		Pool:         "openrouter",
+		Model:        model,
+		Reason:       "test route",
+		BudgetAction: r.budgetAction,
+		MaxTokens:    r.maxTokens,
+		TimeoutMs:    r.timeoutMs,
 	}, nil
 }
 

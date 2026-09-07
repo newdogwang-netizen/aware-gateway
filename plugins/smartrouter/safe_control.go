@@ -219,9 +219,11 @@ func (s *SmartRouter) safeControlRoute(ruleID, action string, premium bool, conf
 		HypothesisState: hypothesisState,
 		CriticalPath:    &criticalPath,
 		Recoverability:  recoverabilityForRule(premium),
+		BudgetAction:    action,
 		ContextSummary:  summary,
 		Reason:          shortReason,
 	}
+	s.applyRouteBudget(routing, action)
 	return routing, history, true
 }
 

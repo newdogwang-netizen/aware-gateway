@@ -50,27 +50,28 @@ type ModelEntry struct {
 
 // Config is the plugin-specific configuration.
 type Config struct {
-	Enabled                     bool              `yaml:"enabled" json:"enabled"`
-	Endpoint                    string            `yaml:"endpoint" json:"endpoint"`                         // OpenAI-compatible base URL
-	Model                       string            `yaml:"model" json:"model"`                               // decision model name
-	APIKey                      string            `yaml:"api_key" json:"api_key"`                           // optional
-	APIKeyEnv                   string            `yaml:"api_key_env" json:"api_key_env"`                   // optional env var for API key
-	MaxTokens                   int               `yaml:"max_tokens" json:"max_tokens"`                     // default 100
-	Temperature                 float64           `yaml:"temperature" json:"temperature"`                   // default 0
-	TimeoutMs                   int               `yaml:"timeout_ms" json:"timeout_ms"`                     // default 2000
-	DisableThinking             bool              `yaml:"disable_thinking" json:"disable_thinking"`         // add Qwen/vLLM thinking-disable param
-	DecisionRetries             int               `yaml:"decision_retries" json:"decision_retries"`         // retry transient decision model failures
-	PromptPreviewChars          int               `yaml:"prompt_preview_chars" json:"prompt_preview_chars"` // default 500
-	IncludeSystemPrompt         bool              `yaml:"include_system_prompt" json:"include_system_prompt"`
-	IncludeMessageCount         bool              `yaml:"include_message_count" json:"include_message_count"`
-	DecisionHistoryTurns        int               `yaml:"decision_history_turns" json:"decision_history_turns"`                 // default 5; <0 disables
-	DecisionHistoryContextChars int               `yaml:"decision_history_context_chars" json:"decision_history_context_chars"` // default 220
-	CacheTTLSeconds             int               `yaml:"cache_ttl_seconds" json:"cache_ttl_seconds"`                           // default 300
-	CacheMaxEntries             int               `yaml:"cache_max_entries" json:"cache_max_entries"`                           // default 10000
-	FallbackModel               string            `yaml:"fallback_model" json:"fallback_model"`
-	FallbackPool                string            `yaml:"fallback_pool" json:"fallback_pool"`
-	WarmStart                   WarmStartConfig   `yaml:"warm_start" json:"warm_start"`
-	SafeControl                 SafeControlConfig `yaml:"safe_control" json:"safe_control"`
+	Enabled                     bool                `yaml:"enabled" json:"enabled"`
+	Endpoint                    string              `yaml:"endpoint" json:"endpoint"`                         // OpenAI-compatible base URL
+	Model                       string              `yaml:"model" json:"model"`                               // decision model name
+	APIKey                      string              `yaml:"api_key" json:"api_key"`                           // optional
+	APIKeyEnv                   string              `yaml:"api_key_env" json:"api_key_env"`                   // optional env var for API key
+	MaxTokens                   int                 `yaml:"max_tokens" json:"max_tokens"`                     // default 100
+	Temperature                 float64             `yaml:"temperature" json:"temperature"`                   // default 0
+	TimeoutMs                   int                 `yaml:"timeout_ms" json:"timeout_ms"`                     // default 2000
+	DisableThinking             bool                `yaml:"disable_thinking" json:"disable_thinking"`         // add Qwen/vLLM thinking-disable param
+	DecisionRetries             int                 `yaml:"decision_retries" json:"decision_retries"`         // retry transient decision model failures
+	PromptPreviewChars          int                 `yaml:"prompt_preview_chars" json:"prompt_preview_chars"` // default 500
+	IncludeSystemPrompt         bool                `yaml:"include_system_prompt" json:"include_system_prompt"`
+	IncludeMessageCount         bool                `yaml:"include_message_count" json:"include_message_count"`
+	DecisionHistoryTurns        int                 `yaml:"decision_history_turns" json:"decision_history_turns"`                 // default 5; <0 disables
+	DecisionHistoryContextChars int                 `yaml:"decision_history_context_chars" json:"decision_history_context_chars"` // default 220
+	CacheTTLSeconds             int                 `yaml:"cache_ttl_seconds" json:"cache_ttl_seconds"`                           // default 300
+	CacheMaxEntries             int                 `yaml:"cache_max_entries" json:"cache_max_entries"`                           // default 10000
+	FallbackModel               string              `yaml:"fallback_model" json:"fallback_model"`
+	FallbackPool                string              `yaml:"fallback_pool" json:"fallback_pool"`
+	WarmStart                   WarmStartConfig     `yaml:"warm_start" json:"warm_start"`
+	SafeControl                 SafeControlConfig   `yaml:"safe_control" json:"safe_control"`
+	BudgetedRoute               BudgetedRouteConfig `yaml:"budgeted_route" json:"budgeted_route"`
 	// Decision model pricing ($/M tokens). For self-hosted vLLM, leave as 0
 	// (cost is GPU amortization, not per-token). For commercial decision
 	// models, set these to enable cost tracking in audit trail.
@@ -243,6 +244,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 				Model:  strongest.Name,
 				Reason: "smart-router guardrail: task completion confirmation requires exact agent-control output",
 			}
+			s.applyRouteBudget(decision, budgetActionCompletionGuardrail)
 			return decision, nil
 		}
 	}
@@ -252,6 +254,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 			TurnType:        "warm_start",
 			HypothesisState: "forming",
 			Recoverability:  "medium",
+			BudgetAction:    budgetActionPremiumReason,
 			ContextSummary:  "front-loaded premium reasoning",
 			Reason:          decision.Reason,
 		})
@@ -279,15 +282,18 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 			s.appendDecisionHistory(req, cached.Model, &DecisionResponse{
 				TurnType:       "cached",
 				Recoverability: "easy",
+				BudgetAction:   s.inferBudgetAction(cached.Model, nil),
 				ContextSummary: "cached route for repeated context",
 				Reason:         cached.Reason,
 			})
 			s.recordSafeControlOutcome(req, cached.Model)
-			return &plugin.RoutingDecision{
+			routing := &plugin.RoutingDecision{
 				Pool:   cached.Pool,
 				Model:  cached.Model,
 				Reason: "cached: " + cached.Reason,
-			}, nil
+			}
+			s.applyRouteBudget(routing, s.inferBudgetAction(cached.Model, nil))
+			return routing, nil
 		}
 	}
 
@@ -346,6 +352,8 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 	}
 
 	routingReason := decision.RoutingReason()
+	budgetAction := s.inferBudgetAction(selectedModel, decision)
+	decision.BudgetAction = budgetAction
 
 	// Cache the decision (skip if disabled)
 	if s.cache != nil && s.cfg.CacheTTLSeconds >= 0 {
@@ -373,11 +381,13 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 	s.appendDecisionHistory(req, selectedModel, decision)
 	s.recordSafeControlOutcome(req, selectedModel)
 
-	return &plugin.RoutingDecision{
+	routing := &plugin.RoutingDecision{
 		Pool:   pool,
 		Model:  selectedModel,
 		Reason: fmt.Sprintf("smart-router: %s", routingReason),
-	}, nil
+	}
+	s.applyRouteBudget(routing, budgetAction)
+	return routing, nil
 }
 
 func (s *SmartRouter) warmStartDecision(req *http.Request, parsed *parsedRequest) (*plugin.RoutingDecision, bool) {
@@ -420,11 +430,13 @@ func (s *SmartRouter) warmStartDecision(req *http.Request, parsed *parsedRequest
 		return nil, false
 	}
 
-	return &plugin.RoutingDecision{
+	decision := &plugin.RoutingDecision{
 		Pool:   pool,
 		Model:  cfg.Model,
 		Reason: fmt.Sprintf("smart-router warm-start: first %d calls use %s (call %d/%d)", cfg.Steps, cfg.Model, callIndex, cfg.Steps),
-	}, true
+	}
+	s.applyRouteBudget(decision, budgetActionPremiumReason)
+	return decision, true
 }
 
 // DecisionHistory is the compact per-session memory fed back into later
@@ -435,6 +447,7 @@ type DecisionHistory struct {
 	HypothesisState string `json:"hypothesis_state,omitempty"`
 	CriticalPath    *bool  `json:"critical_path,omitempty"`
 	Recoverability  string `json:"recoverability,omitempty"`
+	BudgetAction    string `json:"budget_action,omitempty"`
 	ContextSummary  string `json:"context_summary,omitempty"`
 	Reason          string `json:"reason,omitempty"`
 }
@@ -486,6 +499,7 @@ func (s *SmartRouter) appendDecisionHistory(req *http.Request, selectedModel str
 		HypothesisState: compactDecisionText(decision.HypothesisState, 32),
 		CriticalPath:    decision.CriticalPath,
 		Recoverability:  compactDecisionText(decision.Recoverability, 32),
+		BudgetAction:    compactDecisionText(decision.BudgetAction, 32),
 		ContextSummary:  compactDecisionText(decision.ContextSummary, s.cfg.DecisionHistoryContextChars),
 		Reason:          compactDecisionText(decision.Reason, s.cfg.DecisionHistoryContextChars),
 	}
@@ -534,13 +548,14 @@ func (s *SmartRouter) renderDecisionHistory(history []DecisionHistory) string {
 			critical = fmt.Sprintf("%t", *entry.CriticalPath)
 		}
 		lines = append(lines, fmt.Sprintf(
-			"%d. model=%s turn=%s state=%s critical=%s recover=%s ctx=%q reason=%q",
+			"%d. model=%s turn=%s state=%s critical=%s recover=%s budget=%s ctx=%q reason=%q",
 			i+1,
 			entry.Model,
 			valueOrUnknown(entry.TurnType),
 			valueOrUnknown(entry.HypothesisState),
 			critical,
 			valueOrUnknown(entry.Recoverability),
+			valueOrUnknown(entry.BudgetAction),
 			compactDecisionText(entry.ContextSummary, s.cfg.DecisionHistoryContextChars),
 			compactDecisionText(entry.Reason, 120),
 		))
@@ -639,11 +654,13 @@ func (s *SmartRouter) fallbackDecision(reason string) *plugin.RoutingDecision {
 		return &plugin.RoutingDecision{Skip: true}
 	}
 
-	return &plugin.RoutingDecision{
+	decision := &plugin.RoutingDecision{
 		Pool:   pool,
 		Model:  s.cfg.FallbackModel,
 		Reason: fmt.Sprintf("smart-router fallback=%s", reason),
 	}
+	s.applyRouteBudget(decision, budgetActionPremiumRecover)
+	return decision
 }
 
 // discoverFromPools builds the model menu from pool endpoints.
@@ -896,6 +913,7 @@ type DecisionResponse struct {
 	HypothesisState string `json:"hypothesis_state,omitempty"`
 	CriticalPath    *bool  `json:"critical_path,omitempty"`
 	Recoverability  string `json:"recoverability,omitempty"`
+	BudgetAction    string `json:"budget_action,omitempty"`
 	ContextSummary  string `json:"context_summary,omitempty"`
 	Reason          string `json:"reason"`
 }
@@ -913,6 +931,9 @@ func (d *DecisionResponse) RoutingReason() string {
 	}
 	if d.Recoverability != "" {
 		parts = append(parts, "recover="+d.Recoverability)
+	}
+	if d.BudgetAction != "" {
+		parts = append(parts, "budget="+d.BudgetAction)
 	}
 	if d.ContextSummary != "" {
 		parts = append(parts, fmt.Sprintf("ctx=%q", compactDecisionText(d.ContextSummary, 80)))
@@ -1106,7 +1127,15 @@ func (s *SmartRouter) buildPrompt(p *parsedRequest, historyText string) string {
 	sb.WriteString("3. Before choosing the strongest model, name the core hypothesis this turn will establish or revise. If there is no such hypothesis, prefer the cheapest model.\n")
 	sb.WriteString("4. Read recent router memory for this same trial. Use it to detect repeated bottlenecks, stable hypotheses, prior premium spending, and whether the next turn should continue or change strategy.\n")
 	sb.WriteString("5. If the same bottleneck has already consumed multiple strongest-model turns, do not buy more blind probing. Use the strongest model only to change the search strategy; use the cheapest model for bounded sweeps and mechanical validation.\n")
-	sb.WriteString("6. Prefer the strongest model for early critical-path modeling, but prefer the cheapest model for late execution once the problem model is stable.\n\n")
+	sb.WriteString("6. Prefer the strongest model for early critical-path modeling, but prefer the cheapest model for late execution once the problem model is stable.\n")
+	sb.WriteString("7. Choose a budget_action from: cheap_probe, cheap_execute, premium_reason, premium_recover, completion_guardrail.\n\n")
+
+	sb.WriteString("Budget actions:\n")
+	sb.WriteString("- cheap_probe: bounded observation, file reads, search, command-output summary, or narrow fact gathering.\n")
+	sb.WriteString("- cheap_execute: bounded execution under a stable hypothesis, simple code/test edits, known test commands, formatting, or mechanical validation.\n")
+	sb.WriteString("- premium_reason: path-setting reasoning, early task model formation, protocol/schema/algorithm inference, first solver architecture, or high-leverage synthesis.\n")
+	sb.WriteString("- premium_recover: contradicted hypothesis, repeated failure, ambiguous test failure, failed hidden-generalization reasoning, or strategy change after wasted work.\n")
+	sb.WriteString("- completion_guardrail: final task completion confirmation or exact agent-control submission.\n\n")
 
 	// Turn phase context: terminal coding agents often move from a first
 	// probe directly into file-writing, so the second assistant turn is not
@@ -1171,8 +1200,9 @@ func (s *SmartRouter) buildPrompt(p *parsedRequest, historyText string) string {
 	sb.WriteString("- Write context_summary as a compact memory for future routing: summarize the current decision context, bottleneck, or hypothesis state in under 14 words.\n")
 	sb.WriteString("- Return exactly one model id from the menu.\n\n")
 
-	sb.WriteString("Return JSON only with keys: model, turn_type, hypothesis_state, critical_path, recoverability, context_summary, reason. ")
+	sb.WriteString("Return JSON only with keys: model, turn_type, hypothesis_state, critical_path, recoverability, budget_action, context_summary, reason. ")
 	sb.WriteString("critical_path must be a JSON boolean. recoverability must be easy, medium, or hard. ")
+	sb.WriteString("budget_action must be one of cheap_probe, cheap_execute, premium_reason, premium_recover, completion_guardrail. ")
 	sb.WriteString("Keep context_summary under 14 words and reason under 12 words. Do not include any text outside the JSON.")
 
 	return sb.String()

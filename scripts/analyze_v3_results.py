@@ -84,6 +84,8 @@ def main() -> None:
             "total_tokens",
             "agent_call_count",
             "decision_call_count",
+            "budgeted_route_call_count",
+            "route_budget_actions",
             "safe_control_rule_call_count",
             "safe_control_rule_ids",
             "safe_control_bypass_rate",
@@ -192,6 +194,12 @@ def build_row(
         if rule_id
     )
     safe_control_calls = sum(safe_control_rule_counts.values())
+    route_budget_action_counts = Counter(
+        str(t.get("route_budget_action") or "")
+        for t in agent_traces
+        if t.get("route_budget_action")
+    )
+    budgeted_route_calls = sum(route_budget_action_counts.values())
     warm_start_calls = sum(
         1 for t in agent_traces if str(t.get("routing_reason") or "").startswith("smart-router warm-start:")
     )
@@ -238,6 +246,10 @@ def build_row(
         "total_tokens": usage["total_tokens"] + decision_prompt + decision_completion,
         "agent_call_count": agent_count,
         "decision_call_count": len(decision_traces),
+        "budgeted_route_call_count": budgeted_route_calls,
+        "route_budget_actions": ";".join(
+            f"{action}:{count}" for action, count in sorted(route_budget_action_counts.items())
+        ),
         "safe_control_rule_call_count": safe_control_calls,
         "safe_control_rule_ids": ";".join(
             f"{rule_id}:{count}" for rule_id, count in sorted(safe_control_rule_counts.items())

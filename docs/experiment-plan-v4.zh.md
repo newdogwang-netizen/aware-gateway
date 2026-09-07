@@ -67,8 +67,20 @@ V4 把本地预算集中到核心问题：**smart-router 到底有没有用**。
   超时和长输出限制，否则便宜模型仍可能消耗大量时间和上下文。
 - 验收决定：Phase 2 Safe Control 子里程碑可以标记完成；Issue #1 总体目标保持 open。
   现在完成的是“减少每轮 judge”的实验目标，还没有完成“状态化智能决策层”的架构目标。
-  下一步不继续添加更多关键词规则，先实现 Budgeted Route Action，再进入最小 Episode/Event
-  模型和 Outcome 闭环。至少覆盖 5 到 10 个不同任务类型后，再判断是否真的提高智能决策水平。
+- 2026-09-07 继续推进 Budgeted Route Action 第一版：`RoutingDecision` 可以携带
+  `budget_action`、`max_tokens` 和 `timeout_ms`；gateway 会改写上游请求的 `max_tokens`，
+  并用 route timeout 缩短单次 upstream 等待；audit trace 暴露
+  `route_budget_action`、`route_max_tokens`、`route_timeout_ms`；分析脚本统计
+  `budgeted_route_call_count` 和 `route_budget_actions`。
+- Budgeted Route Action A4 真实 pilot 通过 hidden verifier：`reward=1.0`，耗时
+  1018.172s，44 次 agent 调用，成本 `$3.48083069`。其中 23 次 semantic decision、
+  20 次 safe-control、44 次 budgeted route；budget actions 为
+  `cheap_execute:23;cheap_probe:11;completion_guardrail:2;premium_reason:5;premium_recover:3`。
+  最长单次调用约 60s，但 21/44 次 agent 输出是 `finish_reason=length`，说明第一版
+  profile 能保住质量和压住长尾，但过紧会让任务路径变碎。
+- 下一步不继续添加更多关键词规则。Budget profile 应接入最小 Episode/Event 模型和
+  Outcome 闭环，而不是继续人工调一组固定数字。至少覆盖 5 到 10 个不同任务类型后，
+  再判断是否真的提高智能决策水平。
 
 ## 实验目标
 
