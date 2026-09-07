@@ -81,6 +81,20 @@ V4 把本地预算集中到核心问题：**smart-router 到底有没有用**。
 - 下一步不继续添加更多关键词规则。Budget profile 应接入最小 Episode/Event 模型和
   Outcome 闭环，而不是继续人工调一组固定数字。至少覆盖 5 到 10 个不同任务类型后，
   再判断是否真的提高智能决策水平。
+- 2026-09-07 继续推进最小 Episode/Event 第一版：smart-router 同时作为 audit sink，
+  将上一轮 agent 调用投影为 session episode 状态，记录最近 event、累计成本、
+  最近模型、最近 budget action、连续 `finish_reason=length`、最近窗口内重复
+  `finish_reason=length`、连续错误等信号。
+  下一次 prompt router 会看到这段 compact episode state；Budgeted Route Action
+  也会在连续截断或最近窗口重复截断后动态放大 `max_tokens` 和 route timeout，并在 reason 里写入
+  `episode_adjust=length_boost`。这只是 A5 的最小闭环，不代表完整 Episode Runtime
+  或 Delivery Feedback 已完成。
+- A5 真实 `shadow-relay / smart-router` pilot 在 verifier 前手动止损：已产生 59 次
+  agent 调用、29 次 decision 调用，总成本 `$7.0575935`；`episode_adjust=length_boost`
+  触发 18 次，说明 Episode 反馈链路生效，但预算策略没有通过验收。相比 A4 的
+  44 次 agent、成本 `$3.48083069`、reward 1.0，A5 成本和调用数明显恶化。结论：
+  只看 `finish_reason=length` 只能识别输出压力，不能判断任务是否真的前进；下一步
+  必须接入 file/test/verifier outcome，用进展信号约束预算放大和停止条件。
 
 ## 实验目标
 

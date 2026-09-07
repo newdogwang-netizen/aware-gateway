@@ -167,6 +167,15 @@ plugins:
         completion_guardrail:
           max_tokens: 1024
           timeout_ms: 60000
+    episode_runtime:
+      enabled: true
+      recent_events: 5
+      length_streak_threshold: 1
+      length_window_threshold: 2
+      max_tokens_multiplier: 3
+      timeout_multiplier: 2
+      max_tokens_ceiling: 8192
+      timeout_ms_ceiling: 240000
 
     # Model menu (same format as task-router, or leave empty to
     # auto-populate from pool discovery)
@@ -182,7 +191,7 @@ plugins:
 Identical requests within `cache_ttl_seconds` reuse the decision:
 
 ```
-cache_key = hash(sorted_model_ids + message_count + first_200_chars_of_system_msg + first_2000_chars_of_latest_user_msg)
+cache_key = hash(sorted_model_ids + message_count + first_200_chars_of_system_msg + first_2000_chars_of_latest_user_msg + router_state)
 cache_value = { model, reason, expires_at }
 ```
 
@@ -268,9 +277,43 @@ only a model label. A `RoutingDecision` can now carry:
 - `timeout_ms`, which can shorten the endpoint timeout for that routed call
 
 The audit trace exposes these as `route_budget_action`, `route_max_tokens`, and
-`route_timeout_ms`. This is intentionally small: it does not solve Episode
-Runtime or Delivery Feedback yet, but it creates the control surface needed for
-those layers.
+`route_timeout_ms`.
+
+### Minimal Episode Runtime
+
+`episode_runtime.enabled` makes smart-router also implement an audit sink. After
+each completed agent call, the audit record is projected into an in-memory
+episode keyed by `X-Session-ID` or `X-Trial-Name`. Decision-model audit records
+are ignored so the state describes agent work, not judge overhead.
+
+The first reducer tracks only stable control signals:
+
+- total agent calls, cost, and tokens in this episode
+- last model, last budget action, and last finish reason
+- consecutive `finish_reason=length` calls
+- repeated `finish_reason=length` pressure inside the latest N events
+- consecutive HTTP/provider errors
+- the latest N projected events
+
+The next prompt receives this compact episode state. The budget layer also uses
+it directly: after a configured streak of `finish_reason=length`, or repeated
+length finishes inside the recent event window, the next route budget is
+increased by a multiplier and capped by `max_tokens_ceiling`/
+`timeout_ms_ceiling`. The routing reason records this as
+`episode_adjust=length_boost` with both the current streak and recent length
+count.
+
+This is not the full Issue #1 runtime. It does not yet identify nested task
+lines, continue/resume boundaries, file modifications, test events, verifier
+results, or offline policy updates. It is the smallest control loop needed to
+turn A4's truncation failure into a measurable A5 experiment.
+
+A5 showed the boundary of this first loop: the episode feedback fired in a real
+Harbor run, but the trial was stopped before verification after cost and call
+count exceeded A4. That means `finish_reason=length` is useful as an output
+pressure signal, but it is not a progress signal. The next reducer should add
+file/test/verifier events so the policy can distinguish "needs more room" from
+"is looping without making progress".
 
 ### Latency Budget
 

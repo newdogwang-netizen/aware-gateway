@@ -120,6 +120,15 @@ plugins:
         completion_guardrail:
           max_tokens: 1024
           timeout_ms: 60000
+    episode_runtime:
+      enabled: true
+      recent_events: 5
+      length_streak_threshold: 1
+      length_window_threshold: 2
+      max_tokens_multiplier: 3
+      timeout_multiplier: 2
+      max_tokens_ceiling: 8192
+      timeout_ms_ceiling: 240000
     # Disable decision caching for measurement runs so each turn records an
     # independent decision-model routing decision. Re-enable for product smoke tests.
     cache_ttl_seconds: -1

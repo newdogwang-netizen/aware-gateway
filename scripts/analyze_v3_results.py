@@ -86,6 +86,9 @@ def main() -> None:
             "decision_call_count",
             "budgeted_route_call_count",
             "route_budget_actions",
+            "length_finish_count",
+            "length_finish_rate",
+            "episode_adjust_call_count",
             "safe_control_rule_call_count",
             "safe_control_rule_ids",
             "safe_control_bypass_rate",
@@ -200,6 +203,8 @@ def build_row(
         if t.get("route_budget_action")
     )
     budgeted_route_calls = sum(route_budget_action_counts.values())
+    length_finish_count = sum(1 for t in agent_traces if str(t.get("finish_reason") or "") == "length")
+    episode_adjust_calls = sum(1 for t in agent_traces if "episode_adjust=" in str(t.get("routing_reason") or ""))
     warm_start_calls = sum(
         1 for t in agent_traces if str(t.get("routing_reason") or "").startswith("smart-router warm-start:")
     )
@@ -250,6 +255,9 @@ def build_row(
         "route_budget_actions": ";".join(
             f"{action}:{count}" for action, count in sorted(route_budget_action_counts.items())
         ),
+        "length_finish_count": length_finish_count,
+        "length_finish_rate": round(length_finish_count / agent_count, 4) if agent_count else "",
+        "episode_adjust_call_count": episode_adjust_calls,
         "safe_control_rule_call_count": safe_control_calls,
         "safe_control_rule_ids": ";".join(
             f"{rule_id}:{count}" for rule_id, count in sorted(safe_control_rule_counts.items())

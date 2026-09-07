@@ -61,6 +61,7 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 		obs.State.LastEscalatedFingerprint != obs.ErrorFingerprint {
 		s.markSafeControlEscalation(req, obs.ErrorFingerprint)
 		return s.safeControlRoute(
+			req,
 			"repeated_error_upgrade",
 			"premium_recover",
 			true,
@@ -78,6 +79,7 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 
 	if looksLikeHypothesisContradiction(message) {
 		return s.safeControlRoute(
+			req,
 			"hypothesis_contradiction_upgrade",
 			"premium_recover",
 			true,
@@ -92,6 +94,7 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 
 	if looksLikeFileReadOrSearch(message) {
 		return s.safeControlCheapRoute(
+			req,
 			obs.State,
 			cfg,
 			"file_read_search_cheap",
@@ -107,6 +110,7 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 
 	if looksLikeExistingTestExecution(message) {
 		return s.safeControlCheapRoute(
+			req,
 			obs.State,
 			cfg,
 			"existing_test_execution_cheap",
@@ -122,6 +126,7 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 
 	if looksLikeFixedFormatOutput(message) {
 		return s.safeControlCheapRoute(
+			req,
 			obs.State,
 			cfg,
 			"fixed_format_output_cheap",
@@ -137,6 +142,7 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 
 	if obs.State.CooldownRemaining > 0 && !looksLikePremiumRequired(message) {
 		return s.safeControlCheapRoute(
+			req,
 			obs.State,
 			cfg,
 			"premium_cooldown",
@@ -173,11 +179,12 @@ func (s *SmartRouter) safeControlConfig() SafeControlConfig {
 	return cfg
 }
 
-func (s *SmartRouter) safeControlCheapRoute(state safeControlState, cfg SafeControlConfig, ruleID, action string, confidence float64, evidence []string, turnType, hypothesisState, summary, shortReason string) (*plugin.RoutingDecision, *DecisionResponse, bool) {
+func (s *SmartRouter) safeControlCheapRoute(req *http.Request, state safeControlState, cfg SafeControlConfig, ruleID, action string, confidence float64, evidence []string, turnType, hypothesisState, summary, shortReason string) (*plugin.RoutingDecision, *DecisionResponse, bool) {
 	if state.ConsecutiveCheapProbes >= cfg.CheapProbeBurstLimit {
 		return nil, nil, false
 	}
 	return s.safeControlRoute(
+		req,
 		ruleID,
 		action,
 		false,
@@ -190,7 +197,7 @@ func (s *SmartRouter) safeControlCheapRoute(state safeControlState, cfg SafeCont
 	)
 }
 
-func (s *SmartRouter) safeControlRoute(ruleID, action string, premium bool, confidence float64, evidence []string, turnType, hypothesisState, summary, shortReason string) (*plugin.RoutingDecision, *DecisionResponse, bool) {
+func (s *SmartRouter) safeControlRoute(req *http.Request, ruleID, action string, premium bool, confidence float64, evidence []string, turnType, hypothesisState, summary, shortReason string) (*plugin.RoutingDecision, *DecisionResponse, bool) {
 	model, ok := s.cheapestConfiguredModel()
 	if premium {
 		model, ok = s.strongestConfiguredModel()
@@ -223,7 +230,7 @@ func (s *SmartRouter) safeControlRoute(ruleID, action string, premium bool, conf
 		ContextSummary:  summary,
 		Reason:          shortReason,
 	}
-	s.applyRouteBudget(routing, action)
+	s.applyRouteBudget(req, routing, action)
 	return routing, history, true
 }
 

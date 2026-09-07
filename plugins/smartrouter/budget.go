@@ -2,6 +2,8 @@ package smartrouter
 
 import (
 	"fmt"
+	"math"
+	"net/http"
 	"strings"
 
 	"github.com/aware/gateway/internal/plugin"
@@ -27,7 +29,7 @@ type RouteBudgetProfile struct {
 	TimeoutMs int `yaml:"timeout_ms" json:"timeout_ms"`
 }
 
-func (s *SmartRouter) applyRouteBudget(decision *plugin.RoutingDecision, action string) {
+func (s *SmartRouter) applyRouteBudget(req *http.Request, decision *plugin.RoutingDecision, action string) {
 	if decision == nil || decision.Skip {
 		return
 	}
@@ -39,21 +41,25 @@ func (s *SmartRouter) applyRouteBudget(decision *plugin.RoutingDecision, action 
 	if !ok {
 		return
 	}
+	profile, adjustment := s.adjustBudgetForEpisode(req, action, profile)
 
 	decision.BudgetAction = action
 	decision.MaxTokens = profile.MaxTokens
 	decision.TimeoutMs = profile.TimeoutMs
-	if decision.Reason == "" {
-		decision.Reason = fmt.Sprintf("budget_action=%s", action)
-		return
-	}
-	decision.Reason = fmt.Sprintf(
-		"%s budget_action=%s route_max_tokens=%d route_timeout_ms=%d",
-		decision.Reason,
+	budgetReason := fmt.Sprintf(
+		"budget_action=%s route_max_tokens=%d route_timeout_ms=%d",
 		action,
 		profile.MaxTokens,
 		profile.TimeoutMs,
 	)
+	if decision.Reason == "" {
+		decision.Reason = budgetReason
+	} else {
+		decision.Reason = decision.Reason + " " + budgetReason
+	}
+	if adjustment != "" {
+		decision.Reason += " " + adjustment
+	}
 }
 
 func (s *SmartRouter) budgetedRouteConfig() BudgetedRouteConfig {
@@ -156,4 +162,63 @@ func normalizeBudgetAction(action string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func (s *SmartRouter) adjustBudgetForEpisode(req *http.Request, action string, profile RouteBudgetProfile) (RouteBudgetProfile, string) {
+	cfg := s.episodeConfig()
+	if !cfg.Enabled {
+		return profile, ""
+	}
+	snapshot := s.episodeSnapshot(req)
+	if snapshot.ID == "" {
+		return profile, ""
+	}
+
+	streakPressure := snapshot.ConsecutiveLengthFinishes >= cfg.LengthStreakThreshold
+	windowPressure := snapshot.RecentLengthFinishes >= cfg.LengthWindowThreshold
+	if !streakPressure && !windowPressure {
+		return profile, ""
+	}
+
+	pressure := snapshot.ConsecutiveLengthFinishes
+	if snapshot.RecentLengthFinishes > pressure {
+		pressure = snapshot.RecentLengthFinishes
+	}
+	maxTokenMultiplier := 1.0 + float64(pressure)
+	if maxTokenMultiplier > cfg.MaxTokensMultiplier {
+		maxTokenMultiplier = cfg.MaxTokensMultiplier
+	}
+	timeoutMultiplier := 1.0 + float64(pressure)
+	if timeoutMultiplier > cfg.TimeoutMultiplier {
+		timeoutMultiplier = cfg.TimeoutMultiplier
+	}
+
+	adjusted := profile
+	if adjusted.MaxTokens > 0 && maxTokenMultiplier > 1 {
+		adjusted.MaxTokens = ceilBudget(adjusted.MaxTokens, maxTokenMultiplier, cfg.MaxTokensCeiling)
+	}
+	if adjusted.TimeoutMs > 0 && timeoutMultiplier > 1 {
+		adjusted.TimeoutMs = ceilBudget(adjusted.TimeoutMs, timeoutMultiplier, cfg.TimeoutMsCeiling)
+	}
+	if adjusted == profile {
+		return profile, ""
+	}
+
+	return adjusted, fmt.Sprintf(
+		"episode_adjust=length_boost episode_calls=%d episode_length_streak=%d episode_recent_length=%d",
+		snapshot.CallCount,
+		snapshot.ConsecutiveLengthFinishes,
+		snapshot.RecentLengthFinishes,
+	)
+}
+
+func ceilBudget(value int, multiplier float64, ceiling int) int {
+	if value <= 0 || multiplier <= 1 {
+		return value
+	}
+	out := int(math.Ceil(float64(value) * multiplier))
+	if ceiling > 0 && out > ceiling {
+		return ceiling
+	}
+	return out
 }

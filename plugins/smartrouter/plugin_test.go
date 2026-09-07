@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/aware/gateway/internal/config"
+	"github.com/aware/gateway/internal/plugin"
 )
 
 func TestRouteFallsBackToConfiguredModelWhenDecisionModelFails(t *testing.T) {
@@ -428,7 +429,7 @@ func TestBuildPromptIncludesCostQualityTurnRiskGuidance(t *testing.T) {
 		MessageCount:    4,
 		EstimatedTokens: 200,
 		LatestUserMsg:   "Inspect installed packages for a security-related task.",
-	}, "1. model=anthropic/claude-opus-5 turn=critical_hypothesis state=forming critical=true recover=hard ctx=\"root cause unclear\" reason=\"need path setting\"")
+	}, "1. model=anthropic/claude-opus-5 turn=critical_hypothesis state=forming critical=true recover=hard ctx=\"root cause unclear\" reason=\"need path setting\"", "")
 
 	for _, want := range []string{
 		"Optimize for final task quality per dollar, not for speed.",
@@ -443,6 +444,70 @@ func TestBuildPromptIncludesCostQualityTurnRiskGuidance(t *testing.T) {
 		"Budget actions:",
 		"budget_action",
 		"context_summary",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestRouteFeedsEpisodeStateIntoNextPrompt(t *testing.T) {
+	var prompt string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll request body: %v", err)
+		}
+		var payload struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Fatalf("decode decision request: %v", err)
+		}
+		if len(payload.Messages) == 0 {
+			t.Fatal("decision request had no messages")
+		}
+		prompt = payload.Messages[0].Content
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"message": {"content": "{\"model\":\"anthropic/claude-opus-5\",\"turn_type\":\"recovery\",\"hypothesis_state\":\"contradicted\",\"critical_path\":true,\"recoverability\":\"hard\",\"budget_action\":\"premium_recover\",\"context_summary\":\"length truncation blocked progress\",\"reason\":\"restore complete context\"}"}}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+		}`)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	router.cfg.CacheTTLSeconds = -1
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "episode-prompt")
+	if err := router.Record(&plugin.AuditRecord{
+		Timestamp:    time.Now(),
+		SessionID:    "episode-prompt",
+		Pool:         "openrouter",
+		RoutedModel:  "z-ai/glm-5.3-flash",
+		Status:       200,
+		FinishReason: "length",
+		BudgetAction: budgetActionCheapExecute,
+		TotalTokens:  4096,
+		Cost:         0.25,
+		LatencyMs:    60000,
+	}); err != nil {
+		t.Fatalf("Record returned error: %v", err)
+	}
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue implementing the parser."}]}`)
+	if _, err := router.Route(req, body); err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	for _, want := range []string{
+		"Episode state projected from previous completed calls",
+		"length_streak=1",
+		"recent_length=1",
+		"outcome=length_truncated",
+		"finish_reason=length",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
@@ -508,6 +573,133 @@ func TestRouteFeedsRecentDecisionHistoryIntoNextPrompt(t *testing.T) {
 	}
 	if !strings.Contains(prompts[1], "bounded environment scan") {
 		t.Fatalf("second prompt missing first decision summary:\n%s", prompts[1])
+	}
+}
+
+func TestEpisodeLengthFinishBoostsNextBudget(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionCheapExecute: {MaxTokens: 1000, TimeoutMs: 10000},
+		},
+	}
+	router.cfg.EpisodeRuntime = EpisodeConfig{
+		Enabled:               true,
+		LengthStreakThreshold: 1,
+		MaxTokensMultiplier:   3,
+		TimeoutMultiplier:     2,
+		MaxTokensCeiling:      2500,
+		TimeoutMsCeiling:      15000,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "episode-budget")
+	if err := router.Record(&plugin.AuditRecord{
+		Timestamp:    time.Now(),
+		SessionID:    "episode-budget",
+		Pool:         "openrouter",
+		RoutedModel:  "z-ai/glm-5.3-flash",
+		Status:       200,
+		FinishReason: "length",
+		BudgetAction: budgetActionCheapExecute,
+		TotalTokens:  1000,
+		Cost:         0.01,
+		LatencyMs:    60000,
+	}); err != nil {
+		t.Fatalf("Record returned error: %v", err)
+	}
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Run the existing go test ./... command and report the output."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decision == nil || decision.Skip {
+		t.Fatal("Route skipped; want safe-control decision")
+	}
+	if decision.MaxTokens != 2000 {
+		t.Fatalf("max tokens = %d, want 2000 after length boost", decision.MaxTokens)
+	}
+	if decision.TimeoutMs != 15000 {
+		t.Fatalf("timeout ms = %d, want 15000 after capped length boost", decision.TimeoutMs)
+	}
+	for _, want := range []string{"episode_adjust=length_boost", "episode_calls=1", "episode_length_streak=1", "episode_recent_length=1"} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+}
+
+func TestEpisodeRecentLengthPressureBoostsBudget(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionPremiumRecover: {MaxTokens: 1000, TimeoutMs: 10000},
+		},
+	}
+	router.cfg.EpisodeRuntime = EpisodeConfig{
+		Enabled:               true,
+		RecentEvents:          5,
+		LengthStreakThreshold: 3,
+		LengthWindowThreshold: 2,
+		MaxTokensMultiplier:   3,
+		TimeoutMultiplier:     2,
+		MaxTokensCeiling:      2500,
+		TimeoutMsCeiling:      15000,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "episode-recent-pressure")
+	for _, finish := range []string{"length", "stop", "length"} {
+		if err := router.Record(&plugin.AuditRecord{
+			Timestamp:    time.Now(),
+			SessionID:    "episode-recent-pressure",
+			Pool:         "openrouter",
+			RoutedModel:  "z-ai/glm-5.3-flash",
+			Status:       200,
+			FinishReason: finish,
+			BudgetAction: budgetActionCheapExecute,
+			TotalTokens:  1000,
+			Cost:         0.01,
+			LatencyMs:    60000,
+		}); err != nil {
+			t.Fatalf("Record returned error: %v", err)
+		}
+	}
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"The hypothesis is contradicted by the latest test output; recover the approach."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decision == nil || decision.Skip {
+		t.Fatal("Route skipped; want safe-control premium recovery decision")
+	}
+	if decision.BudgetAction != budgetActionPremiumRecover {
+		t.Fatalf("budget action = %q, want %s", decision.BudgetAction, budgetActionPremiumRecover)
+	}
+	if decision.MaxTokens != 2500 {
+		t.Fatalf("max tokens = %d, want 2500 after recent length boost", decision.MaxTokens)
+	}
+	if decision.TimeoutMs != 15000 {
+		t.Fatalf("timeout ms = %d, want 15000 after capped recent length boost", decision.TimeoutMs)
+	}
+	for _, want := range []string{"episode_adjust=length_boost", "episode_calls=3", "episode_length_streak=1", "episode_recent_length=2"} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
 	}
 }
 
@@ -981,6 +1173,15 @@ plugins:
         cheap_probe:
           max_tokens: 111
           timeout_ms: 222
+    episode_runtime:
+      enabled: true
+      recent_events: 7
+      length_streak_threshold: 2
+      length_window_threshold: 3
+      max_tokens_multiplier: 4
+      timeout_multiplier: 2
+      max_tokens_ceiling: 9000
+      timeout_ms_ceiling: 180000
 `))
 	if err != nil {
 		t.Fatalf("LoadFromBytes returned error: %v", err)
@@ -1012,6 +1213,24 @@ plugins:
 	}
 	if got := smartCfg.BudgetedRoute.Profiles[budgetActionCheapProbe].TimeoutMs; got != 222 {
 		t.Fatalf("cheap_probe timeout_ms = %d, want 222", got)
+	}
+	if !smartCfg.EpisodeRuntime.Enabled {
+		t.Fatal("episode_runtime.enabled = false, want true")
+	}
+	if smartCfg.EpisodeRuntime.RecentEvents != 7 {
+		t.Fatalf("episode recent events = %d, want 7", smartCfg.EpisodeRuntime.RecentEvents)
+	}
+	if smartCfg.EpisodeRuntime.LengthStreakThreshold != 2 {
+		t.Fatalf("episode length threshold = %d, want 2", smartCfg.EpisodeRuntime.LengthStreakThreshold)
+	}
+	if smartCfg.EpisodeRuntime.LengthWindowThreshold != 3 {
+		t.Fatalf("episode length window threshold = %d, want 3", smartCfg.EpisodeRuntime.LengthWindowThreshold)
+	}
+	if smartCfg.EpisodeRuntime.MaxTokensMultiplier != 4 {
+		t.Fatalf("episode max token multiplier = %f, want 4", smartCfg.EpisodeRuntime.MaxTokensMultiplier)
+	}
+	if smartCfg.EpisodeRuntime.TimeoutMsCeiling != 180000 {
+		t.Fatalf("episode timeout ceiling = %d, want 180000", smartCfg.EpisodeRuntime.TimeoutMsCeiling)
 	}
 }
 
@@ -1054,6 +1273,7 @@ func newTestSmartRouter(endpoint string) *SmartRouter {
 		logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		histories:     map[string][]DecisionHistory{},
 		controlStates: map[string]*safeControlState{},
+		episodes:      map[string]*EpisodeState{},
 	}
 	router.menuJSON = router.buildMenuText()
 	return router

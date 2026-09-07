@@ -383,6 +383,15 @@ plugins:
         completion_guardrail:
           max_tokens: 1024
           timeout_ms: 60000
+    episode_runtime:
+      enabled: true
+      recent_events: 5
+      length_streak_threshold: 1
+      length_window_threshold: 2
+      max_tokens_multiplier: 3
+      timeout_multiplier: 2
+      max_tokens_ceiling: 8192
+      timeout_ms_ceiling: 240000
     models:
       - name: "{CHEAP_MODEL}"
         pool: "mock"
@@ -514,6 +523,7 @@ def summarize(cases: list[dict[str, Any]], traces: list[dict[str, Any]]) -> dict
     model_counts: dict[str, int] = {}
     rule_counts: dict[str, int] = {}
     budget_counts: dict[str, int] = {}
+    episode_adjust_calls = 0
     for case in cases:
         source_counts[case["actual_source"]] = source_counts.get(case["actual_source"], 0) + 1
         model_counts[case["actual_model"]] = model_counts.get(case["actual_model"], 0) + 1
@@ -523,6 +533,8 @@ def summarize(cases: list[dict[str, Any]], traces: list[dict[str, Any]]) -> dict
         if case["actual_source"] == "safe-control":
             rule_id = extract_rule_id(case["routing_reason"])
             rule_counts[rule_id] = rule_counts.get(rule_id, 0) + 1
+        if "episode_adjust=" in case["routing_reason"]:
+            episode_adjust_calls += 1
     return {
         "cases": len(cases),
         "passed_expectations": sum(1 for case in cases if case["pass"]),
@@ -534,6 +546,7 @@ def summarize(cases: list[dict[str, Any]], traces: list[dict[str, Any]]) -> dict
         "model_counts": model_counts,
         "safe_control_rule_counts": rule_counts,
         "route_budget_action_counts": budget_counts,
+        "episode_adjust_call_count": episode_adjust_calls,
         "total_cost_usd": round(sum(float(trace.get("cost") or 0) for trace in traces), 8),
     }
 

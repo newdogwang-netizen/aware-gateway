@@ -287,6 +287,15 @@ plugins:
         completion_guardrail:
           max_tokens: 1024
           timeout_ms: 60000
+    episode_runtime:
+      enabled: true
+      recent_events: 5
+      length_streak_threshold: 1
+      length_window_threshold: 2
+      max_tokens_multiplier: 3
+      timeout_multiplier: 2
+      max_tokens_ceiling: 8192
+      timeout_ms_ceiling: 240000
     models:
       - name: z-ai/glm-5.3-flash
         pool: openrouter
@@ -312,6 +321,11 @@ Requests outside those rules continue through the prompt-based smart-router.
 With `budgeted_route.enabled`, the router also attaches a route action profile
 to each decision. The gateway rewrites `max_tokens`, shortens the upstream
 timeout when configured, and records the budget action in audit traces.
+With `episode_runtime.enabled`, completed agent calls are projected into a
+small per-session episode state. Recent outcomes, including repeated
+`finish_reason=length` in either a streak or the recent event window, are fed
+into the next router prompt and can dynamically increase the next route budget
+within configured ceilings.
 
 ## Project Structure
 

@@ -72,6 +72,7 @@ type Config struct {
 	WarmStart                   WarmStartConfig     `yaml:"warm_start" json:"warm_start"`
 	SafeControl                 SafeControlConfig   `yaml:"safe_control" json:"safe_control"`
 	BudgetedRoute               BudgetedRouteConfig `yaml:"budgeted_route" json:"budgeted_route"`
+	EpisodeRuntime              EpisodeConfig       `yaml:"episode_runtime" json:"episode_runtime"`
 	// Decision model pricing ($/M tokens). For self-hosted vLLM, leave as 0
 	// (cost is GPU amortization, not per-token). For commercial decision
 	// models, set these to enable cost tracking in audit trail.
@@ -105,6 +106,8 @@ type SmartRouter struct {
 	histories     map[string][]DecisionHistory
 	controlMu     sync.Mutex
 	controlStates map[string]*safeControlState
+	episodeMu     sync.Mutex
+	episodes      map[string]*EpisodeState
 }
 
 func (s *SmartRouter) Name() string { return "smart-router" }
@@ -186,6 +189,7 @@ func (s *SmartRouter) Init(ctx *plugin.Context) error {
 	s.warmCounts = make(map[string]int)
 	s.histories = make(map[string][]DecisionHistory)
 	s.controlStates = make(map[string]*safeControlState)
+	s.episodes = make(map[string]*EpisodeState)
 
 	s.logger.Info("smart-router initialized",
 		"endpoint", s.cfg.Endpoint,
@@ -198,6 +202,7 @@ func (s *SmartRouter) Init(ctx *plugin.Context) error {
 		"fallback_model", s.cfg.FallbackModel,
 		"warm_start_steps", s.cfg.WarmStart.Steps,
 		"safe_control_enabled", s.cfg.SafeControl.Enabled,
+		"episode_runtime_enabled", s.cfg.EpisodeRuntime.Enabled,
 		"decision_history_turns", s.cfg.DecisionHistoryTurns,
 	)
 	return nil
@@ -244,7 +249,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 				Model:  strongest.Name,
 				Reason: "smart-router guardrail: task completion confirmation requires exact agent-control output",
 			}
-			s.applyRouteBudget(decision, budgetActionCompletionGuardrail)
+			s.applyRouteBudget(req, decision, budgetActionCompletionGuardrail)
 			return decision, nil
 		}
 	}
@@ -270,10 +275,13 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 
 	history := s.recentDecisionHistory(req)
 	historyText := s.renderDecisionHistory(history)
+	episodeSnapshot := s.episodeSnapshot(req)
+	episodeText := s.renderEpisodeSnapshot(episodeSnapshot)
+	cacheContext := joinRouterContext(historyText, episodeText)
 
 	// Check cache (skip if disabled via cache_ttl_seconds < 0)
 	if s.cache != nil && s.cfg.CacheTTLSeconds >= 0 {
-		cacheKey := s.cache.Key(s.menu, parsed.MessageCount, parsed.SystemMsg, parsed.LatestUserMsg, historyText)
+		cacheKey := s.cache.Key(s.menu, parsed.MessageCount, parsed.SystemMsg, parsed.LatestUserMsg, cacheContext)
 		if cached, hit := s.cache.Get(cacheKey); hit {
 			s.logger.Debug("smart-router: cache hit",
 				"model", cached.Model,
@@ -292,13 +300,13 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 				Model:  cached.Model,
 				Reason: "cached: " + cached.Reason,
 			}
-			s.applyRouteBudget(routing, s.inferBudgetAction(cached.Model, nil))
+			s.applyRouteBudget(req, routing, s.inferBudgetAction(cached.Model, nil))
 			return routing, nil
 		}
 	}
 
 	// Build prompt
-	prompt := s.buildPrompt(parsed, historyText)
+	prompt := s.buildPrompt(parsed, historyText, episodeText)
 
 	// Call decision model (pass req for trial/step/task header extraction)
 	decision, err := s.callDecisionModel(prompt, req)
@@ -308,7 +316,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 			"endpoint", s.cfg.Endpoint,
 			"fallback_model", s.cfg.FallbackModel,
 		)
-		fallback := s.fallbackDecision("decision-model-error")
+		fallback := s.fallbackDecision(req, "decision-model-error")
 		if fallback != nil && !fallback.Skip {
 			s.appendDecisionHistory(req, fallback.Model, &DecisionResponse{
 				TurnType:       "fallback",
@@ -338,7 +346,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 			"model", decision.Model,
 			"fallback_model", s.cfg.FallbackModel,
 		)
-		fallback := s.fallbackDecision("unknown-model")
+		fallback := s.fallbackDecision(req, "unknown-model")
 		if fallback != nil && !fallback.Skip {
 			s.appendDecisionHistory(req, fallback.Model, &DecisionResponse{
 				TurnType:       "fallback",
@@ -357,7 +365,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 
 	// Cache the decision (skip if disabled)
 	if s.cache != nil && s.cfg.CacheTTLSeconds >= 0 {
-		cacheKey := s.cache.Key(s.menu, parsed.MessageCount, parsed.SystemMsg, parsed.LatestUserMsg, historyText)
+		cacheKey := s.cache.Key(s.menu, parsed.MessageCount, parsed.SystemMsg, parsed.LatestUserMsg, cacheContext)
 		s.cache.Set(cacheKey, CachedDecision{
 			Model:  selectedModel,
 			Pool:   pool,
@@ -386,7 +394,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 		Model:  selectedModel,
 		Reason: fmt.Sprintf("smart-router: %s", routingReason),
 	}
-	s.applyRouteBudget(routing, budgetAction)
+	s.applyRouteBudget(req, routing, budgetAction)
 	return routing, nil
 }
 
@@ -435,7 +443,7 @@ func (s *SmartRouter) warmStartDecision(req *http.Request, parsed *parsedRequest
 		Model:  cfg.Model,
 		Reason: fmt.Sprintf("smart-router warm-start: first %d calls use %s (call %d/%d)", cfg.Steps, cfg.Model, callIndex, cfg.Steps),
 	}
-	s.applyRouteBudget(decision, budgetActionPremiumReason)
+	s.applyRouteBudget(req, decision, budgetActionPremiumReason)
 	return decision, true
 }
 
@@ -535,6 +543,10 @@ func (s *SmartRouter) clearDecisionHistory(req *http.Request) {
 	s.controlMu.Lock()
 	delete(s.controlStates, key)
 	s.controlMu.Unlock()
+
+	s.episodeMu.Lock()
+	delete(s.episodes, key)
+	s.episodeMu.Unlock()
 }
 
 func (s *SmartRouter) renderDecisionHistory(history []DecisionHistory) string {
@@ -630,7 +642,7 @@ func (s *SmartRouter) strongestConfiguredModel() (ModelEntry, bool) {
 	return strongest, true
 }
 
-func (s *SmartRouter) fallbackDecision(reason string) *plugin.RoutingDecision {
+func (s *SmartRouter) fallbackDecision(req *http.Request, reason string) *plugin.RoutingDecision {
 	if s.cfg.FallbackModel == "" {
 		return &plugin.RoutingDecision{Skip: true}
 	}
@@ -659,7 +671,7 @@ func (s *SmartRouter) fallbackDecision(reason string) *plugin.RoutingDecision {
 		Model:  s.cfg.FallbackModel,
 		Reason: fmt.Sprintf("smart-router fallback=%s", reason),
 	}
-	s.applyRouteBudget(decision, budgetActionPremiumRecover)
+	s.applyRouteBudget(req, decision, budgetActionPremiumRecover)
 	return decision
 }
 
@@ -1088,7 +1100,7 @@ func isTaskCompletionConfirmation(message string) bool {
 
 // --- Prompt building ---
 
-func (s *SmartRouter) buildPrompt(p *parsedRequest, historyText string) string {
+func (s *SmartRouter) buildPrompt(p *parsedRequest, historyText string, episodeText string) string {
 	var sb strings.Builder
 
 	// System instruction: explain the routing task with clear criteria.
@@ -1163,6 +1175,13 @@ func (s *SmartRouter) buildPrompt(p *parsedRequest, historyText string) string {
 		sb.WriteString("Use recent memory as routing evidence, not as a rule to repeat the last model. ")
 		sb.WriteString("If previous summaries show the hypothesis is stable or repeated premium calls did not change strategy, prefer the cheaper model unless this turn establishes a new critical hypothesis. ")
 		sb.WriteString("If previous summaries show contradiction, ambiguous validation, or a failed core hypothesis, consider the strongest model for recovery.\n\n")
+	}
+
+	if episodeText != "" {
+		sb.WriteString("Episode state projected from previous completed calls:\n")
+		sb.WriteString(episodeText)
+		sb.WriteString("\n\n")
+		sb.WriteString("Use episode state as outcome evidence. If recent calls ended with finish_reason=length, the next response probably needs a larger budget or a different strategy. If cost is rising without useful progress, prefer bounded cheap probes or a premium recovery turn that changes direction.\n\n")
 	}
 
 	// Request preview — give enough context to judge complexity.

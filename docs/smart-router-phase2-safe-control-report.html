@@ -176,6 +176,7 @@
         }
         .pass { color: var(--good); font-weight: 750; }
         .warn-text { color: var(--warn); font-weight: 750; }
+        .fail { color: var(--bad); font-weight: 750; }
         .small { color: var(--muted); font-size: 0.88rem; }
         .diagram {
             background: var(--paper);
@@ -250,13 +251,13 @@
         </div>
         <div class="metric">
             <div class="label">真实 pilot</div>
-            <span class="value">3 pass</span>
-            <div class="note"><code>shadow-relay</code> A1、A3、A4 通过；A2 暴露 provider incomplete。</div>
+            <span class="value">3 pass / 1 stopped</span>
+            <div class="note"><code>shadow-relay</code> A1、A3、A4 通过；A5 在成本超线后手动止损。</div>
         </div>
         <div class="metric">
             <div class="label">下一层问题</div>
-            <span class="value">profile</span>
-            <div class="note">Budgeted Route Action A4 通过，但 21/44 次输出被截断。</div>
+            <span class="value">A6</span>
+            <div class="note">A5 触发 18 次动态预算，但没有降低整条路径成本。</div>
         </div>
     </section>
 
@@ -316,18 +317,23 @@ Outcome: 这条路径最后有没有产生有效交付</code></pre>
         </tr>
         <tr>
             <td>Event-driven State Controller</td>
-            <td><span class="warn-text">未完成</span></td>
-            <td>还没有把文件读取、修改、测试、错误和 verifier 结果统一投影成状态。</td>
+            <td><span class="warn-text">最小投影已接入</span></td>
+            <td>agent 调用结束后会把 status、finish_reason、cost、tokens、budget action 投影进 session 状态；真实 tool event 和 verifier 仍未接入。</td>
         </tr>
         <tr>
             <td>Episode Runtime</td>
-            <td><span class="warn-text">未完成</span></td>
-            <td>还不能稳定识别当前 agent 正在解决哪条任务线、哪条假设、哪个阶段。</td>
+            <td><span class="warn-text">最小版已接入</span></td>
+            <td>先以 <code>X-Session-ID</code> / <code>X-Trial-Name</code> 作为任务线；还没有处理 continue、interrupt、resume 和子任务切换。</td>
         </tr>
         <tr>
             <td>Budgeted Route Action</td>
-            <td><span class="pass">第一版已验证</span></td>
-            <td>A4 真实 pilot 通过；但截断率偏高，profile 还需要 outcome 校准。</td>
+            <td><span class="pass">机制已验证</span></td>
+            <td>A4 验证固定预算字段可工作；A5 验证 Episode 反馈可以触发动态预算放大。</td>
+        </tr>
+        <tr>
+            <td>Budget Policy Effectiveness</td>
+            <td><span class="fail">未通过</span></td>
+            <td>A5 在 verifier 前已到 $7.0576 和 59 次 agent 调用，高于 A4；说明只根据 length 放大预算还不是有效策略。</td>
         </tr>
         <tr>
             <td>Delivery Feedback</td>
@@ -344,7 +350,8 @@ Outcome: 这条路径最后有没有产生有效交付</code></pre>
     <div class="callout warn">
         <p>
             所以验收边界很窄：Phase 2 Safe Control 子里程碑可以标记完成；Issue #1 的总体目标必须保持 open。
-            后续不宜继续添加更多关键词规则；Budgeted Route Action 第一版已经接上，下一步进入最小 Episode/Event 模型。
+            后续不宜继续添加更多关键词规则；当前已经接上最小 Episode/Event 投影，但 A5 已经说明：
+            只有 length 反馈不够，还要让状态看见真实进展和交付结果。
         </p>
     </div>
 
@@ -459,13 +466,21 @@ Outcome: 这条路径最后有没有产生有效交付</code></pre>
             <td>44 次 agent，23 次 decision，20 次 safe-control，44 次 budgeted route</td>
             <td>最长单次调用压到 60 秒附近；但 21 次 length 截断让路径变碎。</td>
         </tr>
+        <tr>
+            <td>Phase 2 episode-budget A5</td>
+            <td class="num warn-text">stopped</td>
+            <td class="num">$7.0576</td>
+            <td>59 次 agent，29 次 decision，18 次 episode_adjust，18 次 length</td>
+            <td>反馈链路生效，但 verifier 前已超过 A4 成本和调用数；这是策略失败样本。</td>
+        </tr>
     </table>
 
     <h2>实验暴露的问题和修复</h2>
     <p>
         第二阶段没有只保留好看的 run。A1 证明方向可行，A2 暴露控制边界和 provider 归因问题，
         A3 验证修复后质量仍可通过，同时暴露新的时间和预算问题。A4 接上预算控制后继续通过，
-        但也暴露了 profile 过紧会把任务切成更多小步。
+        但也暴露了 profile 过紧会把任务切成更多小步。A5 把 <code>finish_reason=length</code>
+        接回下一轮预算，实际触发了 18 次动态放大；这证明链路能工作，但没有证明策略有效。
     </p>
 
     <table>
@@ -506,8 +521,13 @@ Outcome: 这条路径最后有没有产生有效交付</code></pre>
         </tr>
         <tr>
             <td>A4 成本低于 A3、耗时低于 A3，但 44 次 agent 里 21 次被 token 上限截断。</td>
-            <td>下一轮要把 profile 从粗粒度 action 调成 outcome-aware：premium_reason 和 cheap_execute 不能一刀切。</td>
-            <td><span class="warn-text">待做</span></td>
+            <td>新增最小 Episode/Event：上一轮 <code>finish_reason=length</code> 会进入状态，并动态提高下一轮 route budget。</td>
+            <td><span class="pass">A5 已验证链路</span></td>
+        </tr>
+        <tr>
+            <td>A5 中动态预算触发 18 次，但总成本到 $7.0576、agent 调用到 59 次后仍未 verifier。</td>
+            <td>把预算反馈从“连续 length”扩展为“最近窗口内重复 length pressure”；下一步仍需接入 file/test/verifier outcome，识别没有真实进展的循环。</td>
+            <td><span class="fail">策略未通过</span></td>
         </tr>
     </table>
 
@@ -518,7 +538,8 @@ Outcome: 这条路径最后有没有产生有效交付</code></pre>
         <li>A2 说明本地 cheap 规则必须有连续上限，否则会把早期方向判断推迟太久。</li>
         <li>A3 说明质量可以保住，但下一层瓶颈变成 route action 的预算和停止条件。</li>
         <li>现在完成的是“减少每轮 judge”的实验目标，还没有完成“状态化智能决策层”的架构目标。</li>
-        <li>Budgeted Route Action A4 没有伤害质量，但 profile 过紧会增加碎片化迭代。</li>
+        <li>Budgeted Route Action A4 没有伤害质量，但 profile 过紧会增加碎片化迭代；A5 进一步说明，只把 length 当成预算信号会越跑越贵。</li>
+        <li>预算机制已经完成，预算策略没有通过验收；后续必须引入真实进展和最终交付反馈。</li>
     </ol>
 
     <div class="callout warn">
@@ -532,8 +553,10 @@ Outcome: 这条路径最后有没有产生有效交付</code></pre>
     <p>
         第二阶段后半段应该继续沿着 Issue #1 走，但不要一次性做完所有抽象。
         还差三根主梁：Episode Runtime 负责识别任务线，Event Projection 负责记录已经发生了什么，
-        Outcome Loop 负责用最终交付反向验证策略。预算控制面已经接上并通过一条真实 pilot，
-        下一步要让 profile 接入 Episode/Event 信号，而不是继续手工加规则。
+        Outcome Loop 负责用最终交付反向验证策略。现在已经接上最小 session episode 和
+        <code>finish_reason=length</code> 反馈；A5 说明这个信号只能告诉我们“输出压力大”，
+        不能告诉我们“任务在前进”。下一步应该把 file_modified、test_failed、test_passed、
+        verifier_result 这些 outcome event 接进来，让策略能及时停止无效循环，而不是只提高预算。
     </p>
     <pre><code>1. Budgeted route action
    cheap_probe: smaller max_tokens, shorter timeout
@@ -541,7 +564,8 @@ Outcome: 这条路径最后有没有产生有效交付</code></pre>
    semantic judge: choose model plus budget
 
 2. Episode event projection
-   file_read, file_modified, test_failed, test_passed, verifier_result
+   current: llm_call status, finish_reason, recent length pressure, cost, tokens, budget action
+   next: file_read, file_modified, test_failed, test_passed, verifier_result
 
 3. Delivery feedback
    route decision -> file change -> test/verifier outcome</code></pre>
