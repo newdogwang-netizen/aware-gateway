@@ -239,9 +239,9 @@
 
     <section class="metrics">
         <div class="metric">
-            <div class="label">修复边界</div>
-            <span class="value">分开</span>
-            <div class="note">第一阶段报告恢复为 prompt-only 复盘，Phase 2 另起本文。</div>
+            <div class="label">子里程碑</div>
+            <span class="value">done</span>
+            <div class="note">Safe Control 可以验收；Issue #1 继续 open。</div>
         </div>
         <div class="metric">
             <div class="label">确定性 probe</div>
@@ -285,6 +285,68 @@ State: 基于证据，现在知道什么
 Policy: 当前状态最低需要哪档能力
 Decision: 本次为什么选择这个模型
 Outcome: 这条路径最后有没有产生有效交付</code></pre>
+
+    <h2>现在完成到哪里</h2>
+    <p>
+        真正想要的网关不是一组更聪明的关键词规则，而是知道当前处于哪条任务线、已经发生了什么、
+        下一步最低需要何种能力，并能从最终交付反向验证策略。按这个标准看，Safe Control
+        只是其中一个子里程碑。
+    </p>
+
+    <table>
+        <tr>
+            <th>模块</th>
+            <th>状态</th>
+            <th>含义</th>
+        </tr>
+        <tr>
+            <td>Prompt Router</td>
+            <td><span class="pass">已完成</span></td>
+            <td>能根据当前请求和短期摘要，在 Flash 与 Opus 之间做语义选择。</td>
+        </tr>
+        <tr>
+            <td>Safe-control Rule Layer</td>
+            <td><span class="pass">已完成</span></td>
+            <td>确定性动作不再每次付 semantic judge 成本，并且有连续 cheap 探测上限。</td>
+        </tr>
+        <tr>
+            <td>Session-level Stateful Heuristics</td>
+            <td><span class="pass">已完成</span></td>
+            <td>同一 trial 内保留最近决策摘要、重复错误指纹、premium cooldown 等轻量状态。</td>
+        </tr>
+        <tr>
+            <td>Event-driven State Controller</td>
+            <td><span class="warn-text">未完成</span></td>
+            <td>还没有把文件读取、修改、测试、错误和 verifier 结果统一投影成状态。</td>
+        </tr>
+        <tr>
+            <td>Episode Runtime</td>
+            <td><span class="warn-text">未完成</span></td>
+            <td>还不能稳定识别当前 agent 正在解决哪条任务线、哪条假设、哪个阶段。</td>
+        </tr>
+        <tr>
+            <td>Budgeted Route Action</td>
+            <td><span class="warn-text">未完成</span></td>
+            <td>路由结果目前主要是模型选择，还不能同时控制 max_tokens、timeout 和输出长度。</td>
+        </tr>
+        <tr>
+            <td>Delivery Feedback</td>
+            <td><span class="warn-text">未完成</span></td>
+            <td>还没有把一次路由选择和最终交付质量、测试结果、成本路径稳定关联起来。</td>
+        </tr>
+        <tr>
+            <td>Offline Policy Evolution</td>
+            <td><span class="warn-text">未完成</span></td>
+            <td>还没有用多任务 outcome 数据反向更新策略，只是在人工复盘中调整。</td>
+        </tr>
+    </table>
+
+    <div class="callout warn">
+        <p>
+            所以验收边界很窄：Phase 2 Safe Control 子里程碑可以标记完成；Issue #1 的总体目标必须保持 open。
+            下一步不宜继续添加更多关键词规则，应先实现 Budgeted Route Action，然后进入最小 Episode/Event 模型。
+        </p>
+    </div>
 
     <h2>第二阶段先抓哪个主要矛盾</h2>
     <p>
@@ -442,19 +504,21 @@ Outcome: 这条路径最后有没有产生有效交付</code></pre>
         <li><code>shadow-relay</code> 上 A1 和 A3 都通过，成本分别是 $2.2468 和 $3.7369。</li>
         <li>A2 说明本地 cheap 规则必须有连续上限，否则会把早期方向判断推迟太久。</li>
         <li>A3 说明质量可以保住，但下一层瓶颈变成 route action 的预算和停止条件。</li>
+        <li>现在完成的是“减少每轮 judge”的实验目标，还没有完成“状态化智能决策层”的架构目标。</li>
     </ol>
 
     <div class="callout warn">
         <p>
             这还不是泛化结论。现在只有一个任务上的两条通过样本和一条 provider incomplete 样本。
-            下一步可以加一个短任务，但在那之前，先把预算控制补上更重要。
+            至少覆盖 5 到 10 个不同任务类型后，才适合判断它是否真的提高了智能决策水平。
         </p>
     </div>
 
     <h2>下一步</h2>
     <p>
-        第二阶段后半段应该继续沿着 Issue #1 走，但不要一次性做完所有抽象。建议顺序是：
-        先给 route action 加预算，再补 Episode 级事件记录，最后把 route decision 和 verifier outcome 连接起来。
+        第二阶段后半段应该继续沿着 Issue #1 走，但不要一次性做完所有抽象。
+        还差三根主梁：Episode Runtime 负责识别任务线，Event Projection 负责记录已经发生了什么，
+        Outcome Loop 负责用最终交付反向验证策略。落地顺序应该从最影响实验可行性的预算控制开始。
     </p>
     <pre><code>1. Budgeted route action
    cheap_probe: smaller max_tokens, shorter timeout
