@@ -1,4 +1,4 @@
-.PHONY: build run dev test vet clean docker bundle static \
+.PHONY: build run dev test test-scripts vet clean docker bundle static \
        start stop restart docker-stop docker-logs logs logsf smoke
 
 BINARY   = aware-gateway
@@ -116,6 +116,10 @@ test:
 
 test-short:
 	$(GO) test ./... -count=1
+
+test-scripts:
+	python3 -m py_compile scripts/*.py
+	python3 -m unittest discover -s tests -p 'test_*.py'
 
 vet:
 	$(GO) vet ./...

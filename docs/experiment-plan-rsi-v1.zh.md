@@ -10,11 +10,12 @@
 - 验收不能只和 A4/P0 比，还要保留 best-known 历史样本和 premium-only 质量锚点。
 - 单次 pilot 只能筛掉明显坏策略，不能接受策略；正式验收需要重复运行。
 
-本文档已按这些约束修订。当前状态是：
+本文档已按这些约束修订。2026-09-08 的 R1 工程状态是：
 
 ```text
 Concept approved.
-RSI R1 can start only after outcome schema, progress rules, and replay cutoff tests are in place.
+Outcome extractor foundation implemented.
+Policy replay and Harbor pilot still gated by extractor audit.
 ```
 
 ## RSI 在本项目里的含义
@@ -361,22 +362,50 @@ no_progress =
 
 ### Step 2: 建立 outcome extractor
 
-新增一个离线脚本，把每个 trial 的轨迹转成 episode timeline：
+新增离线脚本 `scripts/extract_episode_outcomes.py`，把每个 trial 的轨迹转成
+episode timeline：
 
 ```text
 trace rows + terminal transcript + verifier output
 => episode-events.jsonl
 => episode-summary.json
+=> replay-cutoff-check.json
 ```
 
-第一版只需要做到：
+第一版已经落地的范围：
 
 - 能识别文件是否被修改；
-- 能识别测试命令失败/成功；
-- 能识别 repeated failure fingerprint；
+- 能从 CTRF/verifier 输出识别测试失败/成功；
 - 能识别 verifier reward；
-- 能计算 no-progress turn。
+- 能计算 length pressure 后仍无进展的 `no_progress`；
+- 能区分 `response_completed`、`length_truncated`、`provider_incomplete` 和 `error`；
 - 能为每个事件保存 `timestamp`、`evidence_refs`、`certainty` 和 `extractor_version`。
+- 能为每次 router decision 生成只包含历史事件的 cutoff replay 样本。
+- 当 gateway trace 不存在时，能从 Harbor `trajectory.json` 生成基础 `llm_call`，
+  但 outcome 必须保持 `unknown`，不能拿来做质量判断。
+
+最小运行命令：
+
+```bash
+python3 scripts/extract_episode_outcomes.py \
+  --trial-dir /path/to/harbor/trial-or-job-dir \
+  --traces-json /path/to/gateway-traces.json \
+  --output-dir /path/to/rsi-output \
+  --strict
+```
+
+当前已用两条真实历史轨迹做 smoke：
+
+| 样本 | 事件数 | Decision 样本 | future evidence leakage | 关键结论 |
+|------|--------|---------------|-------------------------|----------|
+| A4 `shadow-relay` pass | 48 | 23 | 0 | 可复现 21/44 length truncation，reward `1.0` |
+| A5 `shadow-relay` stopped | 60 | 29 | 0 | 可复现 18 次 episode_adjust，且没有 verifier outcome |
+
+还没纳入第一版 extractor 的范围：
+
+- terminal transcript 的通用命令解析；
+- repeated failure frontier 的跨测试集归约；
+- 多任务线 `continue/interrupt/resume` 的实时 Episode Runtime。
 
 进入 replay 前必须人工抽查关键事件。Observed event 的关键字段抽取准确率必须是 100%；
 无法判断的事件保留 `unknown`，不能强行归类。
@@ -507,11 +536,12 @@ test_passed -> completion_readiness -> premium_assess -> completion_guardrail
 
 ## 预期产物
 
-- `episode-events.jsonl`
-- `episode-summary.json`
-- `event-schema-v1.json`
-- `progress-rules-v1.yaml`
-- `candidate-manifest.json`
+- `episode-events.jsonl`：由 `scripts/extract_episode_outcomes.py` 生成
+- `episode-summary.json`：由 `scripts/extract_episode_outcomes.py` 生成
+- `replay-cutoff-check.json`：由 `scripts/extract_episode_outcomes.py --strict` 生成并校验
+- `docs/rsi/event-schema-v1.json`
+- `docs/rsi/progress-rules-v1.yaml`
+- `docs/rsi/candidate-manifest.template.json`
 - `router-replay-rsi-p1.json`
 - `router-replay-rsi-p2.json`
 - `rsi-pilot-summary.csv`
@@ -548,7 +578,18 @@ Next policy change:
 
 ## 项目状态目标
 
-RSI R1 结束后，aware-gateway 应达到：
+R1 extractor checkpoint 已达到：
+
+```text
+Event Schema                      done
+Progress Rules                    done
+Offline Outcome Event Projection  done for trace/patch/ctrf/verifier
+Replay Cutoff Guard               done
+Fixture Test                      done
+Real-history Smoke                done on A4/A5 shadow-relay
+```
+
+RSI R1 完整结束后，aware-gateway 应达到：
 
 ```text
 Prompt Router                     done

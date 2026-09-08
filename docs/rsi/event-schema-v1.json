@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://newdogwang-netizen.github.io/aware-gateway/docs/rsi/event-schema-v1.json",
+  "title": "aware-gateway RSI Episode Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "event_id",
+    "episode_id",
+    "timestamp",
+    "kind",
+    "source",
+    "observation",
+    "evidence_refs",
+    "certainty",
+    "extractor_version"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "event-schema-v1"
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 8
+    },
+    "episode_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "timestamp_source": {
+      "type": "string"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "llm_call",
+        "file_modified",
+        "test_failed",
+        "test_passed",
+        "verifier_result",
+        "no_progress",
+        "run_exception"
+      ]
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "certainty": {
+      "type": "string",
+      "enum": [
+        "observed",
+        "derived",
+        "inferred",
+        "unknown"
+      ]
+    },
+    "extractor_version": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

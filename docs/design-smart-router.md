@@ -313,9 +313,15 @@ turn A4's truncation failure into a measurable A5 experiment.
 A5 showed the boundary of this first loop: the episode feedback fired in a real
 Harbor run, but the trial was stopped before verification after cost and call
 count exceeded A4. That means `finish_reason=length` is useful as an output
-pressure signal, but it is not a progress signal. The next reducer should add
-file/test/verifier events so the policy can distinguish "needs more room" from
-"is looping without making progress".
+pressure signal, but it is not a progress signal.
+
+RSI R1 starts the next reducer offline. `scripts/extract_episode_outcomes.py`
+projects historical traces, patches, CTRF test output, and verifier results
+into `episode-events.jsonl`, `episode-summary.json`, and
+`replay-cutoff-check.json`. The contract lives in `docs/rsi/`: `finish_reason=stop`
+is normalized to `response_completed`, observed activity is kept separate from
+progress, and every replay decision is checked against a strict event-time
+cutoff before outcome state can influence a candidate policy.
 
 ### Latency Budget
 

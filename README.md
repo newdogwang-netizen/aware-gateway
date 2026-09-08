@@ -81,6 +81,19 @@ Built by refactoring the heidi model-gateway into a core engine + plugin system.
 - [Router Decision Lab Notes](docs/router-decision-lab.md) - notes for replaying router decisions under different prompt designs.
 - [Benchmark Cost Report](docs/benchmark-cost.html) - static benchmark cost reference.
 
+## RSI Outcome Extractor
+
+RSI R1 adds an offline extractor for turning Harbor trial artifacts and gateway traces into auditable episode state:
+
+- [Event Schema v1](docs/rsi/event-schema-v1.json)
+- [Progress Rules v1](docs/rsi/progress-rules-v1.yaml)
+- [Candidate Manifest Template](docs/rsi/candidate-manifest.template.json)
+- [RSI Contract Notes](docs/rsi/README.md)
+
+Run the extractor with `python3 scripts/extract_episode_outcomes.py --trial-dir <trial-or-job-dir> --traces-json <gateway-traces.json> --output-dir <out> --strict`.
+
+Use `make test-scripts` to validate the extractor fixture and replay cutoff guard.
+
 ### Writing a Custom Plugin
 
 ```go

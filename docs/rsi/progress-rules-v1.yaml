@@ -1,0 +1,68 @@
+schema_version: progress-rules-v1
+
+outcome_normalization:
+  response_completed:
+    rule: finish_reason == "stop"
+    note: one model response ended normally; this is not task completion
+  length_truncated:
+    rule: finish_reason == "length"
+  provider_incomplete:
+    rule: 200 <= status < 300 and finish_reason missing and total_tokens == 0
+  error:
+    rule: status >= 400 or error_kind present
+  unknown:
+    rule: no deterministic outcome can be assigned
+
+progress:
+  observed_progress_events:
+    - test_passed
+    - verifier_result
+  candidate_progress_events:
+    - file_modified
+  derived_progress_conditions:
+    - failure_set_reduced
+    - previously_failing_test_passed
+    - verifier_score_improved
+    - persistent_diff_created_and_new_validation_passed
+  non_progress_activity:
+    - file_read
+    - search
+    - repeated_test_execution
+    - token_generation
+    - response_completed
+
+no_progress:
+  length_pressure_without_progress_threshold: 3
+  repeated_failure_without_frontier_reduction_threshold: 2
+  agent_call_threshold_without_progress: 50
+  emit_once_until_next_progress: true
+
+replay_cutoff:
+  rule: state_at_decision_t = reduce(events where event.timestamp < decision_t)
+  future_evidence_leakage_must_equal: 0
+  required_replay_fields:
+    - decision_id
+    - decision_timestamp
+    - event_cutoff
+    - state_before
+    - allowed_evidence_refs
+    - original_decision
+    - candidate_decision
+    - future_evidence_leakage
+
+completion_flow:
+  states:
+    - test_passed
+    - completion_readiness
+    - premium_assess
+    - completion_guardrail
+  note: local tests passing is readiness evidence, not final completion
+
+cost_accounting:
+  cost_per_attempt: total_cost_of_all_runs / run_count
+  cost_per_success: total_cost_of_all_runs / successful_run_count
+  include_costs:
+    - successful_runs
+    - failed_runs
+    - stopped_runs
+    - provider_failures

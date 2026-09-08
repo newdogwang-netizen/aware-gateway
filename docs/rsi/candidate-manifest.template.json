@@ -1,0 +1,52 @@
+{
+  "schema_version": "candidate-manifest-v1",
+  "candidate_id": "rsi-r1-c1-outcome-aware-prompt",
+  "created_at": "YYYY-MM-DDTHH:MM:SSZ",
+  "baseline": {
+    "commit": "c329c64",
+    "policy_id": "p0-current",
+    "reference_reports": [
+      "docs/smart-router-phase2-safe-control-report.html",
+      "docs/experiment-plan-rsi-v1.zh.md"
+    ]
+  },
+  "change": {
+    "mechanism": "decision_prompt",
+    "summary": "Add compact outcome state and require evidence-linked routing reasons.",
+    "files": []
+  },
+  "source_evidence_refs": [],
+  "expected_effect": {
+    "quality": "Maintain reward versus matched P0-current runs.",
+    "cost": "Reduce cost_per_success by avoiding repeated no-progress budget expansion.",
+    "behavior": "Use premium recovery only when outcome evidence indicates wrong direction or final verification risk."
+  },
+  "risks": [
+    "Router may overreact to inferred no-progress signals.",
+    "Router may collapse into all-premium if recovery wording is too broad.",
+    "Router may underuse premium on hidden-verifier-sensitive turns if cost wording dominates."
+  ],
+  "rollback_conditions": [
+    "reward below matched P0-current",
+    "future_evidence_leakage greater than 0",
+    "premium share exceeds P0-current by more than 20% without evidence-backed recovery reason",
+    "cost_per_success is not lower than matched P0-current",
+    "reason evidence coverage below 100%"
+  ],
+  "replay_gate": {
+    "future_evidence_leakage": 0,
+    "reason_evidence_coverage": 1.0,
+    "allowed_regressions": []
+  },
+  "pilot_gate": {
+    "minimum_tasks": 2,
+    "screening_runs_per_task": 1,
+    "acceptance_runs_per_task": 3,
+    "cost_accounting": "include successful, failed, stopped, and provider-failure runs"
+  },
+  "decision": {
+    "status": "draft",
+    "accepted_at": null,
+    "notes": ""
+  }
+}
