@@ -156,8 +156,8 @@ RSI R1 adds a second replay path after `episode-events.jsonl` exists:
 ```bash
 python3 scripts/replay_episode_decisions.py \
   --episode-dir /path/to/rsi-output \
-  --output /path/to/router-replay-rsi-p1.json \
-  --prompt-id rsi-p1-outcome-aware-v1 \
+  --output /path/to/router-replay-rsi-p2.json \
+  --prompt-id rsi-p2-windowed-progress-v1 \
   --model openai/gpt-5.6-sol \
   --resume
 ```
@@ -170,3 +170,11 @@ The first P1 replay over A4/A5 `shadow-relay` produced 52 valid decisions with
 zero future-evidence leakage. It did not materially change total Flash/Opus mix
 but over-selected `freeze_or_replan`, so P1 remains replay-only until progress
 projection is less coarse.
+
+P2 adds Harbor trajectory events (`tool_call`, `file_written`, `test_run`) and a
+windowed no-progress reducer. On the same A4/A5 history it produced
+Flash 38 / Opus 14, reduced `freeze_or_replan` from 41/52 to 25/52, and kept
+future-evidence leakage at 0 with 100% short event-reference coverage. It does
+this by treating old `no_progress_event_count` as background and using
+`no_progress_window.severity` as the current stuck signal. P2 is the next pilot
+candidate, not an accepted production policy.

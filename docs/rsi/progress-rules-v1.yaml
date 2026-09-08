@@ -18,7 +18,9 @@ progress:
     - test_passed
     - verifier_result
   candidate_progress_events:
+    - file_written
     - file_modified
+    - test_run_passed
   derived_progress_conditions:
     - failure_set_reduced
     - previously_failing_test_passed
@@ -32,10 +34,16 @@ progress:
     - response_completed
 
 no_progress:
+  window_size_events: 12
   length_pressure_without_progress_threshold: 3
   repeated_failure_without_frontier_reduction_threshold: 2
   agent_call_threshold_without_progress: 50
   emit_once_until_next_progress: true
+  p2_windowed_interpretation:
+    none: recent window has no active length/error pressure
+    watch: recent pressure exists, but not enough to freeze budget expansion
+    stale: repeated recent pressure without candidate or validation progress
+    blocked: too many agent calls since the last progress signal
 
 replay_cutoff:
   rule: state_at_decision_t = reduce(events where event.timestamp < decision_t)

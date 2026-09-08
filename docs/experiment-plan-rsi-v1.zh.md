@@ -515,6 +515,83 @@ Do not ship as live policy.
 - 区分 `freeze_budget_expansion`、`replan_with_flash` 和 `premium_recover`；
 - 对 `freeze_or_replan` 增加可执行下一步要求，而不是只作为抽象动作。
 
+#### 2026-09-08 P2 windowed-progress replay checkpoint
+
+本轮实现了 P1 后面缺的两块：
+
+- 从 Harbor `trajectory.json` 抽取真实 `tool_call`、`file_written`、`test_run`；
+- 在 reducer 里加入最近窗口状态 `no_progress_window.severity`，把 `none/watch/stale/blocked`
+  和历史累计 `no_progress_event_count` 分开。
+
+输入：
+
+- A4 `shadow-relay` pass：`/mnt/data2/aware-gateway-runs/phase2-windowed-progress-extractor-a4-20260908T1410Z`
+- A5 `shadow-relay` stopped：`/mnt/data2/aware-gateway-runs/phase2-windowed-progress-extractor-a5-20260908T1410Z`
+
+抽取结果：
+
+| 轨迹 | reward | events | LLM calls | tool calls | file writes | test runs | candidate progress | no-progress window |
+|------|--------|--------|-----------|------------|-------------|-----------|--------------------|--------------------|
+| A4 pass | 1.0 | 96 | 44 | 41 | 5 | 2 passed | 4 | stale 16 / watch 4 / none 3 |
+| A5 stopped | null | 133 | 59 | 61 | 12 | 0 | 0 | stale 13 / none 8 / watch 4 / blocked 4 |
+
+运行命令：
+
+```bash
+python3 scripts/replay_episode_decisions.py \
+  --episode-dir /mnt/data2/aware-gateway-runs/phase2-windowed-progress-extractor-a4-20260908T1410Z \
+  --episode-dir /mnt/data2/aware-gateway-runs/phase2-windowed-progress-extractor-a5-20260908T1410Z \
+  --output /mnt/data2/aware-gateway-runs/phase2-windowed-progress-replay-p2-20260908T1420Z/router-replay-rsi-p2.json \
+  --prompt-id rsi-p2-windowed-progress-v1 \
+  --model openai/gpt-5.6-sol \
+  --resume
+```
+
+P2 replay 结果：
+
+| 指标 | P1 | P2 |
+|------|----|----|
+| replay decisions | 52 | 52 |
+| valid candidate decisions | 52 | 52 |
+| future evidence leakage | 0 | 0 |
+| reason evidence coverage | 100% | 100% |
+| candidate model mix | Flash 36 / Opus 16 | Flash 38 / Opus 14 |
+| switched decisions | 18 | 18 |
+| `freeze_or_replan` | 41/52 | 25/52 |
+| cheap actions | 3/52 | 17/52 |
+| premium recovery/reason | 8/52 | 10/52 |
+| replay decision cost | `$0.87543` | `$1.00909` |
+
+解释：
+
+P2 没有改变总的 Flash/Opus 比例，但明显改变了控制动作分布。P1 看到旧的
+`no_progress` 后经常直接冻结；P2 会先看最近窗口，如果只是 `watch`，更倾向
+cheap probe/execute；如果进入 `stale` 或 `blocked`，才更常触发 replan/recover。
+
+这说明 P2 的状态表达更接近我们想要的方向：
+
+```text
+不是“历史上失败过，所以永远保守”
+而是“最近是否仍然卡住；有没有新的文件、测试或交付证据”
+```
+
+当前 P2 结论：
+
+```text
+Decision: keep for replay and next small pilot
+Do not call it accepted yet.
+```
+
+原因：
+
+- replay 门禁通过：52/52 有效，未来证据泄漏为 0；
+- A5 的 `blocked` 状态能被识别出来，和实际 stopped 结果一致；
+- P2 明显降低了无差别 `freeze_or_replan`；
+- 但它只在 `shadow-relay` 两条历史轨迹上验证，还没有证明真实 benchmark 成本/质量提升；
+- evidence citation 已改成短 `event:<id>`，本轮 replay 覆盖率为 100%。
+
+下一步进入小规模真实 pilot 前，只接受 P2 作为 candidate policy，不替换生产策略。
+
 ### Step 5: 小规模 Harbor pilot
 
 只跑通过公开 leaderboard 或本地已知可解的任务。
@@ -644,10 +721,12 @@ R1 extractor checkpoint 已达到：
 ```text
 Event Schema                      done
 Progress Rules                    done
-Offline Outcome Event Projection  done for trace/patch/ctrf/verifier
+Offline Outcome Event Projection  done for trace/tool/file/test/patch/verifier
 Replay Cutoff Guard               done
 Fixture Test                      done
 Real-history Smoke                done on A4/A5 shadow-relay
+P1 Outcome-aware Replay           done, replay-only
+P2 Windowed-progress Replay       done, candidate for next small pilot
 ```
 
 RSI R1 完整结束后，aware-gateway 应达到：
@@ -659,7 +738,7 @@ Budgeted Route Action             done
 Minimal Episode Runtime           done
 Outcome Event Projection          done for offline replay
 Outcome-aware Replay              done
-Outcome-aware Screening Pilot     at least 2 tasks
+Outcome-aware Screening Pilot     not started for P2
 Outcome-aware Acceptance          at least 3 runs per accepted task class
 Budget Policy Effectiveness       accepted or explicitly rejected
 Issue #1                          remains open until realtime Episode/Outcome loop exists

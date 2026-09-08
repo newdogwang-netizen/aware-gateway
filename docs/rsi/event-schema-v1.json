@@ -43,7 +43,10 @@
       "type": "string",
       "enum": [
         "llm_call",
+        "tool_call",
+        "file_written",
         "file_modified",
+        "test_run",
         "test_failed",
         "test_passed",
         "verifier_result",

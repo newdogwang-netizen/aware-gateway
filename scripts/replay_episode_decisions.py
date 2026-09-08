@@ -172,6 +172,7 @@ def summarize_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
         observation = event.get("observation") or {}
         summary: dict[str, Any] = {
             "event_id": event.get("event_id"),
+            "event_ref": f"event:{event.get('event_id')}",
             "timestamp": event.get("timestamp"),
             "kind": event.get("kind"),
             "certainty": event.get("certainty"),
@@ -184,6 +185,13 @@ def summarize_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "finish_reason",
             "route_max_tokens",
             "cost_usd",
+            "command_kind",
+            "command_preview",
+            "result_class",
+            "output_preview",
+            "target_paths_summary",
+            "delivery_target",
+            "workspace_target",
             "path_count",
             "failed_count",
             "passed_count",
@@ -200,21 +208,21 @@ def summarize_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def prompt_evidence_refs(recent_events: list[dict[str, Any]], allowed_refs: list[str]) -> list[str]:
     refs: list[str] = []
-    allowed = set(allowed_refs)
     for event in recent_events:
-        for ref in event.get("evidence_refs") or []:
-            if ref in allowed and ref not in refs:
-                refs.append(ref)
+        event_ref = str(event.get("event_ref") or "")
+        if event_ref and event_ref not in refs:
+            refs.append(event_ref)
     if refs:
         return refs[:12]
     return allowed_refs[:12]
 
 
-def build_prompt(sample: dict[str, Any]) -> str:
+def build_prompt(sample: dict[str, Any], prompt_id: str) -> str:
     menu_json = json.dumps(MENU, ensure_ascii=False, indent=2)
     state_json = json.dumps(sample.get("state_before") or {}, ensure_ascii=False, indent=2, sort_keys=True)
     recent_json = json.dumps(sample.get("recent_events") or [], ensure_ascii=False, indent=2, sort_keys=True)
     prompt_refs = json.dumps(sample.get("prompt_evidence_refs") or [], ensure_ascii=False, indent=2)
+    variant_guidance = prompt_variant_guidance(prompt_id)
     episode_summary = sample.get("episode_summary") or {}
     summary_json = json.dumps(
         {
@@ -231,6 +239,9 @@ def build_prompt(sample: dict[str, Any]) -> str:
 
     return f"""You are the aware-gateway smart-router replay policy.
 Replay one historical router decision using only the evidence visible before that decision.
+
+Prompt variant:
+{prompt_id}
 
 Goal:
 - Preserve final task quality.
@@ -249,6 +260,7 @@ Decision principles:
 - Activity is not progress. File changes are candidate progress; tests/verifier are stronger progress evidence.
 - If no_progress is present and there is no newer progress event, avoid blind budget expansion. Choose freeze_or_replan or premium_recover only if the reason names a new strategy.
 - If state shows repeated length_truncated without progress, decide whether the bottleneck is output room or wrong direction. More tokens alone is not a plan.
+{variant_guidance}
 
 Episode summary:
 {summary_json}
@@ -275,8 +287,24 @@ Return JSON only:
 Keep reason short. Cite exactly one evidence ref. Do not cite evidence that is not in Relevant visible evidence refs."""
 
 
+def prompt_variant_guidance(prompt_id: str) -> str:
+    if "p2" not in prompt_id and "window" not in prompt_id:
+        return ""
+    return """
+P2 windowed progress rules:
+- Use state.no_progress_window.severity as the current stuck signal: none, watch, stale, or blocked.
+- Old no_progress_event_count is background. Do not freeze just because old no_progress exists.
+- If recent_window has candidate_progress_count or strong_progress_count, treat the episode as moving again.
+- watch means pressure exists but the run is not stuck; prefer cheap_probe or cheap_execute unless this turn protects final quality.
+- stale means repeated recent pressure with no recent progress; choose freeze_or_replan or premium_recover only with a concrete recovery purpose.
+- blocked means too many calls since progress; stop expanding budget and force replan or recovery.
+- file_written to /app/output is candidate delivery progress, not proof of final success.
+- validation/test passed is stronger than file_written; failed tests are useful evidence, not progress.
+- Opus should be reserved for root-cause changes, ambiguous validation, hidden-case reasoning, recovery, and final guardrails."""
+
+
 def call_one(sample: dict[str, Any], args: argparse.Namespace, api_key: str) -> dict[str, Any]:
-    prompt = build_prompt(sample)
+    prompt = build_prompt(sample, args.prompt_id)
     started = time.time()
     response = requests.post(
         args.endpoint.rstrip("/") + "/chat/completions",
@@ -304,7 +332,7 @@ def call_one(sample: dict[str, Any], args: argparse.Namespace, api_key: str) -> 
         usage = payload.get("usage") or {}
     else:
         error = response.text[:500]
-    parsed = parse_candidate(text, sample.get("allowed_evidence_refs") or [])
+    parsed = parse_candidate(text, sample.get("prompt_evidence_refs") or sample.get("allowed_evidence_refs") or [])
     row = row_base(sample)
     row.update(
         {
@@ -335,9 +363,9 @@ def dry_run_one(sample: dict[str, Any], args: argparse.Namespace) -> dict[str, A
             "candidate_budget_action": "cheap_probe",
             "candidate_progress_state": "unknown",
             "candidate_critical_path": False,
-            "candidate_evidence_refs": sample.get("allowed_evidence_refs", [])[:1],
+            "candidate_evidence_refs": sample.get("prompt_evidence_refs", [])[:1],
             "candidate_reason": "dry run",
-            "evidence_refs_valid": bool(sample.get("allowed_evidence_refs")),
+            "evidence_refs_valid": bool(sample.get("prompt_evidence_refs")),
             "raw_response": "",
             "usage": {},
             "error": "",
@@ -359,14 +387,25 @@ def row_base(sample: dict[str, Any]) -> dict[str, Any]:
         "decision_timestamp": sample.get("decision_timestamp"),
         "event_cutoff": sample.get("event_cutoff"),
         "future_evidence_leakage": sample.get("future_evidence_leakage"),
+        "prompt_evidence_refs": sample.get("prompt_evidence_refs") or [],
         "original_selected_model": original.get("selected_model") or "",
         "original_selected_budget_action": original.get("selected_budget_action") or "",
         "original_selected_reason": original.get("selected_reason") or "",
         "original_selected_trace_id": original.get("selected_trace_id") or "",
         "state_event_count": state.get("event_count", 0),
         "state_llm_call_count": state.get("llm_call_count", 0),
+        "state_tool_call_count": state.get("tool_call_count", 0),
+        "state_file_write_count": state.get("file_write_count", 0),
+        "state_test_run_count": state.get("test_run_count", 0),
         "state_progress_event_count": state.get("progress_event_count", 0),
+        "state_candidate_progress_event_count": state.get("candidate_progress_event_count", 0),
         "state_no_progress_event_count": state.get("no_progress_event_count", 0),
+        "state_events_since_progress": state.get("events_since_progress", 0),
+        "state_llm_calls_since_progress": state.get("llm_calls_since_progress", 0),
+        "state_length_pressure_since_progress": state.get("length_pressure_since_progress", 0),
+        "state_recent_window": state.get("recent_window") or {},
+        "state_no_progress_window": state.get("no_progress_window") or {},
+        "state_no_progress_window_severity": (state.get("no_progress_window") or {}).get("severity") or "unknown",
         "state_cost_usd": state.get("cost_usd", 0),
         "state_outcomes": state.get("outcomes") or {},
         "state_models": state.get("models") or {},
@@ -450,6 +489,10 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     ]
     valid_evidence = [row for row in ok_rows if row.get("evidence_refs_valid")]
     future_leakage = sum(as_int(row.get("future_evidence_leakage")) for row in rows)
+    by_window: dict[str, Counter[str]] = {}
+    for row in ok_rows:
+        severity = str(row.get("state_no_progress_window_severity") or "unknown")
+        by_window.setdefault(severity, Counter())[str(row.get("candidate_model") or "(empty)")] += 1
     return {
         "rows": len(rows),
         "ok": len(ok_rows),
@@ -458,6 +501,13 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "candidate_model_mix": dict(Counter(row.get("candidate_model") or "(empty)" for row in rows)),
         "candidate_budget_action_mix": dict(Counter(row.get("candidate_budget_action") or "(empty)" for row in rows)),
         "candidate_progress_state_mix": dict(Counter(row.get("candidate_progress_state") or "(empty)" for row in rows)),
+        "state_no_progress_window_severity_mix": dict(
+            Counter(row.get("state_no_progress_window_severity") or "unknown" for row in rows)
+        ),
+        "candidate_model_by_no_progress_window": {
+            severity: dict(counter)
+            for severity, counter in sorted(by_window.items())
+        },
         "switched": len(switched),
         "switch_rate": round(len(switched) / max(1, len(ok_rows)), 4),
         "reason_evidence_coverage": round(len(valid_evidence) / max(1, len(ok_rows)), 4),

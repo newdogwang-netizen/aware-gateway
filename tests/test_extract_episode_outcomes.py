@@ -80,9 +80,15 @@ class ExtractEpisodeOutcomesTest(unittest.TestCase):
         self.assertEqual(summary["length_finish_count"], 3)
         self.assertEqual(summary["episode_adjust_call_count"], 3)
         self.assertEqual(summary["event_counts"]["file_modified"], 1)
+        self.assertEqual(summary["event_counts"]["file_written"], 1)
         self.assertEqual(summary["event_counts"]["test_passed"], 1)
+        self.assertEqual(summary["event_counts"]["test_run"], 2)
+        self.assertEqual(summary["event_counts"]["tool_call"], 4)
         self.assertEqual(summary["event_counts"]["verifier_result"], 1)
         self.assertEqual(summary["event_counts"]["no_progress"], 1)
+        self.assertEqual(summary["delivery_file_write_count"], 1)
+        self.assertEqual(summary["test_run_outcomes"], {"failed": 1, "passed": 1})
+        self.assertEqual(summary["candidate_progress_event_count"], 3)
         self.assertEqual(summary["reward"], 1.0)
 
         for event in events:
@@ -118,6 +124,10 @@ class ExtractEpisodeOutcomesTest(unittest.TestCase):
 
         last = cutoff["samples"][-1]
         self.assertEqual(last["state_before"]["no_progress_event_count"], 1)
+        self.assertEqual(last["state_before"]["no_progress_window"]["severity"], "watch")
+        self.assertEqual(last["state_before"]["recent_window"]["candidate_progress_count"], 3)
+        self.assertEqual(last["state_before"]["file_write_count"], 1)
+        self.assertEqual(last["state_before"]["test_run_count"], 2)
         self.assertIn("agent.patch:", "\n".join(last["allowed_evidence_refs"]))
 
         self.assertEqual(
@@ -136,6 +146,9 @@ class ExtractEpisodeOutcomesTest(unittest.TestCase):
         self.assertEqual(summary["agent_call_count"], 3)
         self.assertEqual(summary["decision_call_count"], 0)
         self.assertEqual(summary["trajectory_agent_turn_count"], 3)
+        self.assertEqual(summary["tool_call_count"], 4)
+        self.assertEqual(summary["file_write_count"], 1)
+        self.assertEqual(summary["test_run_count"], 2)
         self.assertEqual(cutoff["decision_count"], 0)
         self.assertEqual({event["source"] for event in llm_events}, {"harbor_trajectory"})
         self.assertEqual({event["observation"]["outcome"] for event in llm_events}, {"unknown"})

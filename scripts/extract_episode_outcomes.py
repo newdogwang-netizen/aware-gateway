@@ -9,7 +9,7 @@ import json
 import re
 import sys
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,20 @@ EVENT_SCHEMA_VERSION = "event-schema-v1"
 PROGRESS_RULES_VERSION = "progress-rules-v1"
 
 PATCH_DIFF_RE = re.compile(r"^diff --git a/(.*?) b/(.*?)$")
+WRITE_REDIRECT_RE = re.compile(r"(?:^|[\s;&|])(?:\d?>{1,2})\s*((?:/|\.{1,2}/)[^\s;&|]*)")
+PY_OPEN_WRITE_RE = re.compile(r"\bopen\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"][^'\"]*w")
+PY_PATH_WRITE_RE = re.compile(r"\bPath\(\s*['\"]([^'\"]+)['\"]\s*\)\.write_")
+SED_INPLACE_RE = re.compile(r"\bsed\s+-i\b.*?\s(/[^\s;&|]+)")
+TEST_COMMAND_RE = re.compile(
+    r"\b(pytest|python3?\s+-m\s+pytest|python3?\s+-m\s+unittest|go\s+test|npm\s+test|pnpm\s+test|yarn\s+test|cargo\s+test|make\s+test|ctest|bats)\b"
+)
+VALIDATION_COMMAND_RE = re.compile(
+    r"\bpython3?\s+-m\s+json\.tool\b|(?:\b(cat|grep|diff|cmp|test)\b[^\n;|]*?/app/output/)"
+)
+FAILURE_OUTPUT_RE = re.compile(
+    r"(FAILED|ERROR|Traceback|AssertionError|SyntaxError|IndentationError|command not found|No such file|ModuleNotFoundError|Exception:)"
+)
+PASS_OUTPUT_RE = re.compile(r"(\b\d+\s+passed\b|\bOK\b|\bPASS\b|Reward\s+1\.0|\"reward\"\s*:\s*1)")
 
 
 def main() -> None:
@@ -45,7 +59,7 @@ def main() -> None:
 
     decisions = [trace for trace in traces if is_decision_trace(trace)]
     agent_traces = [trace for trace in traces if not is_decision_trace(trace)]
-    cutoff_check = build_replay_cutoff_check(events, decisions, agent_traces, episode_id)
+    cutoff_check = build_replay_cutoff_check(events, decisions, agent_traces, episode_id, rules)
     summary = build_summary(trial_dir, result, trajectory, traces, events, cutoff_check)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -181,6 +195,8 @@ def extract_base_events(
         for index, step in enumerate(step for step in trajectory if step.get("source") == "agent"):
             events.append(trajectory_llm_call_event(episode_id, step, index))
 
+    events.extend(tool_events_from_trajectory(episode_id, trajectory))
+
     patch_path = trial_dir / "artifacts" / "tmp" / "agent.patch"
     if patch_path.exists() and patch_path.stat().st_size > 0:
         events.append(file_modified_event(episode_id, patch_path, result, traces))
@@ -201,6 +217,127 @@ def extract_base_events(
         events.append(run_exception_event(episode_id, result, exception))
 
     return events
+
+
+def tool_events_from_trajectory(episode_id: str, trajectory: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for step in trajectory:
+        if step.get("source") != "agent":
+            continue
+        tool_calls = step.get("tool_calls") or []
+        results = (step.get("observation") or {}).get("results") or []
+        for call_index, call in enumerate(tool_calls):
+            if not isinstance(call, dict):
+                continue
+            result = results[call_index] if call_index < len(results) and isinstance(results[call_index], dict) else {}
+            tool_event = trajectory_tool_call_event(episode_id, step, call, result, call_index)
+            events.append(tool_event)
+            write_event = file_written_from_tool_event(episode_id, tool_event)
+            if write_event:
+                events.append(write_event)
+            test_event = test_run_from_tool_event(episode_id, tool_event)
+            if test_event:
+                events.append(test_event)
+    return events
+
+
+def trajectory_tool_call_event(
+    episode_id: str,
+    step: dict[str, Any],
+    call: dict[str, Any],
+    result: dict[str, Any],
+    call_index: int,
+) -> dict[str, Any]:
+    function_name = str(call.get("function_name") or "")
+    arguments = call.get("arguments") or {}
+    command = str(arguments.get("keystrokes") or "")
+    output = str(result.get("content") or "")
+    timestamp = timestamp_with_offset(str(step.get("timestamp") or ""), call_index + 1)
+    result_class, fingerprint = classify_tool_result(output)
+    command_kind = classify_command(function_name, command)
+    written_paths = extract_written_paths(command)
+    observation = {
+        "step_id": as_int(step.get("step_id")),
+        "call_index": call_index,
+        "function_name": function_name,
+        "command_kind": command_kind,
+        "command_preview": compact_text(command, 320),
+        "written_paths": written_paths,
+        "duration_s": as_float(arguments.get("duration")),
+        "output_chars": len(output),
+        "output_preview": compact_text(output, 360),
+        "result_class": result_class,
+        "failure_fingerprint": fingerprint,
+    }
+    return make_event(
+        episode_id,
+        "tool_call",
+        timestamp,
+        "harbor_trajectory",
+        observation,
+        [trajectory_evidence_ref(step, call_index)],
+        "observed",
+        "trajectory.timestamp+tool_call_index_ms",
+    )
+
+
+def file_written_from_tool_event(episode_id: str, tool_event: dict[str, Any]) -> dict[str, Any] | None:
+    observation = tool_event.get("observation") or {}
+    command = str(observation.get("command_preview") or "")
+    paths = list(observation.get("written_paths") or extract_written_paths(command))
+    if not paths:
+        return None
+    write_observation = {
+        "step_id": observation.get("step_id"),
+        "call_index": observation.get("call_index"),
+        "target_paths": paths,
+        "target_paths_summary": paths[:8],
+        "delivery_target": any(is_delivery_path(path) for path in paths),
+        "workspace_target": any(is_workspace_path(path) for path in paths),
+        "command_preview": command,
+    }
+    return make_event(
+        episode_id,
+        "file_written",
+        tool_event["timestamp"],
+        "trajectory_command",
+        write_observation,
+        list(tool_event.get("evidence_refs") or []),
+        "observed",
+        tool_event.get("timestamp_source") or "trajectory.timestamp",
+    )
+
+
+def test_run_from_tool_event(episode_id: str, tool_event: dict[str, Any]) -> dict[str, Any] | None:
+    observation = tool_event.get("observation") or {}
+    command = str(observation.get("command_preview") or "")
+    command_kind = str(observation.get("command_kind") or "")
+    if command_kind not in ("test", "validation"):
+        return None
+    result_class = str(observation.get("result_class") or "unknown")
+    outcome = "unknown"
+    if result_class == "failure":
+        outcome = "failed"
+    elif result_class == "success" or command_kind == "validation":
+        outcome = "passed"
+    test_observation = {
+        "step_id": observation.get("step_id"),
+        "call_index": observation.get("call_index"),
+        "command_kind": command_kind,
+        "command": command,
+        "outcome": outcome,
+        "failure_fingerprint": observation.get("failure_fingerprint") or "",
+    }
+    return make_event(
+        episode_id,
+        "test_run",
+        tool_event["timestamp"],
+        "trajectory_tool_result",
+        test_observation,
+        list(tool_event.get("evidence_refs") or []),
+        "observed",
+        tool_event.get("timestamp_source") or "trajectory.timestamp",
+    )
 
 
 def llm_call_event(episode_id: str, trace: dict[str, Any], index: int) -> dict[str, Any]:
@@ -335,6 +472,73 @@ def changed_paths_from_patch(patch: str) -> list[str]:
     return paths
 
 
+def classify_command(function_name: str, command: str) -> str:
+    function_name = function_name.strip()
+    command = command.strip()
+    if function_name == "mark_task_complete":
+        return "completion_signal"
+    if TEST_COMMAND_RE.search(command):
+        return "test"
+    if VALIDATION_COMMAND_RE.search(command):
+        return "validation"
+    if extract_written_paths(command):
+        return "file_write"
+    if re.search(r"\b(cat|head|tail|sed\s+-n|grep|rg|find|ls|xxd|file)\b", command):
+        return "inspection"
+    if "python" in command:
+        return "execution_probe"
+    return function_name or "unknown"
+
+
+def classify_tool_result(output: str) -> tuple[str, str]:
+    if not output:
+        return "unknown", ""
+    failure = FAILURE_OUTPUT_RE.search(output)
+    if failure:
+        return "failure", failure.group(1)
+    if PASS_OUTPUT_RE.search(output):
+        return "success", ""
+    return "unknown", ""
+
+
+def extract_written_paths(command: str) -> list[str]:
+    paths: list[str] = []
+    for regex in (WRITE_REDIRECT_RE, PY_OPEN_WRITE_RE, PY_PATH_WRITE_RE, SED_INPLACE_RE):
+        for match in regex.finditer(command):
+            candidate = normalize_shell_path(match.group(1))
+            if candidate and candidate not in paths:
+                paths.append(candidate)
+    return paths
+
+
+def normalize_shell_path(path: str) -> str:
+    path = path.strip().strip("'\"")
+    path = path.rstrip(",)")
+    if not path or path in {"/dev/stdin", "/dev/null"}:
+        return ""
+    return path
+
+
+def is_delivery_path(path: str) -> bool:
+    return path.startswith("/app/output")
+
+
+def is_workspace_path(path: str) -> bool:
+    return path.startswith("/app/") and not path.startswith("/app/data/")
+
+
+def compact_text(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def trajectory_evidence_ref(step: dict[str, Any], call_index: int) -> str:
+    base = str(step.get("_trajectory_ref") or "trajectory:unknown")
+    return f"{base}:tool_call:{call_index}"
+
+
 def test_event_from_ctrf(
     episode_id: str,
     ctrf: dict[str, Any],
@@ -441,12 +645,13 @@ def derive_no_progress_events(
 ) -> list[dict[str, Any]]:
     threshold = as_int(nested_get(rules, ["no_progress", "length_pressure_without_progress_threshold"]), 3)
     threshold = max(1, threshold)
+    window_size = window_size_from_rules(rules)
     derived: list[dict[str, Any]] = []
     length_pressure_without_progress = 0
     emitted_open_no_progress = False
 
     for event in sorted_events(events):
-        if is_progress_event(event):
+        if is_any_progress_signal(event):
             length_pressure_without_progress = 0
             emitted_open_no_progress = False
             continue
@@ -471,6 +676,7 @@ def derive_no_progress_events(
                     "reason": "length_pressure_without_progress",
                     "since_turn": length_pressure_without_progress,
                     "threshold": threshold,
+                    "window_size": window_size,
                     "trigger_event_id": event["event_id"],
                 },
                 [event["event_id"]],
@@ -492,11 +698,28 @@ def is_progress_event(event: dict[str, Any]) -> bool:
     return False
 
 
+def is_candidate_progress_event(event: dict[str, Any]) -> bool:
+    kind = event.get("kind")
+    observation = event.get("observation") or {}
+    if kind == "file_modified" and as_int(observation.get("path_count")) > 0:
+        return True
+    if kind == "file_written" and (observation.get("delivery_target") or observation.get("workspace_target")):
+        return True
+    if kind == "test_run" and observation.get("outcome") == "passed":
+        return True
+    return False
+
+
+def is_any_progress_signal(event: dict[str, Any]) -> bool:
+    return is_progress_event(event) or is_candidate_progress_event(event)
+
+
 def build_replay_cutoff_check(
     events: list[dict[str, Any]],
     decisions: list[dict[str, Any]],
     agent_traces: list[dict[str, Any]],
     episode_id: str,
+    rules: dict[str, Any],
 ) -> dict[str, Any]:
     samples: list[dict[str, Any]] = []
     violations: list[dict[str, Any]] = []
@@ -521,7 +744,7 @@ def build_replay_cutoff_check(
                 "decision_id": decision_id(decision, index),
                 "decision_timestamp": decision_timestamp,
                 "event_cutoff": decision_timestamp,
-                "state_before": reduce_state(allowed),
+                "state_before": reduce_state(allowed, rules),
                 "allowed_evidence_refs": sorted(
                     {
                         ref
@@ -571,25 +794,115 @@ def next_agent_trace_after(
     return {}, None
 
 
-def reduce_state(events: list[dict[str, Any]]) -> dict[str, Any]:
+def reduce_state(events: list[dict[str, Any]], rules: dict[str, Any]) -> dict[str, Any]:
+    events = sorted_events(events)
     llm_events = [event for event in events if event.get("kind") == "llm_call"]
     outcomes = Counter((event.get("observation") or {}).get("outcome") or "unknown" for event in llm_events)
     models = Counter((event.get("observation") or {}).get("routed_model") or "unknown" for event in llm_events)
     budget_actions = Counter((event.get("observation") or {}).get("budget_action") or "" for event in llm_events)
     progress_events = [event for event in events if is_progress_event(event)]
+    candidate_progress_events = [event for event in events if is_candidate_progress_event(event)]
     last_event = events[-1] if events else {}
+    window_size = window_size_from_rules(rules)
+    recent_events = events[-window_size:] if window_size else events
+    progress_indexes = [
+        index
+        for index, event in enumerate(events)
+        if is_any_progress_signal(event)
+    ]
+    last_progress_index = progress_indexes[-1] if progress_indexes else None
+    events_since_progress = events[last_progress_index + 1 :] if last_progress_index is not None else events
+    llm_since_progress = [event for event in events_since_progress if event.get("kind") == "llm_call"]
+    length_since_progress = [
+        event
+        for event in llm_since_progress
+        if is_length_pressure_event(event)
+    ]
     return {
         "event_count": len(events),
         "llm_call_count": len(llm_events),
+        "tool_call_count": sum(1 for event in events if event.get("kind") == "tool_call"),
+        "file_write_count": sum(1 for event in events if event.get("kind") == "file_written"),
+        "test_run_count": sum(1 for event in events if event.get("kind") == "test_run"),
         "cost_usd": round(sum(as_float((event.get("observation") or {}).get("cost_usd")) for event in llm_events), 8),
         "outcomes": dict(sorted(outcomes.items())),
         "models": dict(sorted(models.items())),
         "budget_actions": dict(sorted((k, v) for k, v in budget_actions.items() if k)),
         "progress_event_count": len(progress_events),
+        "candidate_progress_event_count": len(candidate_progress_events),
         "no_progress_event_count": sum(1 for event in events if event.get("kind") == "no_progress"),
+        "events_since_progress": len(events_since_progress),
+        "llm_calls_since_progress": len(llm_since_progress),
+        "length_pressure_since_progress": len(length_since_progress),
+        "last_progress_event_id": events[last_progress_index]["event_id"] if last_progress_index is not None else "",
+        "last_progress_kind": events[last_progress_index]["kind"] if last_progress_index is not None else "",
+        "recent_window": recent_window_state(recent_events),
+        "no_progress_window": no_progress_window_state(events_since_progress, recent_events, rules),
         "last_event_id": last_event.get("event_id", ""),
         "last_event_kind": last_event.get("kind", ""),
     }
+
+
+def recent_window_state(events: list[dict[str, Any]]) -> dict[str, Any]:
+    llm_events = [event for event in events if event.get("kind") == "llm_call"]
+    test_runs = [event for event in events if event.get("kind") == "test_run"]
+    file_writes = [event for event in events if event.get("kind") == "file_written"]
+    return {
+        "event_count": len(events),
+        "llm_call_count": len(llm_events),
+        "tool_call_count": sum(1 for event in events if event.get("kind") == "tool_call"),
+        "file_write_count": len(file_writes),
+        "delivery_file_write_count": sum(
+            1 for event in file_writes if (event.get("observation") or {}).get("delivery_target")
+        ),
+        "test_run_count": len(test_runs),
+        "test_failed_count": sum(1 for event in test_runs if (event.get("observation") or {}).get("outcome") == "failed"),
+        "test_passed_count": sum(1 for event in test_runs if (event.get("observation") or {}).get("outcome") == "passed"),
+        "length_pressure_count": sum(1 for event in llm_events if is_length_pressure_event(event)),
+        "error_count": sum(
+            1 for event in llm_events if (event.get("observation") or {}).get("outcome") == "error"
+        ),
+        "candidate_progress_count": sum(1 for event in events if is_candidate_progress_event(event)),
+        "strong_progress_count": sum(1 for event in events if is_progress_event(event)),
+    }
+
+
+def no_progress_window_state(
+    events_since_progress: list[dict[str, Any]],
+    recent_events: list[dict[str, Any]],
+    rules: dict[str, Any],
+) -> dict[str, Any]:
+    threshold = max(1, as_int(nested_get(rules, ["no_progress", "length_pressure_without_progress_threshold"]), 3))
+    agent_threshold = max(1, as_int(nested_get(rules, ["no_progress", "agent_call_threshold_without_progress"]), 50))
+    recent = recent_window_state(recent_events)
+    llm_since_progress = [event for event in events_since_progress if event.get("kind") == "llm_call"]
+    length_since_progress = sum(1 for event in llm_since_progress if is_length_pressure_event(event))
+    recent_pressure = recent["length_pressure_count"] + recent["error_count"]
+    recent_progress = recent["candidate_progress_count"] + recent["strong_progress_count"]
+    severity = "none"
+    if len(llm_since_progress) >= agent_threshold:
+        severity = "blocked"
+    elif recent_pressure >= threshold and recent_progress == 0:
+        severity = "stale"
+    elif recent_pressure > 0:
+        severity = "watch"
+    return {
+        "active": severity != "none",
+        "severity": severity,
+        "window_size": len(recent_events),
+        "recent_pressure_count": recent_pressure,
+        "recent_progress_count": recent_progress,
+        "llm_calls_since_progress": len(llm_since_progress),
+        "length_pressure_since_progress": length_since_progress,
+        "threshold": threshold,
+    }
+
+
+def is_length_pressure_event(event: dict[str, Any]) -> bool:
+    observation = event.get("observation") or {}
+    return event.get("kind") == "llm_call" and (
+        observation.get("outcome") == "length_truncated" or bool(observation.get("episode_adjust"))
+    )
 
 
 def build_summary(
@@ -631,6 +944,23 @@ def build_summary(
         "agent_call_count": agent_call_count,
         "decision_call_count": sum(1 for trace in traces if is_decision_trace(trace)),
         "trajectory_agent_turn_count": sum(1 for step in trajectory if step.get("source") == "agent"),
+        "tool_call_count": by_kind.get("tool_call", 0),
+        "file_write_count": by_kind.get("file_written", 0),
+        "delivery_file_write_count": sum(
+            1
+            for event in events
+            if event.get("kind") == "file_written" and (event.get("observation") or {}).get("delivery_target")
+        ),
+        "test_run_count": by_kind.get("test_run", 0),
+        "test_run_outcomes": dict(
+            sorted(
+                Counter(
+                    (event.get("observation") or {}).get("outcome") or "unknown"
+                    for event in events
+                    if event.get("kind") == "test_run"
+                ).items()
+            )
+        ),
         "total_cost_usd": round(total_cost, 8),
         "length_finish_count": length_count,
         "length_finish_rate": round(length_count / agent_call_count, 4) if agent_call_count else 0,
@@ -638,6 +968,7 @@ def build_summary(
             1 for event in llm_events if (event.get("observation") or {}).get("episode_adjust")
         ),
         "progress_event_count": sum(1 for event in events if is_progress_event(event)),
+        "candidate_progress_event_count": sum(1 for event in events if is_candidate_progress_event(event)),
         "no_progress_turn_count": by_kind.get("no_progress", 0),
         "provider_incomplete_count": outcomes.get("provider_incomplete", 0),
         "reward": reward,
@@ -718,12 +1049,16 @@ def is_decision_trace(trace: dict[str, Any]) -> bool:
 
 
 def sorted_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(events, key=lambda event: (event.get("timestamp") or "", event.get("event_id") or ""))
+    return sorted(events, key=lambda event: (parse_dt(event.get("timestamp") or ""), event.get("event_id") or ""))
 
 
 def latest_agent_trace_timestamp(traces: list[dict[str, Any]]) -> str:
     timestamps = [str(trace.get("timestamp") or "") for trace in traces if not is_decision_trace(trace)]
     return max(timestamps) if timestamps else ""
+
+
+def window_size_from_rules(rules: dict[str, Any]) -> int:
+    return max(1, as_int(nested_get(rules, ["no_progress", "window_size_events"]), 12))
 
 
 def decision_id(decision: dict[str, Any], index: int) -> str:
@@ -738,6 +1073,11 @@ def first_timestamp(*values: Any) -> str:
         if value:
             return normalize_timestamp(str(value))
     return datetime.now(timezone.utc).isoformat()
+
+
+def timestamp_with_offset(value: str, offset_ms: int) -> str:
+    parsed = parse_dt(value) + timedelta(milliseconds=offset_ms)
+    return parsed.isoformat().replace("+00:00", "Z")
 
 
 def normalize_timestamp(value: str) -> str:

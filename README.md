@@ -83,7 +83,7 @@ Built by refactoring the heidi model-gateway into a core engine + plugin system.
 
 ## RSI Outcome Extractor
 
-RSI R1 adds an offline extractor for turning Harbor trial artifacts and gateway traces into auditable episode state:
+RSI R1 adds an offline extractor for turning Harbor trial artifacts and gateway traces into auditable episode state. It now projects gateway LLM calls plus Harbor tool calls, file writes, local test/validation runs, final patch/verifier output, and a windowed no-progress state:
 
 - [Event Schema v1](docs/rsi/event-schema-v1.json)
 - [Progress Rules v1](docs/rsi/progress-rules-v1.yaml)
@@ -92,7 +92,7 @@ RSI R1 adds an offline extractor for turning Harbor trial artifacts and gateway 
 
 Run the extractor with `python3 scripts/extract_episode_outcomes.py --trial-dir <trial-or-job-dir> --traces-json <gateway-traces.json> --output-dir <out> --strict`.
 
-Replay outcome-aware routing with `python3 scripts/replay_episode_decisions.py --episode-dir <out> --output <router-replay-rsi-p1.json> --prompt-id rsi-p1-outcome-aware-v1 --model openai/gpt-5.6-sol --resume`.
+Replay outcome-aware routing with `python3 scripts/replay_episode_decisions.py --episode-dir <out> --output <router-replay-rsi-p2.json> --prompt-id rsi-p2-windowed-progress-v1 --model openai/gpt-5.6-sol --resume`.
 
 Use `make test-scripts` to validate the extractor fixture and replay cutoff guard.
 

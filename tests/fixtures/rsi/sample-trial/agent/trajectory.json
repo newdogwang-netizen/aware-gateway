@@ -1,11 +1,13 @@
 {
   "steps": [
     {
+      "step_id": 1,
       "source": "user",
       "timestamp": "2026-09-08T10:00:00Z",
       "message": "Fix the sample task."
     },
     {
+      "step_id": 2,
       "source": "agent",
       "timestamp": "2026-09-08T10:00:30Z",
       "message": "Analysis: inspect files. Plan: list files.",
@@ -13,9 +15,27 @@
       "metrics": {
         "prompt_tokens": 100,
         "completion_tokens": 20
+      },
+      "tool_calls": [
+        {
+          "tool_call_id": "call_0_1",
+          "function_name": "bash_command",
+          "arguments": {
+            "keystrokes": "ls -la /app\n",
+            "duration": 0.1
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "New Terminal Output:\nroot@sample:/app# ls -la /app\ntotal 8\n"
+          }
+        ]
       }
     },
     {
+      "step_id": 3,
       "source": "agent",
       "timestamp": "2026-09-08T10:02:00Z",
       "message": "Analysis: output was truncated. Plan: continue.",
@@ -23,9 +43,27 @@
       "metrics": {
         "prompt_tokens": 200,
         "completion_tokens": 40
+      },
+      "tool_calls": [
+        {
+          "tool_call_id": "call_1_1",
+          "function_name": "bash_command",
+          "arguments": {
+            "keystrokes": "pytest -q\n",
+            "duration": 1.0
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "New Terminal Output:\nFAILED tests/test_sample.py::test_result_missing - AssertionError: missing result\n"
+          }
+        ]
       }
     },
     {
+      "step_id": 4,
       "source": "agent",
       "timestamp": "2026-09-08T10:05:30Z",
       "message": "Analysis: repeated length pressure. Plan: write final files.",
@@ -33,6 +71,34 @@
       "metrics": {
         "prompt_tokens": 300,
         "completion_tokens": 60
+      },
+      "tool_calls": [
+        {
+          "tool_call_id": "call_2_1",
+          "function_name": "bash_command",
+          "arguments": {
+            "keystrokes": "mkdir -p /app/output && printf '%s\\n' done > /app/output/result.txt\n",
+            "duration": 0.1
+          }
+        },
+        {
+          "tool_call_id": "call_2_2",
+          "function_name": "bash_command",
+          "arguments": {
+            "keystrokes": "cat /app/output/result.txt\n",
+            "duration": 0.1
+          }
+        }
+      ],
+      "observation": {
+        "results": [
+          {
+            "content": "New Terminal Output:\nroot@sample:/app# mkdir -p /app/output && printf '%s\\n' done > /app/output/result.txt\n"
+          },
+          {
+            "content": "New Terminal Output:\nroot@sample:/app# cat /app/output/result.txt\ndone\n"
+          }
+        ]
       }
     }
   ]
