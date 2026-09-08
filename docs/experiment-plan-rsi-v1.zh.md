@@ -454,6 +454,67 @@ replay 只用于筛掉明显坏策略，不宣称等价真实 benchmark。它可
 是否退化、是否符合 guardrail、reason 是否引用真实证据；它不能可信预测新策略下的
 后续 agent 输出、真实调用数、最终成本和 solved rate。
 
+#### 2026-09-08 P1 outcome-aware replay checkpoint
+
+实现脚本：`scripts/replay_episode_decisions.py`。
+
+输入：
+
+- A4 `shadow-relay` pass 的 `episode-events.jsonl` / `replay-cutoff-check.json`
+- A5 `shadow-relay` stopped 的 `episode-events.jsonl` / `replay-cutoff-check.json`
+
+运行命令：
+
+```bash
+python3 scripts/replay_episode_decisions.py \
+  --episode-dir /mnt/data2/aware-gateway-runs/rsi-r1-outcome-extractor-smoke-a4 \
+  --episode-dir /mnt/data2/aware-gateway-runs/rsi-r1-outcome-extractor-smoke-a5 \
+  --output /mnt/data2/aware-gateway-runs/rsi-r1-outcome-replay-p1-20260908T0820Z/router-replay-rsi-p1.json \
+  --prompt-id rsi-p1-outcome-aware-v1 \
+  --model openai/gpt-5.6-sol \
+  --resume
+```
+
+结果：
+
+| 指标 | 结果 |
+|------|------|
+| replay decisions | 52 |
+| valid candidate decisions | 52 |
+| future evidence leakage | 0 |
+| reason evidence coverage | 100% |
+| original model mix | Flash 35 / Opus 16 / unpaired 1 |
+| P1 candidate model mix | Flash 36 / Opus 16 |
+| switched decisions | 18 |
+| dominant candidate action | `freeze_or_replan` 41/52 |
+| reported/estimated replay decision cost | `$0.87543` |
+
+解释：
+
+P1 outcome-aware prompt 没有明显降低 Opus 占比，但大量触发 `freeze_or_replan`。
+这说明它能读到 no-progress 风险，却过度依赖第一版粗粒度 `no_progress` 事件。
+
+当前 P1 结论：
+
+```text
+Decision: keep for replay only
+Do not ship as live policy.
+```
+
+原因：
+
+- A4 是成功轨迹，但 P1 仍在中后段频繁要求 freeze/replan；
+- 第一版 extractor 只在末尾看到 patch/verifier，缺少中途 terminal/test/file-write 事件；
+- `no_progress` 事件一旦出现，在后续大多数 decision state 里都会持续存在；
+- 因此 P1 的问题不是模型选择比例，而是控制动作过度保守。
+
+下一步不应该直接上线 P1 prompt。应先增强 progress projection：
+
+- 采集真实 tool/file/test events，而不只依赖最终 `agent.patch`；
+- 将 `no_progress` 从 sticky flag 改成 windowed/streak state；
+- 区分 `freeze_budget_expansion`、`replan_with_flash` 和 `premium_recover`；
+- 对 `freeze_or_replan` 增加可执行下一步要求，而不是只作为抽象动作。
+
 ### Step 5: 小规模 Harbor pilot
 
 只跑通过公开 leaderboard 或本地已知可解的任务。

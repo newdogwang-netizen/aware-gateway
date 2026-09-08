@@ -92,6 +92,8 @@ RSI R1 adds an offline extractor for turning Harbor trial artifacts and gateway 
 
 Run the extractor with `python3 scripts/extract_episode_outcomes.py --trial-dir <trial-or-job-dir> --traces-json <gateway-traces.json> --output-dir <out> --strict`.
 
+Replay outcome-aware routing with `python3 scripts/replay_episode_decisions.py --episode-dir <out> --output <router-replay-rsi-p1.json> --prompt-id rsi-p1-outcome-aware-v1 --model openai/gpt-5.6-sol --resume`.
+
 Use `make test-scripts` to validate the extractor fixture and replay cutoff guard.
 
 ### Writing a Custom Plugin

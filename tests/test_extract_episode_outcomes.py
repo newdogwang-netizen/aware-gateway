@@ -120,6 +120,15 @@ class ExtractEpisodeOutcomesTest(unittest.TestCase):
         self.assertEqual(last["state_before"]["no_progress_event_count"], 1)
         self.assertIn("agent.patch:", "\n".join(last["allowed_evidence_refs"]))
 
+        self.assertEqual(
+            first["original_decision"]["selected_model"],
+            "anthropic/claude-opus-5",
+        )
+        self.assertEqual(
+            last["original_decision"]["selected_model"],
+            "",
+        )
+
     def test_can_project_basic_llm_events_from_trajectory_without_traces(self) -> None:
         events, summary, cutoff = self.run_extractor_without_traces()
         llm_events = [event for event in events if event["kind"] == "llm_call"]

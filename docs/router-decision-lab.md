@@ -148,3 +148,25 @@ Recommended variants:
 6. Compare datasets by `prompt_id`.
 
 The HTML lab is intentionally static so it can be attached to each artifact bundle and opened without a backend.
+
+## Outcome-Aware RSI Replay
+
+RSI R1 adds a second replay path after `episode-events.jsonl` exists:
+
+```bash
+python3 scripts/replay_episode_decisions.py \
+  --episode-dir /path/to/rsi-output \
+  --output /path/to/router-replay-rsi-p1.json \
+  --prompt-id rsi-p1-outcome-aware-v1 \
+  --model openai/gpt-5.6-sol \
+  --resume
+```
+
+This path gives the decision model the reduced state before each decision plus
+recent visible events. It is stricter than the original lab replay because every
+candidate reason must cite evidence that existed before the decision timestamp.
+
+The first P1 replay over A4/A5 `shadow-relay` produced 52 valid decisions with
+zero future-evidence leakage. It did not materially change total Flash/Opus mix
+but over-selected `freeze_or_replan`, so P1 remains replay-only until progress
+projection is less coarse.

@@ -44,7 +44,8 @@ def main() -> None:
         event["sequence"] = sequence
 
     decisions = [trace for trace in traces if is_decision_trace(trace)]
-    cutoff_check = build_replay_cutoff_check(events, decisions, episode_id)
+    agent_traces = [trace for trace in traces if not is_decision_trace(trace)]
+    cutoff_check = build_replay_cutoff_check(events, decisions, agent_traces, episode_id)
     summary = build_summary(trial_dir, result, trajectory, traces, events, cutoff_check)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -494,15 +495,20 @@ def is_progress_event(event: dict[str, Any]) -> bool:
 def build_replay_cutoff_check(
     events: list[dict[str, Any]],
     decisions: list[dict[str, Any]],
+    agent_traces: list[dict[str, Any]],
     episode_id: str,
 ) -> dict[str, Any]:
     samples: list[dict[str, Any]] = []
     violations: list[dict[str, Any]] = []
+    paired_agent_indices: set[int] = set()
     for index, decision in enumerate(sorted(decisions, key=lambda trace: trace.get("timestamp") or ""), start=1):
         decision_timestamp = normalize_timestamp(str(decision.get("timestamp") or ""))
         cutoff = parse_dt(decision_timestamp)
         allowed = [event for event in events if parse_dt(event["timestamp"]) < cutoff]
         leaked = [event for event in allowed if parse_dt(event["timestamp"]) >= cutoff]
+        paired_agent, paired_agent_index = next_agent_trace_after(decision_timestamp, agent_traces, paired_agent_indices)
+        if paired_agent_index is not None:
+            paired_agent_indices.add(paired_agent_index)
         if leaked:
             violations.append(
                 {
@@ -525,7 +531,14 @@ def build_replay_cutoff_check(
                 ),
                 "original_decision": {
                     "trace_id": decision.get("trace_id") or "",
-                    "model": decision.get("routed_model") or decision.get("model") or "",
+                    "decision_model": decision.get("routed_model") or decision.get("model") or "",
+                    "selected_model": paired_agent.get("routed_model") or paired_agent.get("model") or "",
+                    "selected_trace_id": paired_agent.get("trace_id") or "",
+                    "selected_timestamp": normalize_timestamp(str(paired_agent.get("timestamp") or ""))
+                    if paired_agent
+                    else "",
+                    "selected_budget_action": paired_agent.get("route_budget_action") or "",
+                    "selected_reason": paired_agent.get("routing_reason") or "",
                     "routing_reason": decision.get("routing_reason") or "",
                 },
                 "candidate_decision": None,
@@ -541,6 +554,21 @@ def build_replay_cutoff_check(
         "violations": violations,
         "samples": samples,
     }
+
+
+def next_agent_trace_after(
+    decision_timestamp: str,
+    agent_traces: list[dict[str, Any]],
+    used_indices: set[int],
+) -> tuple[dict[str, Any], int | None]:
+    decision_dt = parse_dt(decision_timestamp)
+    for index, trace in enumerate(sorted(agent_traces, key=lambda row: row.get("timestamp") or "")):
+        if index in used_indices:
+            continue
+        timestamp = str(trace.get("timestamp") or "")
+        if timestamp and parse_dt(timestamp) >= decision_dt:
+            return trace, index
+    return {}, None
 
 
 def reduce_state(events: list[dict[str, Any]]) -> dict[str, Any]:

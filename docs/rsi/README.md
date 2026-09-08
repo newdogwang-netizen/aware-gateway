@@ -33,6 +33,25 @@ When gateway traces are unavailable, the extractor can fall back to Harbor
 `outcome=unknown` because trajectory messages do not carry reliable provider
 finish metadata.
 
+## Replay
+
+Replay router decisions with outcome state:
+
+```bash
+python3 scripts/replay_episode_decisions.py \
+  --episode-dir /path/to/rsi-output-a \
+  --episode-dir /path/to/rsi-output-b \
+  --output /path/to/router-replay-rsi-p1.json \
+  --prompt-id rsi-p1-outcome-aware-v1 \
+  --model openai/gpt-5.6-sol \
+  --resume
+```
+
+The replay output reports candidate model mix, budget-action mix, switch rate,
+evidence-reference coverage, estimated decision-model cost, and future evidence
+leakage. Replay is a screening gate only; it can reject unsafe or incoherent
+policies, but it cannot prove benchmark quality without a real pilot.
+
 ## Boundary
 
 `finish_reason=stop` is normalized to `response_completed`, which means one model response ended normally. It is not treated as benchmark task completion.
