@@ -1,5 +1,22 @@
 # aware-gateway RSI 打磨实验 V1
 
+## 2026-09-08 架构评审修订
+
+外部评审结论是：方向可以保留，但实验设计在正式开工前必须修五个问题：
+
+- `finish_reason=stop` 不能被当成任务完成，只能表示本次响应正常结束。
+- `activity` 不能被当成 `progress`；重复改文件、重复跑测试、输出更多 token 都不天然代表任务推进。
+- 离线 replay 必须有严格时间截止，任何 decision 只能读取它发生前的事件。
+- 验收不能只和 A4/P0 比，还要保留 best-known 历史样本和 premium-only 质量锚点。
+- 单次 pilot 只能筛掉明显坏策略，不能接受策略；正式验收需要重复运行。
+
+本文档已按这些约束修订。当前状态是：
+
+```text
+Concept approved.
+RSI R1 can start only after outcome schema, progress rules, and replay cutoff tests are in place.
+```
+
 ## RSI 在本项目里的含义
 
 这里的 RSI 取 Recursive Self-Improvement 的思想，但工程落点改成
@@ -12,6 +29,9 @@
 
 它不是让 agent 自动改代码并直接上线。aware-gateway 的改进必须经过固定门禁：
 单元测试、确定性 probe、离线 replay、小规模 Harbor pilot、成本止损线和人工验收。
+
+RSI 的输出也不能直接改生产策略。它只能生成 candidate policy；candidate 必须通过
+replay screening 和重复 pilot acceptance 后，才允许进入 canary。
 
 ## 当前切入点
 
@@ -76,9 +96,24 @@ Episode 反馈链路能工作，
 - `test_passed_count`
 - `verifier_reward`
 - `no_progress_turn_count`
+- `failure_frontier_size`
+- `failure_frontier_reduced_count`
+- `cost_per_attempt`
 - `cost_per_success`
+- `stopped_cost_usd`
+- `provider_failure_cost_usd`
 
 速度只作为诊断指标，不作为优化目标。
+
+成本口径：
+
+```text
+cost_per_attempt = total_cost_of_all_runs / run_count
+cost_per_success = total_cost_of_all_runs / successful_run_count
+```
+
+失败、手动停止和 provider failure 已经产生的成本都必须进入总成本。Provider 故障可以单独分层解释，
+但不能从成本里静默删除。
 
 ## 实验假设
 
@@ -94,7 +129,9 @@ Episode 反馈链路能工作，
 
 验收标准：
 
-- 在 `shadow-relay` 上，成本不高于 A4 的 `$3.4808`，且 reward 保持 `1.0`。
+- 在匹配条件下，成本不高于新跑的 P0-current，且 reward 不低于 P0-current。
+- 在 `shadow-relay` 上，不能明显差于 best-known 历史样本：A1 `$2.2468` / reward `1.0`
+  和 A4 `$3.4808` / reward `1.0` 都作为解释锚点。
 - `length_finish_rate` 低于 A4 的 `47.7%`。
 - `episode_adjust` 触发后，后续 3 轮内应出现至少一个进展事件；否则记为 no-progress loop。
 
@@ -102,12 +139,18 @@ Episode 反馈链路能工作，
 
 同一批历史 router decision context，用不同策略重跑决策。如果新策略在 replay 中表现出
 明显的 always-Opus、always-Flash、预算持续放大或恢复循环倾向，就不进入真实 Harbor。
+Replay 样本必须只读取该次 decision 之前已经发生的事件：
+
+```text
+state_at_decision_t = reduce(events where event.timestamp < decision_t)
+```
 
 验收标准：
 
+- `future_evidence_leakage = 0`。
 - replay 后 premium share 不超过基准策略的 `+20%`，除非 reason 明确指向恢复或最终确认。
 - `budget_action` 分布不退化成单一动作。
-- 关键失败样本能给出和证据一致的 decision reason。
+- 关键失败样本能给出和 `allowed_evidence_refs` 一致的 decision reason。
 
 ### H3: RSI 不能只在一个任务上过拟合
 
@@ -118,6 +161,19 @@ Episode 反馈链路能工作，
 - 至少 3 类任务：协议/调试类、数据处理类、算法修复类。
 - 用于生成策略的任务不参与最终 holdout 验收。
 - holdout 不要求一次达到最优成本，但不能出现 A5 式成本失控。
+
+## 基线设计
+
+RSI R1 使用三类基线，避免候选策略只比一个弱版本好：
+
+| 基线 | 作用 | 说明 |
+|------|------|------|
+| P0-current | 公平主对照 | 在同任务、同时间窗口、同 provider 条件下重跑当前 main 策略 |
+| P-best-known | 历史质量/成本锚点 | 防止候选只优于 A4/A5，却低于 A1 这类已知更好轨迹 |
+| Premium-only | 质量上限锚点 | 估计强模型在相同任务上的完成率、轨迹长度和成本范围 |
+
+正式验收以 P0-current 为主对照，P-best-known 和 Premium-only 只用于解释边界，
+不能替代匹配条件下的新基线。
 
 ## 实验分组
 
@@ -133,7 +189,7 @@ Episode 反馈链路能工作，
 
 作用：作为 RSI 第一轮 baseline。
 
-### P1: Outcome-aware Prompt Policy
+### C1 / P1: Outcome-aware Prompt Policy
 
 只改决策提示词和 replay 脚本，不改运行时核心：
 
@@ -144,16 +200,39 @@ Episode 反馈链路能工作，
 
 作用：先验证 prompt 层是否能利用 outcome 信号。
 
+### C2: No-progress Budget Freeze
+
+只加入一个本地控制机制：
+
+- length pressure 发生但没有 progress 时，不继续放大同类预算；
+- 连续 no-progress 后强制进入 replan/recover，而不是重复执行；
+- budget freeze 的 reason 必须引用 no-progress evidence。
+
+作用：隔离验证“停止无效预算放大”是否有收益。
+
+### C3: Repeated-failure Recovery
+
+只加入一个本地恢复机制：
+
+- failure fingerprint 重复但 failure frontier 不下降时，触发 premium recovery；
+- recovery 后如果仍无进展，下一轮不能继续同样 recovery；
+- 必须把 repeated failure 和新旧 failure frontier 写入 trace reason。
+
+作用：隔离验证“重复失败恢复”是否有收益。
+
 ### P2: Outcome-aware State Controller
 
-在 P1 基础上加入轻量本地控制：
+只有 C1/C2/C3 的 replay 和 screening 结果都可解释后，才组合成 P2：
 
 - 连续 no-progress 后禁止继续同类 budget 放大；
 - 文件没有变化但多次测试失败时，强制 premium recovery；
-- 测试通过后进入 completion guardrail；
+- 测试通过后进入 `completion_readiness`，再由 premium assess 判断证据是否足够；
 - premium recovery 后若仍无进展，下一轮交还 semantic judge 并带上失败摘要。
 
 作用：验证事件驱动控制是否比纯 prompt 更稳。
+
+原则：每个 candidate 只改变一个主要机制。若一次同时改 prompt、budget profile 和
+controller threshold，即使结果变好也无法归因。
 
 ## 数据与事件模型
 
@@ -163,12 +242,25 @@ Episode 反馈链路能工作，
 llm_call:
   status
   finish_reason
+  outcome
   model
   budget_action
   cost
   tokens
   latency_ms
 ```
+
+`llm_call.outcome` 的语义必须先归一化：
+
+```text
+finish_reason=stop     -> response_completed
+finish_reason=length   -> length_truncated
+2xx missing metadata   -> provider_incomplete
+HTTP/ErrorKind error   -> error
+task_completed         -> completion protocol + validation/verifier evidence
+```
+
+注意：`response_completed` 只说明一次模型响应正常结束，不代表 benchmark 任务完成。
 
 ### 本轮新增的最小 Outcome 事件
 
@@ -199,6 +291,62 @@ no_progress:
 事件可以先从 Harbor trajectory、terminal transcript、audit trace 和 verifier 输出中离线抽取。
 第一轮不要求实时完美采集；先保证状态可以重建，策略可以 replay。
 
+### 事件证据层级
+
+所有事件必须保留来源和证据引用：
+
+```json
+{
+  "event_id": "evt-123",
+  "episode_id": "shadow-relay__run1",
+  "timestamp": "2026-09-08T10:00:00Z",
+  "kind": "test_failed",
+  "source": "terminal_transcript",
+  "observation": {
+    "command": "go test ./...",
+    "exit_code": 1,
+    "failure_fingerprint": "assert relay id"
+  },
+  "evidence_refs": ["transcript:lines:170-190"],
+  "certainty": "observed",
+  "extractor_version": "outcome-extractor-v1"
+}
+```
+
+| 层级 | 含义 | 示例 |
+|------|------|------|
+| observed | 系统直接观察到的事实 | 命令、exit code、diff、verifier reward |
+| derived | 确定性 reducer 计算出的状态 | failure frontier 降低、no-progress streak |
+| inferred | 模型或启发式推断 | 核心假设可能错误、可能接近完成 |
+
+Router 可以读取 inferred 信息，但不能把 inferred 重新写成 observed fact。
+
+### Activity 与 Progress
+
+Activity 不等于 Progress。Progress 必须表示任务状态向完成条件单调接近。
+
+| 信号 | 示例 | 是否直接算进展 |
+|------|------|----------------|
+| Activity | 读文件、搜索、重复运行同一测试 | 否 |
+| Artifact change | diff 发生变化 | 仅为候选进展 |
+| Failure frontier | 失败集合从 5 个降低到 3 个 | 是 |
+| Validation | 此前失败的测试通过 | 是 |
+| Delivery | verifier 得分提升或通过 | 是 |
+| Churn | diff 来回变化且 error fingerprint 不变 | 否 |
+
+确定性定义：
+
+```text
+progress =
+  failure_set_reduced
+  OR previously_failing_test_passed
+  OR verifier_score_improved
+  OR persistent_diff_created_and_new_validation_passed
+
+no_progress =
+  N turns without failure-frontier, validation, or verifier improvement
+```
+
 ## RSI 闭环步骤
 
 ### Step 1: 冻结基线
@@ -228,6 +376,10 @@ trace rows + terminal transcript + verifier output
 - 能识别 repeated failure fingerprint；
 - 能识别 verifier reward；
 - 能计算 no-progress turn。
+- 能为每个事件保存 `timestamp`、`evidence_refs`、`certainty` 和 `extractor_version`。
+
+进入 replay 前必须人工抽查关键事件。Observed event 的关键字段抽取准确率必须是 100%；
+无法判断的事件保留 `unknown`，不能强行归类。
 
 ### Step 3: 生成候选策略
 
@@ -255,7 +407,23 @@ P1 outcome-aware prompt decisions
 P2 outcome-aware controller decisions
 ```
 
-replay 只用于筛掉明显坏策略，不宣称等价真实 benchmark。
+每条 replay 样本必须保存：
+
+```text
+decision_id
+decision_timestamp
+event_cutoff
+state_before
+allowed_evidence_refs
+original_decision
+candidate_decision
+candidate_reason
+future_evidence_leakage
+```
+
+replay 只用于筛掉明显坏策略，不宣称等价真实 benchmark。它可以检查策略是否合法、
+是否退化、是否符合 guardrail、reason 是否引用真实证据；它不能可信预测新策略下的
+后续 agent 输出、真实调用数、最终成本和 solved rate。
 
 ### Step 5: 小规模 Harbor pilot
 
@@ -276,14 +444,23 @@ replay 只用于筛掉明显坏策略，不宣称等价真实 benchmark。
 | P1 | 1 per task |
 | P2 | 1 per task |
 
-如果 P1 或 P2 明显成本失控，立即停止，不进入第二轮。
+这是 screening，不是 acceptance。如果 P1 或 P2 明显成本失控，立即停止，不进入第二轮。
+
+正式 acceptance 至少需要：
+
+```text
+每个候选策略 x 每个任务 >= 3 次
+```
+
+成本受限时，减少候选策略数量，而不是用单次随机结果接受策略。
 
 ### Step 6: 验收/回滚
 
 接受策略需要同时满足：
 
-- reward 不低于 P0；
-- total cost 低于 P0，或在同成本下 agent_call_count 明显下降；
+- reward 不低于匹配条件下的 P0-current；
+- cost_per_success 低于匹配条件下的 P0-current，且包含失败/停止成本；
+- total cost 低于 P0-current，或在同成本下 agent_call_count 明显下降；
 - no_progress_turn_count 下降；
 - judge_call_rate 不明显上升；
 - 没有 provider incomplete 混入质量结论；
@@ -296,6 +473,16 @@ replay 只用于筛掉明显坏策略，不宣称等价真实 benchmark。
 - Flash 被完全弃用，策略退化成 all-premium；
 - Flash 被过度使用，策略推迟关键恢复；
 - reason 无法对应到 outcome evidence。
+- replay 与 pilot 方向相反；这种策略最多保留为 replay-only，不进入 canary。
+
+### 进入真实 Pilot 前的门禁
+
+- `future_evidence_leakage = 0`
+- 关键 observed event 抽取准确率 `= 100%`
+- 无法判断的事件保留 `unknown`
+- 策略未退化成 all-premium 或 all-flash
+- 不存在无上限预算增长
+- decision reason 的 evidence coverage `= 100%`
 
 ## 止损线
 
@@ -305,15 +492,26 @@ replay 只用于筛掉明显坏策略，不宣称等价真实 benchmark。
 成本 > $4.00 且未接近 verifier: stop
 agent 调用 > 50 且 no-progress 连续增加: stop
 连续 3 次 length boost 后没有 file/test 进展: stop
+length_pressure + no_progress: freeze budget expansion
+premium_recover + no_progress: stop or replan gate
 provider incomplete: stop and classify separately
 ```
 
 这些 gate 不是为了省时间，而是为了避免把坏策略误跑成“长尾样本”。
 
+Completion 也必须拆成两个状态，避免“测试通过一次就提交”：
+
+```text
+test_passed -> completion_readiness -> premium_assess -> completion_guardrail
+```
+
 ## 预期产物
 
 - `episode-events.jsonl`
 - `episode-summary.json`
+- `event-schema-v1.json`
+- `progress-rules-v1.yaml`
+- `candidate-manifest.json`
 - `router-replay-rsi-p1.json`
 - `router-replay-rsi-p2.json`
 - `rsi-pilot-summary.csv`
@@ -327,6 +525,7 @@ provider incomplete: stop and classify separately
 - no-progress loop
 - decision distribution
 - outcome evidence examples
+- future evidence leakage check
 - accepted/rejected decision
 
 ## 第一轮验收结论格式
@@ -358,7 +557,8 @@ Budgeted Route Action             done
 Minimal Episode Runtime           done
 Outcome Event Projection          done for offline replay
 Outcome-aware Replay              done
-Outcome-aware Pilot               at least 2 tasks
+Outcome-aware Screening Pilot     at least 2 tasks
+Outcome-aware Acceptance          at least 3 runs per accepted task class
 Budget Policy Effectiveness       accepted or explicitly rejected
 Issue #1                          remains open until realtime Episode/Outcome loop exists
 ```

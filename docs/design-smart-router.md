@@ -282,7 +282,7 @@ The audit trace exposes these as `route_budget_action`, `route_max_tokens`, and
 ### Minimal Episode Runtime
 
 `episode_runtime.enabled` makes smart-router also implement an audit sink. After
-each completed agent call, the audit record is projected into an in-memory
+each finished agent call, the audit record is projected into an in-memory
 episode keyed by `X-Session-ID` or `X-Trial-Name`. Decision-model audit records
 are ignored so the state describes agent work, not judge overhead.
 
@@ -290,6 +290,8 @@ The first reducer tracks only stable control signals:
 
 - total agent calls, cost, and tokens in this episode
 - last model, last budget action, and last finish reason
+- normalized call outcome: `response_completed`, `length_truncated`,
+  `provider_incomplete`, `error`, or `unknown`
 - consecutive `finish_reason=length` calls
 - repeated `finish_reason=length` pressure inside the latest N events
 - consecutive HTTP/provider errors

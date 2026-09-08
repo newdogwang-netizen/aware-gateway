@@ -266,7 +266,10 @@ func episodeOutcome(record *plugin.AuditRecord) string {
 		return "length_truncated"
 	}
 	if strings.EqualFold(record.FinishReason, "stop") {
-		return "completed"
+		return "response_completed"
+	}
+	if record.Status >= 200 && record.Status < 300 && record.FinishReason == "" && record.TotalTokens == 0 {
+		return "provider_incomplete"
 	}
 	return "unknown"
 }

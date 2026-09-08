@@ -503,7 +503,7 @@ func TestRouteFeedsEpisodeStateIntoNextPrompt(t *testing.T) {
 		t.Fatalf("Route returned error: %v", err)
 	}
 	for _, want := range []string{
-		"Episode state projected from previous completed calls",
+		"Episode state projected from previous agent calls",
 		"length_streak=1",
 		"recent_length=1",
 		"outcome=length_truncated",
@@ -512,6 +512,58 @@ func TestRouteFeedsEpisodeStateIntoNextPrompt(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
 		}
+	}
+}
+
+func TestEpisodeOutcomeDoesNotTreatStopAsTaskCompletion(t *testing.T) {
+	tests := []struct {
+		name   string
+		record plugin.AuditRecord
+		want   string
+	}{
+		{
+			name: "stop is response completed",
+			record: plugin.AuditRecord{
+				Status:       200,
+				FinishReason: "stop",
+				TotalTokens:  100,
+			},
+			want: "response_completed",
+		},
+		{
+			name: "length is truncation",
+			record: plugin.AuditRecord{
+				Status:       200,
+				FinishReason: "length",
+				TotalTokens:  100,
+			},
+			want: "length_truncated",
+		},
+		{
+			name: "missing finish reason and usage is provider incomplete",
+			record: plugin.AuditRecord{
+				Status: 200,
+			},
+			want: "provider_incomplete",
+		},
+		{
+			name: "error kind wins",
+			record: plugin.AuditRecord{
+				Status:       200,
+				FinishReason: "stop",
+				TotalTokens:  100,
+				ErrorKind:    "proxy_error",
+			},
+			want: "error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := episodeOutcome(&tt.record); got != tt.want {
+				t.Fatalf("episodeOutcome() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

@@ -1178,7 +1178,7 @@ func (s *SmartRouter) buildPrompt(p *parsedRequest, historyText string, episodeT
 	}
 
 	if episodeText != "" {
-		sb.WriteString("Episode state projected from previous completed calls:\n")
+		sb.WriteString("Episode state projected from previous agent calls:\n")
 		sb.WriteString(episodeText)
 		sb.WriteString("\n\n")
 		sb.WriteString("Use episode state as outcome evidence. If recent calls ended with finish_reason=length, the next response probably needs a larger budget or a different strategy. If cost is rising without useful progress, prefer bounded cheap probes or a premium recovery turn that changes direction.\n\n")

@@ -66,7 +66,7 @@ Built by refactoring the heidi model-gateway into a core engine + plugin system.
 
 | Plugin | Hooks | Description |
 |--------|-------|-------------|
-| `smart-router` | RequestRouter | Uses safe-control rules plus a decision model to choose among configured models per turn; supports warm-start, cost-aware prompts, fallback, and compact decision history |
+| `smart-router` | RequestRouter, AuditSink | Uses safe-control rules plus a decision model to choose among configured models per turn; supports warm-start, cost-aware prompts, fallback, compact decision history, and minimal episode state |
 | `task-router` | RequestRouter | Classifies LLM requests (chat/code/reasoning/vision) and selects best model by cost/quality/latency/load |
 | `otel-genai` | Middleware, Health | Enriches OTel spans with gen_ai.* / llm.* attributes; records GenAI Prometheus metrics |
 | `ratelimit` | Middleware | Global + per-key rate limiting (token bucket) |
@@ -322,7 +322,7 @@ Requests outside those rules continue through the prompt-based smart-router.
 With `budgeted_route.enabled`, the router also attaches a route action profile
 to each decision. The gateway rewrites `max_tokens`, shortens the upstream
 timeout when configured, and records the budget action in audit traces.
-With `episode_runtime.enabled`, completed agent calls are projected into a
+With `episode_runtime.enabled`, finished agent calls are projected into a
 small per-session episode state. Recent outcomes, including repeated
 `finish_reason=length` in either a streak or the recent event window, are fed
 into the next router prompt and can dynamically increase the next route budget
