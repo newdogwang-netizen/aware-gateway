@@ -15,6 +15,7 @@ const (
 	budgetActionPremiumReason       = "premium_reason"
 	budgetActionPremiumRecover      = "premium_recover"
 	budgetActionCompletionGuardrail = "completion_guardrail"
+	budgetActionFreezeOrReplan      = "freeze_or_replan"
 	budgetActionStopTrial           = "stop_trial"
 )
 
@@ -115,6 +116,10 @@ func defaultBudgetProfiles() map[string]RouteBudgetProfile {
 			MaxTokens: 1024,
 			TimeoutMs: 60000,
 		},
+		budgetActionFreezeOrReplan: {
+			MaxTokens: 2048,
+			TimeoutMs: 60000,
+		},
 	}
 }
 
@@ -160,7 +165,8 @@ func normalizeBudgetAction(action string) (string, bool) {
 		budgetActionCheapExecute,
 		budgetActionPremiumReason,
 		budgetActionPremiumRecover,
-		budgetActionCompletionGuardrail:
+		budgetActionCompletionGuardrail,
+		budgetActionFreezeOrReplan:
 		return normalized, true
 	default:
 		return "", false

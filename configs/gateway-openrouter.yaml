@@ -105,6 +105,9 @@ plugins:
       stop_cost_usd: 3.0
       stop_agent_call_threshold: 25
       stop_length_pressure_threshold: 3
+      long_exploration_threshold: 12
+      long_exploration_call_threshold: 12
+      post_replan_no_progress_call_limit: 3
     budgeted_route:
       enabled: true
       profiles:
@@ -120,6 +123,9 @@ plugins:
         premium_recover:
           max_tokens: 4096
           timeout_ms: 180000
+        freeze_or_replan:
+          max_tokens: 2048
+          timeout_ms: 60000
         completion_guardrail:
           max_tokens: 1024
           timeout_ms: 60000

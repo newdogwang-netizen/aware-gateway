@@ -101,12 +101,13 @@ State-derived capability floors can change routing after the semantic judge
 returns: verifier/no-progress recovery floors force `premium_recover`, while
 post-delivery validation or post-verifier assessment floors force
 `premium_reason`. Hard stop lines are handled locally before another upstream
-agent call. The first implemented stop family covers provider incomplete
-metadata, cost over threshold before verifier proximity, repeated length
-pressure without implementation/validation/delivery progress, agent-call overflow without
-delivery/test/verifier-grade progress, and blocked premium recovery without a
-route outcome. Stop traces are recorded with `pool=local`,
-`route_budget_action=stop_trial`, and a specific `error_kind`.
+agent call. The implemented stop family covers provider incomplete metadata,
+cost over threshold before verifier proximity, repeated length pressure without
+implementation/validation/delivery/strong progress, agent-call overflow without
+effective progress, a bounded replan window that still produced no effective
+progress, and blocked premium recovery without a route outcome. Stop traces are
+recorded with `pool=local`, `route_budget_action=stop_trial`, and a specific
+`error_kind`.
 
 The session-to-episode stack is queryable separately:
 
@@ -154,9 +155,11 @@ the next router prompt, and hard recovery floors can override an underpowered
 semantic decision when the verifier has already failed the current delivery.
 It also covers hard stop lines: provider incomplete metadata, cost over the
 trial threshold before verifier proximity, repeated length pressure without
-implementation/validation/delivery progress, agent-call overflow without effective progress, and
-blocked premium recovery with no route outcome are rejected locally with HTTP
-409 and audited with specific `error_kind` values.
+implementation/validation/delivery/strong progress, agent-call overflow without
+effective progress, long exploration that first triggers `freeze_or_replan`,
+post-replan no-progress early stop, and blocked premium recovery with no route
+outcome are rejected locally with HTTP 409 and audited with specific
+`error_kind` values.
 
 For local runners, `scripts/run_episode_command.py` wraps a command and posts
 the detected events automatically:
@@ -214,8 +217,9 @@ If the state is already `blocked` after a `premium_recover` route and the last
 route outcome is still `pending` or `no_progress`, the controller stops the
 trial locally instead of buying another turn. The same local stop path is used
 for provider incomplete traces, cost-threshold overflow before verifier
-proximity, repeated length pressure without implementation/validation/delivery progress, and agent-call
-overflow without delivery/test/verifier-grade progress.
+proximity, repeated length pressure without implementation, validation,
+delivery, or strong progress, agent-call overflow without effective progress,
+and a post-replan no-progress window.
 
 Route-outcome windows are closed when the next LLM call starts. If no file,
 tool, test, verifier, or explicit progress event was observed between the two

@@ -803,7 +803,7 @@ func (s *SmartRouter) routeCapability(selectedModel, budgetAction string) string
 	action, ok := normalizeBudgetAction(budgetAction)
 	if ok {
 		switch action {
-		case budgetActionPremiumRecover:
+		case budgetActionPremiumRecover, budgetActionFreezeOrReplan:
 			return nextMinCapabilityPremiumRecover
 		case budgetActionPremiumReason, budgetActionCompletionGuardrail:
 			return nextMinCapabilityPremiumAssess
@@ -1362,13 +1362,14 @@ func (s *SmartRouter) buildPrompt(p *parsedRequest, historyText string, episodeT
 	sb.WriteString("4. Read recent router memory for this same trial. Use it to detect repeated bottlenecks, stable hypotheses, prior premium spending, and whether the next turn should continue or change strategy.\n")
 	sb.WriteString("5. If the same bottleneck has already consumed multiple strongest-model turns, do not buy more blind probing. Use the strongest model only to change the search strategy; use the cheapest model for bounded sweeps and mechanical validation.\n")
 	sb.WriteString("6. Prefer the strongest model for early critical-path modeling, but prefer the cheapest model for late execution once the problem model is stable.\n")
-	sb.WriteString("7. Choose a budget_action from: cheap_probe, cheap_execute, premium_reason, premium_recover, completion_guardrail.\n\n")
+	sb.WriteString("7. Choose a budget_action from: cheap_probe, cheap_execute, premium_reason, premium_recover, freeze_or_replan, completion_guardrail.\n\n")
 
 	sb.WriteString("Budget actions:\n")
 	sb.WriteString("- cheap_probe: bounded observation, file reads, search, command-output summary, or narrow fact gathering.\n")
 	sb.WriteString("- cheap_execute: bounded execution under a stable hypothesis, simple code/test edits, known test commands, formatting, or mechanical validation.\n")
 	sb.WriteString("- premium_reason: path-setting reasoning, early task model formation, protocol/schema/algorithm inference, first solver architecture, or high-leverage synthesis.\n")
 	sb.WriteString("- premium_recover: contradicted hypothesis, repeated failure, ambiguous test failure, failed hidden-generalization reasoning, or strategy change after wasted work.\n")
+	sb.WriteString("- freeze_or_replan: stop expanding budget after long exploration; produce a concise new plan or abandon criteria before more execution.\n")
 	sb.WriteString("- completion_guardrail: final task completion confirmation or exact agent-control submission.\n\n")
 
 	// Turn phase context: terminal coding agents often move from a first
@@ -1443,7 +1444,7 @@ func (s *SmartRouter) buildPrompt(p *parsedRequest, historyText string, episodeT
 
 	sb.WriteString("Return JSON only with keys: model, turn_type, hypothesis_state, critical_path, recoverability, budget_action, context_summary, reason. ")
 	sb.WriteString("critical_path must be a JSON boolean. recoverability must be easy, medium, or hard. ")
-	sb.WriteString("budget_action must be one of cheap_probe, cheap_execute, premium_reason, premium_recover, completion_guardrail. ")
+	sb.WriteString("budget_action must be one of cheap_probe, cheap_execute, premium_reason, premium_recover, freeze_or_replan, completion_guardrail. ")
 	sb.WriteString("Keep context_summary under 14 words and reason under 12 words. Do not include any text outside the JSON.")
 
 	return sb.String()

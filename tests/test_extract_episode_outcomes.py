@@ -204,6 +204,52 @@ class ExtractEpisodeOutcomesTest(unittest.TestCase):
         self.assertTrue(targeted[1]["observation"]["effective_progress"])
         self.assertTrue(extractor.is_candidate_progress_event(targeted[1]))
 
+    def test_reduce_state_tracks_open_replan_window(self) -> None:
+        events = extractor.annotate_progress_events(
+            [
+                {
+                    "event_id": "evt-replan",
+                    "timestamp": "2026-09-10T10:00:00Z",
+                    "kind": "llm_call",
+                    "observation": {"budget_action": "freeze_or_replan", "outcome": "response_completed"},
+                },
+                {
+                    "event_id": "evt-read",
+                    "timestamp": "2026-09-10T10:01:00Z",
+                    "kind": "tool_call",
+                    "observation": {"command": "cat /app/data/input.txt"},
+                },
+                {
+                    "event_id": "evt-after",
+                    "timestamp": "2026-09-10T10:02:00Z",
+                    "kind": "llm_call",
+                    "observation": {"budget_action": "cheap_probe", "outcome": "response_completed"},
+                },
+            ]
+        )
+        state = extractor.reduce_state(events, {"no_progress": {"window_size_events": 5}})
+        self.assertEqual(state["replan_count"], 1)
+        self.assertEqual(state["last_replan_event_id"], "evt-replan")
+        self.assertEqual(state["llm_calls_since_replan"], 1)
+        self.assertEqual(state["exploration_since_replan"], 1)
+        self.assertEqual(state["exploration_since_progress"], 1)
+
+        closed = extractor.annotate_progress_events(
+            events
+            + [
+                {
+                    "event_id": "evt-implementation",
+                    "timestamp": "2026-09-10T10:03:00Z",
+                    "kind": "file_modified",
+                    "observation": {"workspace_target": True, "path_count": 1},
+                }
+            ]
+        )
+        state = extractor.reduce_state(closed, {"no_progress": {"window_size_events": 5}})
+        self.assertEqual(state["last_replan_event_id"], "")
+        self.assertEqual(state["llm_calls_since_replan"], 0)
+        self.assertEqual(state["exploration_since_replan"], 0)
+
     def test_json_tool_validation_requires_output_target(self) -> None:
         sys.path.insert(0, str(self.repo / "scripts"))
         from extract_episode_outcomes import classify_command

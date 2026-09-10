@@ -375,6 +375,9 @@ plugins:
       stop_cost_usd: 3.0
       stop_agent_call_threshold: 25
       stop_length_pressure_threshold: 3
+      long_exploration_threshold: 12
+      long_exploration_call_threshold: 12
+      post_replan_no_progress_call_limit: 3
     budgeted_route:
       enabled: true
       profiles:
@@ -390,6 +393,9 @@ plugins:
         premium_recover:
           max_tokens: 4096
           timeout_ms: 180000
+        freeze_or_replan:
+          max_tokens: 2048
+          timeout_ms: 60000
         completion_guardrail:
           max_tokens: 1024
           timeout_ms: 60000
@@ -519,6 +525,10 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     provider_incomplete_session = f"{trial}__provider_incomplete_stop_agent"
     agent_call_stop_episode = f"{trial}__agent_call_no_progress_stop"
     agent_call_stop_session = f"{trial}__agent_call_no_progress_stop_agent"
+    long_exploration_episode = f"{trial}__long_exploration_replan"
+    long_exploration_session = f"{trial}__long_exploration_replan_agent"
+    post_replan_stop_episode = f"{trial}__post_replan_stop"
+    post_replan_stop_session = f"{trial}__post_replan_stop_agent"
     cost_stop_episode = f"{trial}__cost_stop"
     cost_stop_session = f"{trial}__cost_stop_agent"
     length_stop_episode = f"{trial}__length_pressure_stop"
@@ -1480,6 +1490,209 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
             check_contains("agent-call-stop-threshold", agent_call_stop_reason, "stop_agent_call_threshold=25"),
             check_contains("agent-call-stop-candidate-progress", agent_call_stop_reason, "candidate_progress=0"),
             check_contains("agent-call-stop-strong-progress", agent_call_stop_reason, "strong_progress=0"),
+        ]
+    )
+
+    long_exploration_events: list[dict[str, Any]] = []
+    for index in range(1, 13):
+        event_id = f"{long_exploration_episode}__tool-{index}"
+        long_exploration_events.append(
+            {
+                "event_id": event_id,
+                "episode_id": long_exploration_episode,
+                "episode_operation": "continue",
+                "sequence": index,
+                "kind": "tool_call",
+                "source": "safe-control-probe",
+                "observation": {
+                    "command": f"sed -n '{index},{index}p' /app/data/input.txt",
+                },
+                "evidence_refs": [f"probe:event:{event_id}"],
+                "session_id": long_exploration_session,
+                "trial_name": trial,
+                "step_name": f"episode-long-exploration-tool-{index:02d}",
+                "task_name": task,
+            }
+        )
+    long_exploration_batch_response = post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {"events": long_exploration_events},
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": long_exploration_session,
+            "X-Episode-ID": long_exploration_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-long-exploration-injected-tool-batch",
+            "X-Task-Name": task,
+        },
+    )
+    checks.extend(
+        [
+            check_equal("long-exploration-batch-event-ingest-count", long_exploration_batch_response.get("count"), 12),
+            check_equal("long-exploration-batch-event-ingest-sinks", long_exploration_batch_response.get("sinks"), 2),
+        ]
+    )
+
+    long_exploration_state = fetch_episode_state(port, long_exploration_episode)
+    long_exploration_payload = long_exploration_state.get("state") or {}
+    checks.extend(
+        [
+            check_equal("long-exploration-state-version", long_exploration_state.get("state_version"), 12),
+            check_equal("long-exploration-count", long_exploration_payload.get("exploration_event_count"), 12),
+            check_equal("long-exploration-since-progress", long_exploration_payload.get("exploration_since_progress"), 12),
+            check_equal("long-exploration-candidate-progress", long_exploration_payload.get("candidate_progress_count"), 0),
+        ]
+    )
+
+    long_exploration_step = "episode-long-exploration-replan-route"
+    long_exploration_response = post_json(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Continue after many bounded reads with no implementation."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": long_exploration_session,
+            "X-Episode-ID": long_exploration_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": long_exploration_step,
+            "X-Task-Name": task,
+        },
+    )
+    long_exploration_trace = wait_for_agent_trace(port, long_exploration_session, long_exploration_step)
+    long_exploration_reason = str(long_exploration_trace.get("routing_reason") or "")
+    checks.extend(
+        [
+            check_equal("long-exploration-route-source", classify_source(long_exploration_reason), "safe-control"),
+            check_equal(
+                "long-exploration-route-model",
+                long_exploration_trace.get("routed_model") or long_exploration_response.get("model") or "",
+                PREMIUM_MODEL,
+            ),
+            check_equal(
+                "long-exploration-route-budget-action",
+                long_exploration_trace.get("route_budget_action") or "",
+                "freeze_or_replan",
+            ),
+            check_equal("long-exploration-route-max-tokens", long_exploration_trace.get("route_max_tokens") or 0, 2048),
+            check_equal("long-exploration-route-timeout-ms", long_exploration_trace.get("route_timeout_ms") or 0, 60000),
+            check_contains(
+                "long-exploration-route-rule",
+                long_exploration_reason,
+                "rule_id=episode_long_exploration_replan",
+            ),
+            check_contains(
+                "long-exploration-route-evidence",
+                long_exploration_reason,
+                "exploration_since_progress=12",
+            ),
+            check_contains("long-exploration-route-action", long_exploration_reason, "action=freeze_or_replan"),
+        ]
+    )
+
+    post_replan_events: list[dict[str, Any]] = []
+    for index, action in enumerate(["freeze_or_replan", "cheap_probe", "cheap_probe", "cheap_probe"], start=1):
+        event_id = f"{post_replan_stop_episode}__llm-{index}"
+        post_replan_events.append(
+            {
+                "event_id": event_id,
+                "episode_id": post_replan_stop_episode,
+                "episode_operation": "continue",
+                "sequence": index,
+                "kind": "llm_call",
+                "source": "safe-control-probe",
+                "observation": {
+                    "outcome": "response_completed",
+                    "model": PREMIUM_MODEL if action == "freeze_or_replan" else CHEAP_MODEL,
+                    "routed_model": PREMIUM_MODEL if action == "freeze_or_replan" else CHEAP_MODEL,
+                    "budget_action": action,
+                    "finish_reason": "stop",
+                    "status": 200,
+                    "total_tokens": 100,
+                    "cost_usd": 0.001,
+                    "latency_ms": 1000,
+                },
+                "evidence_refs": [f"probe:event:{event_id}"],
+                "session_id": post_replan_stop_session,
+                "trial_name": trial,
+                "step_name": f"episode-post-replan-llm-{index:02d}",
+                "task_name": task,
+            }
+        )
+    post_replan_batch_response = post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {"events": post_replan_events},
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": post_replan_stop_session,
+            "X-Episode-ID": post_replan_stop_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-post-replan-injected-llm-batch",
+            "X-Task-Name": task,
+        },
+    )
+    checks.extend(
+        [
+            check_equal("post-replan-stop-batch-event-ingest-count", post_replan_batch_response.get("count"), 4),
+            check_equal("post-replan-stop-batch-event-ingest-sinks", post_replan_batch_response.get("sinks"), 2),
+        ]
+    )
+
+    post_replan_state = fetch_episode_state(port, post_replan_stop_episode)
+    post_replan_payload = post_replan_state.get("state") or {}
+    checks.extend(
+        [
+            check_equal("post-replan-stop-replan-count", post_replan_payload.get("replan_count"), 1),
+            check_equal("post-replan-stop-last-replan", post_replan_payload.get("last_replan_event_id"), f"{post_replan_stop_episode}__llm-1"),
+            check_equal("post-replan-stop-llm-since-replan", post_replan_payload.get("llm_calls_since_replan"), 3),
+            check_equal("post-replan-stop-candidate-progress", post_replan_payload.get("candidate_progress_count"), 0),
+        ]
+    )
+
+    post_replan_stop_step = "episode-post-replan-no-progress-stop-route"
+    post_replan_status, post_replan_response = post_json_status(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Continue after bounded replan produced no progress."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": post_replan_stop_session,
+            "X-Episode-ID": post_replan_stop_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": post_replan_stop_step,
+            "X-Task-Name": task,
+        },
+    )
+    post_replan_trace = wait_for_agent_trace(port, post_replan_stop_session, post_replan_stop_step)
+    post_replan_reason = str(post_replan_trace.get("routing_reason") or "")
+    post_replan_error = post_replan_response.get("error") or {}
+    checks.extend(
+        [
+            check_equal("post-replan-stop-status", post_replan_status, 409),
+            check_equal("post-replan-stop-response-type", post_replan_error.get("type"), "gateway_replan_no_progress_stop_gate"),
+            check_equal("post-replan-stop-error-kind", post_replan_trace.get("error_kind"), "gateway_replan_no_progress_stop_gate"),
+            check_equal("post-replan-stop-budget-action", post_replan_trace.get("route_budget_action") or "", "stop_trial"),
+            check_contains(
+                "post-replan-stop-rule",
+                post_replan_reason,
+                "rule_id=episode_replan_no_progress_stop_gate",
+            ),
+            check_contains("post-replan-stop-last-replan", post_replan_reason, f"last_replan={post_replan_stop_episode}__llm-1"),
+            check_contains("post-replan-stop-llm-since", post_replan_reason, "llm_since_replan=3"),
+            check_contains("post-replan-stop-limit", post_replan_reason, "post_replan_no_progress_call_limit=3"),
         ]
     )
 

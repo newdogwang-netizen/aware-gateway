@@ -10,27 +10,33 @@ import (
 )
 
 const (
-	defaultRepeatedErrorThreshold      = 2
-	defaultPremiumCooldownAfter        = 2
-	defaultPremiumCooldownTurns        = 1
-	defaultCheapProbeBurstLimit        = 3
-	defaultStopCostUSD                 = 3.0
-	defaultStopAgentCallThreshold      = defaultEpisodeNoProgressAgentCallThreshold
-	defaultStopLengthPressureThreshold = 3
+	defaultRepeatedErrorThreshold        = 2
+	defaultPremiumCooldownAfter          = 2
+	defaultPremiumCooldownTurns          = 1
+	defaultCheapProbeBurstLimit          = 3
+	defaultStopCostUSD                   = 3.0
+	defaultStopAgentCallThreshold        = defaultEpisodeNoProgressAgentCallThreshold
+	defaultStopLengthPressureThreshold   = 3
+	defaultLongExplorationThreshold      = 12
+	defaultLongExplorationCallThreshold  = 12
+	defaultPostReplanNoProgressCallLimit = 3
 )
 
 // SafeControlConfig enables a local high-confidence routing layer before the
 // semantic decision model. It is intentionally conservative: unmatched requests
 // continue through the existing prompt-based smart-router.
 type SafeControlConfig struct {
-	Enabled                     bool    `yaml:"enabled" json:"enabled"`
-	RepeatedErrorThreshold      int     `yaml:"repeated_error_threshold" json:"repeated_error_threshold"`
-	PremiumCooldownAfter        int     `yaml:"premium_cooldown_after" json:"premium_cooldown_after"`
-	PremiumCooldownTurns        int     `yaml:"premium_cooldown_turns" json:"premium_cooldown_turns"`
-	CheapProbeBurstLimit        int     `yaml:"cheap_probe_burst_limit" json:"cheap_probe_burst_limit"`
-	StopCostUSD                 float64 `yaml:"stop_cost_usd" json:"stop_cost_usd"`
-	StopAgentCallThreshold      int     `yaml:"stop_agent_call_threshold" json:"stop_agent_call_threshold"`
-	StopLengthPressureThreshold int     `yaml:"stop_length_pressure_threshold" json:"stop_length_pressure_threshold"`
+	Enabled                       bool    `yaml:"enabled" json:"enabled"`
+	RepeatedErrorThreshold        int     `yaml:"repeated_error_threshold" json:"repeated_error_threshold"`
+	PremiumCooldownAfter          int     `yaml:"premium_cooldown_after" json:"premium_cooldown_after"`
+	PremiumCooldownTurns          int     `yaml:"premium_cooldown_turns" json:"premium_cooldown_turns"`
+	CheapProbeBurstLimit          int     `yaml:"cheap_probe_burst_limit" json:"cheap_probe_burst_limit"`
+	StopCostUSD                   float64 `yaml:"stop_cost_usd" json:"stop_cost_usd"`
+	StopAgentCallThreshold        int     `yaml:"stop_agent_call_threshold" json:"stop_agent_call_threshold"`
+	StopLengthPressureThreshold   int     `yaml:"stop_length_pressure_threshold" json:"stop_length_pressure_threshold"`
+	LongExplorationThreshold      int     `yaml:"long_exploration_threshold" json:"long_exploration_threshold"`
+	LongExplorationCallThreshold  int     `yaml:"long_exploration_call_threshold" json:"long_exploration_call_threshold"`
+	PostReplanNoProgressCallLimit int     `yaml:"post_replan_no_progress_call_limit" json:"post_replan_no_progress_call_limit"`
 }
 
 type safeControlState struct {
@@ -203,6 +209,19 @@ func (s *SmartRouter) episodeStopGateDecision(req *http.Request, cfg SafeControl
 		)
 	}
 
+	if shouldStopPostReplanNoProgress(snapshot, cfg) {
+		return s.localStopGateRoute(
+			req,
+			"episode_replan_no_progress_stop_gate",
+			"gateway_replan_no_progress_stop_gate",
+			"aware-gateway stop gate: bounded replan produced no effective progress",
+			0.96,
+			episodePostReplanStopEvidence(snapshot, cfg),
+			"bounded replan produced no effective progress",
+			"stop trial after bounded replan produced no progress",
+		)
+	}
+
 	if shouldStopCostWithoutVerifier(snapshot, cfg) {
 		return s.localStopGateRoute(
 			req,
@@ -247,10 +266,10 @@ func (s *SmartRouter) episodeStopGateDecision(req *http.Request, cfg SafeControl
 			req,
 			"episode_length_pressure_stop_gate",
 			"gateway_length_pressure_stop_gate",
-			"aware-gateway stop gate: repeated length pressure without file or test progress",
+			"aware-gateway stop gate: repeated length pressure without implementation, validation, delivery, or strong progress",
 			0.94,
 			episodeLengthPressureStopEvidence(snapshot, cfg),
-			"repeated length pressure without file or test progress",
+			"repeated length pressure without effective progress",
 			"stop trial after repeated length pressure without progress",
 		)
 	}
@@ -326,15 +345,73 @@ func shouldStopAgentCallNoProgress(snapshot EpisodeSnapshot, cfg SafeControlConf
 	return !episodeCloseToVerifier(snapshot)
 }
 
+func shouldReplanLongExploration(snapshot EpisodeSnapshot, cfg SafeControlConfig) bool {
+	if snapshot.ID == "" || episodeCloseToVerifier(snapshot) {
+		return false
+	}
+	if snapshot.LastReplanEventID != "" {
+		return false
+	}
+	explorationThreshold := cfg.LongExplorationThreshold
+	callThreshold := cfg.LongExplorationCallThreshold
+	return (explorationThreshold > 0 && snapshot.ExplorationSinceProgress >= explorationThreshold) ||
+		(callThreshold > 0 && snapshot.LLMCallsSinceProgress >= callThreshold)
+}
+
+func shouldStopPostReplanNoProgress(snapshot EpisodeSnapshot, cfg SafeControlConfig) bool {
+	limit := cfg.PostReplanNoProgressCallLimit
+	if limit <= 0 || snapshot.LastReplanEventID == "" || episodeCloseToVerifier(snapshot) {
+		return false
+	}
+	return snapshot.LLMCallsSinceReplan >= limit
+}
+
 func shouldStopLengthPressureWithoutProgress(snapshot EpisodeSnapshot, cfg SafeControlConfig) bool {
 	threshold := cfg.StopLengthPressureThreshold
 	if threshold <= 0 || snapshot.LengthPressureSinceProgress < threshold {
 		return false
 	}
-	if snapshot.FileWriteCount > 0 || snapshot.TestRunCount > 0 || snapshot.TestPassedCount > 0 || snapshot.TestFailedCount > 0 {
+	if snapshot.ImplementationProgressCount > 0 ||
+		snapshot.ValidationProgressCount > 0 ||
+		snapshot.DeliveryProgressCount > 0 ||
+		snapshot.StrongProgressCount > 0 {
 		return false
 	}
 	return !episodeCloseToVerifier(snapshot)
+}
+
+func episodeLongExplorationEvidence(snapshot EpisodeSnapshot, cfg SafeControlConfig) []string {
+	return []string{
+		fmt.Sprintf("episode_id=%s", snapshot.ID),
+		fmt.Sprintf("state_version=%d", snapshot.Version),
+		fmt.Sprintf("exploration_since_progress=%d", snapshot.ExplorationSinceProgress),
+		fmt.Sprintf("long_exploration_threshold=%d", cfg.LongExplorationThreshold),
+		fmt.Sprintf("llm_since_progress=%d", snapshot.LLMCallsSinceProgress),
+		fmt.Sprintf("long_exploration_call_threshold=%d", cfg.LongExplorationCallThreshold),
+		fmt.Sprintf("candidate_progress=%d", snapshot.CandidateProgressCount),
+		fmt.Sprintf("strong_progress=%d", snapshot.StrongProgressCount),
+		"no_progress=" + valueOrDefault(snapshot.NoProgressSeverity, "none"),
+		"last_budget=" + valueOrUnknown(snapshot.LastBudgetAction),
+		"last_route_outcome=" + routeOutcomeLabelForSnapshot(snapshot),
+		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
+	}
+}
+
+func episodePostReplanStopEvidence(snapshot EpisodeSnapshot, cfg SafeControlConfig) []string {
+	return []string{
+		fmt.Sprintf("episode_id=%s", snapshot.ID),
+		fmt.Sprintf("state_version=%d", snapshot.Version),
+		"last_replan=" + valueOrUnknown(snapshot.LastReplanEventID),
+		fmt.Sprintf("replan_count=%d", snapshot.ReplanCount),
+		fmt.Sprintf("llm_since_replan=%d", snapshot.LLMCallsSinceReplan),
+		fmt.Sprintf("post_replan_no_progress_call_limit=%d", cfg.PostReplanNoProgressCallLimit),
+		fmt.Sprintf("exploration_since_replan=%d", snapshot.ExplorationSinceReplan),
+		fmt.Sprintf("candidate_progress=%d", snapshot.CandidateProgressCount),
+		fmt.Sprintf("strong_progress=%d", snapshot.StrongProgressCount),
+		"last_budget=" + valueOrUnknown(snapshot.LastBudgetAction),
+		"last_route_outcome=" + routeOutcomeLabelForSnapshot(snapshot),
+		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
+	}
 }
 
 func latestLLMEvent(snapshot EpisodeSnapshot) (EpisodeEvent, bool) {
@@ -434,6 +511,10 @@ func episodeLengthPressureStopEvidence(snapshot EpisodeSnapshot, cfg SafeControl
 		fmt.Sprintf("length_streak=%d", snapshot.ConsecutiveLengthFinishes),
 		fmt.Sprintf("file_writes=%d", snapshot.FileWriteCount),
 		fmt.Sprintf("test_runs=%d", snapshot.TestRunCount),
+		fmt.Sprintf("implementation_progress=%d", snapshot.ImplementationProgressCount),
+		fmt.Sprintf("validation_progress=%d", snapshot.ValidationProgressCount),
+		fmt.Sprintf("delivery_progress=%d", snapshot.DeliveryProgressCount),
+		fmt.Sprintf("strong_progress=%d", snapshot.StrongProgressCount),
 		"last_budget=" + valueOrUnknown(snapshot.LastBudgetAction),
 		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
 	}
@@ -587,6 +668,21 @@ func (s *SmartRouter) episodeStateControlDecision(req *http.Request) (*plugin.Ro
 		}
 	}
 
+	if shouldReplanLongExploration(snapshot, controlCfg) {
+		return s.safeControlRoute(
+			req,
+			"episode_long_exploration_replan",
+			budgetActionFreezeOrReplan,
+			true,
+			0.92,
+			episodeLongExplorationEvidence(snapshot, controlCfg),
+			"recovery",
+			"forming",
+			"long exploration requires a bounded replan before more execution",
+			"long exploration; freeze budget and replan",
+		)
+	}
+
 	severity := valueOrDefault(snapshot.NoProgressSeverity, "none")
 	if severity != "stale" && severity != "blocked" {
 		return nil, nil, false
@@ -662,6 +758,15 @@ func (s *SmartRouter) safeControlConfig() SafeControlConfig {
 	}
 	if cfg.StopLengthPressureThreshold <= 0 {
 		cfg.StopLengthPressureThreshold = defaultStopLengthPressureThreshold
+	}
+	if cfg.LongExplorationThreshold <= 0 {
+		cfg.LongExplorationThreshold = defaultLongExplorationThreshold
+	}
+	if cfg.LongExplorationCallThreshold <= 0 {
+		cfg.LongExplorationCallThreshold = defaultLongExplorationCallThreshold
+	}
+	if cfg.PostReplanNoProgressCallLimit <= 0 {
+		cfg.PostReplanNoProgressCallLimit = defaultPostReplanNoProgressCallLimit
 	}
 	return cfg
 }

@@ -152,6 +152,9 @@ plugins:
       stop_cost_usd: 3.0
       stop_agent_call_threshold: 25
       stop_length_pressure_threshold: 3
+      long_exploration_threshold: 12
+      long_exploration_call_threshold: 12
+      post_replan_no_progress_call_limit: 3
     budgeted_route:
       enabled: true
       profiles:
@@ -167,6 +170,9 @@ plugins:
         premium_recover:
           max_tokens: 4096
           timeout_ms: 180000
+        freeze_or_replan:
+          max_tokens: 2048
+          timeout_ms: 60000
         completion_guardrail:
           max_tokens: 1024
           timeout_ms: 60000
@@ -259,8 +265,9 @@ prompt and handles only narrow cases:
 - Apply a short cheap-model cooldown after consecutive premium calls.
 - Stop locally for hard trial-stop signals: provider incomplete metadata,
   cost above threshold before verifier proximity, repeated length pressure
-  without implementation/validation/delivery progress, or a blocked episode whose previous premium
-  recovery route produced no observable progress.
+  without implementation, validation, delivery, or strong progress,
+  post-replan no-progress, or a blocked episode whose previous premium recovery
+  route produced no observable progress.
 - Send control back to the semantic router after too many consecutive cheap
   probes, so local rules cannot delay early direction-setting work forever.
 - Force task-completion confirmation through the strongest configured model.
@@ -279,7 +286,8 @@ The first Issue #1 follow-up turns routing output into an execution action, not
 only a model label. A `RoutingDecision` can now carry:
 
 - `budget_action`, such as `cheap_probe`, `cheap_execute`, `premium_reason`,
-  `premium_recover`, `completion_guardrail`, or the local-only `stop_trial`
+  `premium_recover`, `freeze_or_replan`, `completion_guardrail`, or the
+  local-only `stop_trial`
 - `max_tokens`, which rewrites the upstream chat request
 - `timeout_ms`, which can shorten the endpoint timeout for that routed call
 
@@ -491,6 +499,16 @@ A5 showed the boundary of this first loop: the episode feedback fired in a real
 Harbor run, but the trial was stopped before verification after cost and call
 count exceeded A4. That means `finish_reason=length` is useful as an output
 pressure signal, but it is not a progress signal.
+
+The next R1 checkpoint adds a two-step long-exploration control. If an episode
+has many exploration events or LLM calls without implementation, validation,
+delivery, or strong progress, the local controller emits
+`episode_long_exploration_replan` and routes one bounded Opus call with
+`budget_action=freeze_or_replan`. This is not a larger execution budget; it is
+a forced pause for a concrete pivot or abandon criterion. If the following
+calls still produce no effective progress, `episode_replan_no_progress_stop_gate`
+rejects the next call locally with
+`error_kind=gateway_replan_no_progress_stop_gate`.
 
 RSI R1 starts the next reducer offline. `scripts/extract_episode_outcomes.py`
 projects historical traces, patches, CTRF test output, and verifier results

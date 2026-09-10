@@ -2967,6 +2967,325 @@ func TestEpisodeAgentCallNoEffectiveProgressStopsTrial(t *testing.T) {
 	}
 }
 
+func TestEpisodeLongExplorationRoutesBoundedReplan(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.SafeControl.StopCostUSD = 100
+	router.cfg.SafeControl.StopAgentCallThreshold = 100
+	router.cfg.SafeControl.StopLengthPressureThreshold = 100
+	router.cfg.SafeControl.LongExplorationThreshold = 3
+	router.cfg.SafeControl.LongExplorationCallThreshold = 100
+	router.cfg.SafeControl.PostReplanNoProgressCallLimit = 2
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionFreezeOrReplan: {MaxTokens: 777, TimeoutMs: 888},
+		},
+	}
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	for i := 1; i <= 3; i++ {
+		if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+			EventID:   fmt.Sprintf("event-long-exploration-%d", i),
+			EpisodeID: "episode-long-exploration",
+			Timestamp: time.Now(),
+			Kind:      "tool_call",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"command": fmt.Sprintf("sed -n '%d,%dp' /app/data/input.txt", i, i),
+			},
+		}); err != nil {
+			t.Fatalf("RecordEpisodeEvent %d returned error: %v", i, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-long-exploration")
+	req.Header.Set("X-Session-ID", "episode-long-exploration")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue the investigation."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local long-exploration replan")
+	}
+	if decision == nil || decision.Skip || decision.Abort {
+		t.Fatalf("decision = %#v, want routed replan", decision)
+	}
+	if decision.Model != "anthropic/claude-opus-5" {
+		t.Fatalf("model = %q, want Opus bounded replan", decision.Model)
+	}
+	if decision.BudgetAction != budgetActionFreezeOrReplan {
+		t.Fatalf("budget action = %q, want %s", decision.BudgetAction, budgetActionFreezeOrReplan)
+	}
+	if decision.MaxTokens != 777 || decision.TimeoutMs != 888 {
+		t.Fatalf("budget = tokens %d timeout %d, want 777/888", decision.MaxTokens, decision.TimeoutMs)
+	}
+	for _, want := range []string{
+		"rule_id=episode_long_exploration_replan",
+		"action=freeze_or_replan",
+		"exploration_since_progress=3",
+		"long_exploration_threshold=3",
+		"candidate_progress=0",
+		"strong_progress=0",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+}
+
+func TestEpisodeLongExplorationReplansAfterEarlierProgress(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.SafeControl.StopCostUSD = 100
+	router.cfg.SafeControl.StopAgentCallThreshold = 100
+	router.cfg.SafeControl.StopLengthPressureThreshold = 100
+	router.cfg.SafeControl.LongExplorationThreshold = 3
+	router.cfg.SafeControl.LongExplorationCallThreshold = 100
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+
+	if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+		EventID:   "event-earlier-implementation-progress",
+		EpisodeID: "episode-long-exploration-after-progress",
+		Timestamp: time.Now(),
+		Kind:      "file_modified",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"path_count":       1,
+			"workspace_target": true,
+		},
+	}); err != nil {
+		t.Fatalf("RecordEpisodeEvent progress returned error: %v", err)
+	}
+
+	for i := 1; i <= 3; i++ {
+		if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+			EventID:   fmt.Sprintf("event-post-progress-exploration-%d", i),
+			EpisodeID: "episode-long-exploration-after-progress",
+			Timestamp: time.Now(),
+			Kind:      "tool_call",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"command": fmt.Sprintf("sed -n '%d,%dp' /app/data/input.txt", i, i),
+			},
+		}); err != nil {
+			t.Fatalf("RecordEpisodeEvent exploration %d returned error: %v", i, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-long-exploration-after-progress")
+	req.Header.Set("X-Session-ID", "episode-long-exploration-after-progress")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue the investigation after earlier progress."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local long-exploration replan")
+	}
+	if decision == nil || decision.Skip || decision.Abort {
+		t.Fatalf("decision = %#v, want routed replan", decision)
+	}
+	if decision.BudgetAction != budgetActionFreezeOrReplan {
+		t.Fatalf("budget action = %q, want %s", decision.BudgetAction, budgetActionFreezeOrReplan)
+	}
+	for _, want := range []string{
+		"rule_id=episode_long_exploration_replan",
+		"exploration_since_progress=3",
+		"candidate_progress=1",
+		"last_progress=file_modified",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+}
+
+func TestEpisodePostReplanNoProgressStopsTrial(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.SafeControl.StopCostUSD = 100
+	router.cfg.SafeControl.StopAgentCallThreshold = 100
+	router.cfg.SafeControl.StopLengthPressureThreshold = 100
+	router.cfg.SafeControl.LongExplorationThreshold = 100
+	router.cfg.SafeControl.LongExplorationCallThreshold = 100
+	router.cfg.SafeControl.PostReplanNoProgressCallLimit = 2
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+
+	for i, event := range []*plugin.EpisodeEvent{
+		{
+			EventID:   "event-replan-llm",
+			EpisodeID: "episode-replan-stop",
+			Timestamp: time.Now(),
+			Kind:      "llm_call",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":       "response_completed",
+				"budget_action": budgetActionFreezeOrReplan,
+				"model":         "anthropic/claude-opus-5",
+				"finish_reason": "stop",
+				"status":        200,
+				"total_tokens":  100,
+				"cost_usd":      0.01,
+			},
+		},
+		{
+			EventID:   "event-after-replan-llm-1",
+			EpisodeID: "episode-replan-stop",
+			Timestamp: time.Now(),
+			Kind:      "llm_call",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":       "response_completed",
+				"budget_action": budgetActionCheapProbe,
+				"model":         "z-ai/glm-5.3-flash",
+				"finish_reason": "stop",
+				"status":        200,
+				"total_tokens":  100,
+				"cost_usd":      0.01,
+			},
+		},
+		{
+			EventID:   "event-after-replan-tool",
+			EpisodeID: "episode-replan-stop",
+			Timestamp: time.Now(),
+			Kind:      "tool_call",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"command": "cat /app/data/input.txt",
+			},
+		},
+		{
+			EventID:   "event-after-replan-llm-2",
+			EpisodeID: "episode-replan-stop",
+			Timestamp: time.Now(),
+			Kind:      "llm_call",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":       "response_completed",
+				"budget_action": budgetActionCheapProbe,
+				"model":         "z-ai/glm-5.3-flash",
+				"finish_reason": "stop",
+				"status":        200,
+				"total_tokens":  100,
+				"cost_usd":      0.01,
+			},
+		},
+	} {
+		event.Sequence = i + 1
+		if err := router.RecordEpisodeEvent(event); err != nil {
+			t.Fatalf("RecordEpisodeEvent %d returned error: %v", i+1, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-replan-stop")
+	req.Header.Set("X-Session-ID", "episode-replan-stop")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue after the replan window."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local post-replan stop")
+	}
+	if decision == nil || !decision.Abort {
+		t.Fatalf("decision = %#v, want local abort", decision)
+	}
+	if decision.AbortKind != "gateway_replan_no_progress_stop_gate" {
+		t.Fatalf("abort kind = %q, want gateway_replan_no_progress_stop_gate", decision.AbortKind)
+	}
+	for _, want := range []string{
+		"rule_id=episode_replan_no_progress_stop_gate",
+		"last_replan=event-replan-llm",
+		"replan_count=1",
+		"llm_since_replan=2",
+		"post_replan_no_progress_call_limit=2",
+		"candidate_progress=0",
+		"strong_progress=0",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+}
+
+func TestEpisodeReplanWindowClearsAfterEffectiveProgress(t *testing.T) {
+	router := newTestSmartRouter("")
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	for _, event := range []*plugin.EpisodeEvent{
+		{
+			EventID:   "event-replan-before-progress",
+			EpisodeID: "episode-replan-progress",
+			Timestamp: time.Now(),
+			Kind:      "llm_call",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":       "response_completed",
+				"budget_action": budgetActionFreezeOrReplan,
+				"model":         "anthropic/claude-opus-5",
+				"finish_reason": "stop",
+				"status":        200,
+				"total_tokens":  100,
+			},
+		},
+		{
+			EventID:   "event-implementation-after-replan",
+			EpisodeID: "episode-replan-progress",
+			Timestamp: time.Now(),
+			Kind:      "file_modified",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"workspace_target": true,
+				"path_count":       1,
+			},
+		},
+	} {
+		if err := router.RecordEpisodeEvent(event); err != nil {
+			t.Fatalf("RecordEpisodeEvent %s returned error: %v", event.EventID, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-replan-progress")
+	snapshot := router.episodeSnapshot(req)
+	if snapshot.LastReplanEventID != "" {
+		t.Fatalf("last replan = %q, want cleared after progress", snapshot.LastReplanEventID)
+	}
+	if snapshot.LLMCallsSinceReplan != 0 || snapshot.ExplorationSinceReplan != 0 {
+		t.Fatalf("replan window = llm %d exploration %d, want cleared", snapshot.LLMCallsSinceReplan, snapshot.ExplorationSinceReplan)
+	}
+	if snapshot.CandidateProgressCount != 1 || snapshot.ImplementationProgressCount != 1 {
+		t.Fatalf("progress counts = candidate %d implementation %d, want 1/1", snapshot.CandidateProgressCount, snapshot.ImplementationProgressCount)
+	}
+	if shouldStopPostReplanNoProgress(snapshot, SafeControlConfig{PostReplanNoProgressCallLimit: 1}) {
+		t.Fatal("shouldStopPostReplanNoProgress returned true after effective progress")
+	}
+}
+
 func TestEpisodeProviderIncompleteStopsTrial(t *testing.T) {
 	decisionServerCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3736,6 +4055,9 @@ plugins:
       premium_cooldown_after: 4
       premium_cooldown_turns: 2
       cheap_probe_burst_limit: 5
+      long_exploration_threshold: 6
+      long_exploration_call_threshold: 7
+      post_replan_no_progress_call_limit: 8
     budgeted_route:
       enabled: true
       profiles:
@@ -3773,6 +4095,15 @@ plugins:
 	}
 	if smartCfg.SafeControl.CheapProbeBurstLimit != 5 {
 		t.Fatalf("cheap_probe_burst_limit = %d, want 5", smartCfg.SafeControl.CheapProbeBurstLimit)
+	}
+	if smartCfg.SafeControl.LongExplorationThreshold != 6 {
+		t.Fatalf("long_exploration_threshold = %d, want 6", smartCfg.SafeControl.LongExplorationThreshold)
+	}
+	if smartCfg.SafeControl.LongExplorationCallThreshold != 7 {
+		t.Fatalf("long_exploration_call_threshold = %d, want 7", smartCfg.SafeControl.LongExplorationCallThreshold)
+	}
+	if smartCfg.SafeControl.PostReplanNoProgressCallLimit != 8 {
+		t.Fatalf("post_replan_no_progress_call_limit = %d, want 8", smartCfg.SafeControl.PostReplanNoProgressCallLimit)
 	}
 	if !smartCfg.BudgetedRoute.Enabled {
 		t.Fatal("budgeted_route.enabled = false, want true")

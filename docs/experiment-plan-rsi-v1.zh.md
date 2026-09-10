@@ -45,7 +45,7 @@ replay screening 和重复 pilot acceptance 后，才允许进入 canary。
 - 最小 Episode 投影
 - `finish_reason=length` 动态预算反馈
 - `stale/blocked` no-progress 状态触发本地 recovery 路由
-- provider incomplete、成本超线、agent-call 无有效进展、length pressure 和 blocked recovery 的本地 stop gate
+- provider incomplete、成本超线、agent-call 无有效进展、length pressure、post-replan no-progress 和 blocked recovery 的本地 stop gate
 
 A5 说明了新的主要矛盾：
 
@@ -687,6 +687,70 @@ future_evidence_leakage = 0
 
 这条 canary 说明新分层没有把读/查/裸测试误判成交付推进；gateway 在没有 verifier、没有 implementation/validation/delivery progress 的情况下按成本 stop gate 截停。runner 收尾时曾因 Docker root 只剩 `19.6GB`、低于脚本 `20GB` 检查失败；已清 unused build cache，释放约 `19.37GB`，该失败不计为路由质量失败。
 
+#### 2026-09-10 long-exploration control checkpoint
+
+上一条 canary 的问题不是“模型慢”，而是策略允许 agent 在只有 exploration、没有有效进展的轨迹上一直花钱，直到 `$3` 成本 gate。修复方向是把“长时间探索”作为独立状态处理：
+
+- `episode_long_exploration_replan`：`exploration_since_progress >= 12` 或 `llm_calls_since_progress >= 12` 时，本地跳过 Judge，路由一次有界 Opus `freeze_or_replan`。
+- `freeze_or_replan` budget profile：`max_tokens=2048`、`timeout_ms=60000`；它不是继续扩大执行预算，而是要求产生明确 pivot 或 abandon 条件。
+- `episode_replan_no_progress_stop_gate`：replan 之后连续 `3` 次 LLM 调用仍没有 implementation/validation/delivery/strong progress，下一轮本地返回 `409`，分类为 `gateway_replan_no_progress_stop_gate`。
+- 回归约束：long-exploration replan 看的是 `exploration_since_progress` / `llm_calls_since_progress`，不是 episode 历史总 progress；早期有过一次实现进展，不应阻止后续再次卡住时 replan。
+
+验证结果：
+
+```text
+go test ./plugins/smartrouter                    passed
+python3 -m unittest tests.test_extract_episode_outcomes tests.test_replay_episode_decisions
+                                                   passed
+make test-short GO=/usr/local/go/bin/go          passed
+make test-scripts                                passed
+make build GO=/usr/local/go/bin/go              passed
+safe-control probe                               188/188
+```
+
+真实 `shadow-relay` canary：
+
+| artifact | failure_kind | reward | total cost | agent calls | decision calls | duration | progress tiers |
+|----------|--------------|--------|------------|-------------|----------------|----------|----------------|
+| `/mnt/data2/aware-gateway-runs/aware-v4-20260910T114644Z` | `gateway_replan_no_progress_stop_gate` | 0 | `$0.6032` | 9 | 3 | `172.8s` | exploration `20`, implementation `0`, validation `0`, delivery `0` |
+
+路由动作：
+
+```text
+cheap_probe:4
+cheap_execute:1
+freeze_or_replan:1
+premium_reason:1
+premium_recover:1
+stop_trial:1
+```
+
+离线抽取证据：
+
+```text
+episode events = 31
+candidate_progress_event_count = 0
+progress_event_count = 0
+length_finish_count = 2
+replan_count = 1
+future_evidence_leakage = 0
+```
+
+与上一条 progress-tier canary 对比：
+
+| version | stop reason | cost | agent calls | exploration | effective progress |
+|---------|-------------|------|-------------|-------------|--------------------|
+| progress-tier only | `gateway_cost_stop_gate` | `$3.2018` | 29 | 42 | 0 |
+| long-exploration control | `gateway_replan_no_progress_stop_gate` | `$0.6032` | 9 | 20 | 0 |
+
+结论：
+
+```text
+Long-exploration control accepted for cost containment.
+Quality not accepted: reward is still 0.
+Next issue is not another threshold tweak; it is making replan produce an executable hypothesis, then validating whether that hypothesis changes delivery outcome.
+```
+
 ### Step 5: 小规模 Harbor pilot
 
 只跑通过公开 leaderboard 或本地已知可解的任务。
@@ -752,19 +816,23 @@ future_evidence_leakage = 0
 
 ```text
 成本 > $3.00 且未接近 verifier: stop
-agent 调用 > 25 且没有 delivery/test/verifier 级有效进展: stop
-连续 3 次 length boost 后没有 file/test 进展: stop
+agent 调用 > 25 且没有 implementation/validation/delivery/strong 进展: stop
+连续 3 次 length boost 后没有 implementation/validation/delivery/strong 进展: stop
+长时间 exploration 或 LLM 调用无进展: freeze_or_replan
+replan 后 3 次 LLM 调用仍无进展: stop
 length_pressure + no_progress: freeze budget expansion
 premium_recover + no_progress: stop or replan gate
 provider incomplete: stop and classify separately
 ```
 
-当前 online runtime 已实现 5 条可执行 stop gate：
+当前 online runtime 已实现 7 条可执行控制/stop gate：
 
 - `provider_incomplete`：上一轮 provider 返回 2xx 但缺少 finish/tokens 元数据，下一轮本地停止并分类为 `gateway_provider_incomplete_stop_gate`。
 - `cost_without_verifier`：episode 成本超过 `stop_cost_usd`，但还没有 validation/verifier 近端证据，下一轮本地停止并分类为 `gateway_cost_stop_gate`。
-- `agent_call_no_effective_progress`：agent 调用超过 `stop_agent_call_threshold`，但没有 delivery/test/verifier 级有效进展，下一轮本地停止并分类为 `gateway_no_progress_stop_gate`。
-- `length_pressure_without_progress`：连续 length pressure 超过阈值，但还没有 file/test 进展，下一轮本地停止并分类为 `gateway_length_pressure_stop_gate`。
+- `agent_call_no_effective_progress`：agent 调用超过 `stop_agent_call_threshold`，但没有 implementation/validation/delivery/strong 进展，下一轮本地停止并分类为 `gateway_no_progress_stop_gate`。
+- `length_pressure_without_progress`：连续 length pressure 超过阈值，但还没有 implementation/validation/delivery/strong 进展，下一轮本地停止并分类为 `gateway_length_pressure_stop_gate`。
+- `long_exploration_replan`：长时间只有 exploration 或 LLM 调用但没有有效进展时，下一轮本地跳过 Judge，路由一次有界 Opus `freeze_or_replan`。
+- `post_replan_no_progress`：`freeze_or_replan` 之后仍连续多轮没有 implementation/validation/delivery/strong 进展时，下一轮本地停止并分类为 `gateway_replan_no_progress_stop_gate`。
 - `blocked_premium_recover_no_progress`：episode 已进入 `no_progress=blocked`，上一轮 route 是 `premium_recover`，且上一轮 route 仍处于 `pending` 或 `no_progress`，下一轮本地停止并分类为 `gateway_stop_gate`。
 
 这些本地停止都会返回 HTTP `409`，不会请求上游模型。对应 trace 记录
@@ -865,11 +933,12 @@ Implicit Pending Route Closure    done for pending route -> no_progress when nex
 Recent Route Outcome History      done for compact route -> outcome memory in state/prompt
 Next Minimum Capability Hint      done for state-derived router prompt guidance
 Capability Floor Enforcement      done for hard recovery and post-delivery validation assess floors, advisory otherwise
-Gateway Stop Gate                 done for provider_incomplete/cost/agent_call_no_progress/length_pressure/blocked_recovery local aborts
+Gateway Stop Gate                 done for provider_incomplete/cost/agent_call_no_progress/length_pressure/post_replan/blocked_recovery local aborts
 Gateway Stop Marker               done for V4 runner interrupt + analyzer failure_kind
 Online Episode State Query        done for GET /v1/episode-state
 State Backfill                    done for persisted traces/events -> online projection
-Deterministic Runtime Probe       done for event ingest -> state query -> recovery route -> 5 local stop gates and tiered progress
+Deterministic Runtime Probe       done for event ingest -> state query -> recovery route -> local stop gates, replan gate, and tiered progress
+Long-exploration Replan Control   done for freeze_or_replan and post-replan early stop
 ```
 
 RSI R1 完整结束后，aware-gateway 应达到：
@@ -887,7 +956,7 @@ Event-driven State Controller     partial for no-progress recovery
 Route-to-Outcome Feedback         partial for extractor/replay windows and compact online route history
 Next-step Capability Estimate     partial via deterministic state hint, not yet acceptance-tuned
 Capability Floor Control          partial; hard verifier/no-progress and post-delivery validation assess floors enforced, delivery floors now local
-Gateway Stop Gate                 partial; five local abort paths enforced, latest canaries stop no-effective-progress/cost before wall-clock cap
+Gateway Stop Gate                 partial; local abort/replan paths enforced, latest canaries stop no-effective-progress/cost before wall-clock cap
 Online State Inspection           done for current in-memory projection
 Restart State Rebuild             partial for audit trace/event backfill
 Runtime Probe Acceptance          done for deterministic local gateway/mocks

@@ -260,6 +260,7 @@ Decision principles:
 - Activity is not progress. Read progress_tier: exploration is only movement, implementation/delivery are candidate progress, validation counts only when tied to the current target, verifier success is strongest.
 - If no_progress is present and there is no newer progress event, avoid blind budget expansion. Choose freeze_or_replan or premium_recover only if the reason names a new strategy.
 - If state shows repeated length_truncated without progress, decide whether the bottleneck is output room or wrong direction. More tokens alone is not a plan.
+- If last_replan_event_id is present and llm_calls_since_replan is growing without implementation/delivery/validation progress, prefer stopping expansion or recovery only with a new concrete pivot.
 {variant_guidance}
 
 Episode summary:
@@ -415,6 +416,11 @@ def row_base(sample: dict[str, Any]) -> dict[str, Any]:
         "state_implementation_progress_event_count": state.get("implementation_progress_event_count", 0),
         "state_validation_progress_event_count": state.get("validation_progress_event_count", 0),
         "state_delivery_progress_event_count": state.get("delivery_progress_event_count", 0),
+        "state_exploration_since_progress": state.get("exploration_since_progress", 0),
+        "state_replan_count": state.get("replan_count", 0),
+        "state_last_replan_event_id": state.get("last_replan_event_id", ""),
+        "state_llm_calls_since_replan": state.get("llm_calls_since_replan", 0),
+        "state_exploration_since_replan": state.get("exploration_since_replan", 0),
         "state_no_progress_event_count": state.get("no_progress_event_count", 0),
         "state_events_since_progress": state.get("events_since_progress", 0),
         "state_llm_calls_since_progress": state.get("llm_calls_since_progress", 0),

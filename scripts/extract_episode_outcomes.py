@@ -1166,7 +1166,21 @@ def reduce_state(events: list[dict[str, Any]], rules: dict[str, Any]) -> dict[st
     ]
     last_progress_index = progress_indexes[-1] if progress_indexes else None
     events_since_progress = events[last_progress_index + 1 :] if last_progress_index is not None else events
+    replan_indexes = [
+        index
+        for index, event in enumerate(events)
+        if event.get("kind") == "llm_call"
+        and (event.get("observation") or {}).get("budget_action") == "freeze_or_replan"
+    ]
+    last_replan_index = replan_indexes[-1] if replan_indexes else None
+    if last_replan_index is not None and (last_progress_index is None or last_replan_index > last_progress_index):
+        events_since_replan = events[last_replan_index + 1 :]
+        last_replan_event_id = events[last_replan_index].get("event_id", "")
+    else:
+        events_since_replan = []
+        last_replan_event_id = ""
     llm_since_progress = [event for event in events_since_progress if event.get("kind") == "llm_call"]
+    llm_since_replan = [event for event in events_since_replan if event.get("kind") == "llm_call"]
     length_since_progress = [
         event
         for event in llm_since_progress
@@ -1188,6 +1202,15 @@ def reduce_state(events: list[dict[str, Any]], rules: dict[str, Any]) -> dict[st
         "implementation_progress_event_count": tier_counts["implementation"],
         "validation_progress_event_count": tier_counts["validation"],
         "delivery_progress_event_count": tier_counts["delivery"],
+        "exploration_since_progress": sum(
+            1 for event in events_since_progress if (event.get("observation") or {}).get("progress_tier") == "exploration"
+        ),
+        "replan_count": len(replan_indexes),
+        "last_replan_event_id": last_replan_event_id,
+        "llm_calls_since_replan": len(llm_since_replan),
+        "exploration_since_replan": sum(
+            1 for event in events_since_replan if (event.get("observation") or {}).get("progress_tier") == "exploration"
+        ),
         "no_progress_event_count": sum(1 for event in events if event.get("kind") == "no_progress"),
         "events_since_progress": len(events_since_progress),
         "llm_calls_since_progress": len(llm_since_progress),
@@ -1341,6 +1364,11 @@ def build_summary(
         "implementation_progress_event_count": tier_counts["implementation"],
         "validation_progress_event_count": tier_counts["validation"],
         "delivery_progress_event_count": tier_counts["delivery"],
+        "replan_count": sum(
+            1
+            for event in llm_events
+            if (event.get("observation") or {}).get("budget_action") == "freeze_or_replan"
+        ),
         "no_progress_turn_count": by_kind.get("no_progress", 0),
         "route_outcome_count": len(route_outcomes),
         "route_outcome_labels": dict(

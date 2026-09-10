@@ -120,6 +120,11 @@ type EpisodeState struct {
 	DeliveryProgressCount       int
 	CandidateProgressCount      int
 	StrongProgressCount         int
+	ExplorationSinceProgress    int
+	ReplanCount                 int
+	LLMCallsSinceReplan         int
+	ExplorationSinceReplan      int
+	LastReplanEventID           string
 	NoProgressEventCount        int
 	ActiveNoProgress            bool
 	EventsSinceProgress         int
@@ -193,6 +198,11 @@ type EpisodeSnapshot struct {
 	DeliveryProgressCount       int
 	CandidateProgressCount      int
 	StrongProgressCount         int
+	ExplorationSinceProgress    int
+	ReplanCount                 int
+	LLMCallsSinceReplan         int
+	ExplorationSinceReplan      int
+	LastReplanEventID           string
 	NoProgressEventCount        int
 	ActiveNoProgress            bool
 	EventsSinceProgress         int
@@ -1099,6 +1109,14 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 		}
 		state.LLMCallsSinceProgress++
 		beginRouteOutcomeWindow(state, event)
+		if event.BudgetAction == budgetActionFreezeOrReplan {
+			state.ReplanCount++
+			state.LastReplanEventID = event.ID
+			state.LLMCallsSinceReplan = 0
+			state.ExplorationSinceReplan = 0
+		} else if state.LastReplanEventID != "" {
+			state.LLMCallsSinceReplan++
+		}
 	case "tool_call":
 		state.ToolCallCount++
 	case "file_written", "file_modified":
@@ -1165,6 +1183,10 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 
 	if explorationEvent {
 		state.ExplorationEventCount++
+		state.ExplorationSinceProgress++
+		if state.LastReplanEventID != "" {
+			state.ExplorationSinceReplan++
+		}
 	}
 	if implementationProgress {
 		state.ImplementationProgressCount++
@@ -1186,6 +1208,10 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 		state.EventsSinceProgress = 0
 		state.LLMCallsSinceProgress = 0
 		state.LengthPressureSinceProgress = 0
+		state.ExplorationSinceProgress = 0
+		state.LastReplanEventID = ""
+		state.LLMCallsSinceReplan = 0
+		state.ExplorationSinceReplan = 0
 		state.ConsecutiveLengthFinishes = 0
 		state.ActiveNoProgress = false
 		if clearsFailureFrontier(event) {
@@ -1255,6 +1281,11 @@ func snapshotFromEpisodeState(state *EpisodeState) EpisodeSnapshot {
 		DeliveryProgressCount:       state.DeliveryProgressCount,
 		CandidateProgressCount:      state.CandidateProgressCount,
 		StrongProgressCount:         state.StrongProgressCount,
+		ExplorationSinceProgress:    state.ExplorationSinceProgress,
+		ReplanCount:                 state.ReplanCount,
+		LLMCallsSinceReplan:         state.LLMCallsSinceReplan,
+		ExplorationSinceReplan:      state.ExplorationSinceReplan,
+		LastReplanEventID:           state.LastReplanEventID,
 		NoProgressEventCount:        state.NoProgressEventCount,
 		ActiveNoProgress:            state.ActiveNoProgress,
 		EventsSinceProgress:         state.EventsSinceProgress,
@@ -1311,7 +1342,7 @@ func (s *SmartRouter) renderEpisodeSnapshot(snapshot EpisodeSnapshot) string {
 			valueOrUnknown(snapshot.LastFinishReason),
 		),
 		fmt.Sprintf(
-			"progress tools=%d file_writes=%d test_runs=%d test_passed=%d test_failed=%d exploration=%d implementation=%d validation=%d delivery=%d candidate=%d strong=%d no_progress_events=%d active_no_progress=%t no_progress=%s events_since_progress=%d llm_since_progress=%d length_since_progress=%d last_progress=%s verifier_reward=%.3f",
+			"progress tools=%d file_writes=%d test_runs=%d test_passed=%d test_failed=%d exploration=%d implementation=%d validation=%d delivery=%d candidate=%d strong=%d exploration_since_progress=%d no_progress_events=%d active_no_progress=%t no_progress=%s events_since_progress=%d llm_since_progress=%d length_since_progress=%d last_progress=%s verifier_reward=%.3f",
 			snapshot.ToolCallCount,
 			snapshot.FileWriteCount,
 			snapshot.TestRunCount,
@@ -1323,6 +1354,7 @@ func (s *SmartRouter) renderEpisodeSnapshot(snapshot EpisodeSnapshot) string {
 			snapshot.DeliveryProgressCount,
 			snapshot.CandidateProgressCount,
 			snapshot.StrongProgressCount,
+			snapshot.ExplorationSinceProgress,
 			snapshot.NoProgressEventCount,
 			snapshot.ActiveNoProgress,
 			valueOrDefault(snapshot.NoProgressSeverity, "none"),
@@ -1350,10 +1382,14 @@ func (s *SmartRouter) renderEpisodeSnapshot(snapshot EpisodeSnapshot) string {
 			snapshot.RouteOutcomeNegativeCount,
 		),
 		fmt.Sprintf(
-			"next_capability min=%s budget_hint=%s reason=%s",
+			"next_capability min=%s budget_hint=%s reason=%s replan_count=%d llm_since_replan=%d exploration_since_replan=%d last_replan=%s",
 			valueOrDefault(snapshot.NextMinCapability, nextMinCapabilityUnknown),
 			valueOrUnknown(snapshot.NextBudgetActionHint),
 			valueOrUnknown(snapshot.NextCapabilityReason),
+			snapshot.ReplanCount,
+			snapshot.LLMCallsSinceReplan,
+			snapshot.ExplorationSinceReplan,
+			valueOrUnknown(snapshot.LastReplanEventID),
 		),
 		fmt.Sprintf(
 			"failure_frontier size=%d same_failure_count=%d last_failure=%s",
@@ -1450,6 +1486,11 @@ func episodeStatePayload(snapshot EpisodeSnapshot) map[string]any {
 		"delivery_progress_count":        snapshot.DeliveryProgressCount,
 		"candidate_progress_count":       snapshot.CandidateProgressCount,
 		"strong_progress_count":          snapshot.StrongProgressCount,
+		"exploration_since_progress":     snapshot.ExplorationSinceProgress,
+		"replan_count":                   snapshot.ReplanCount,
+		"llm_calls_since_replan":         snapshot.LLMCallsSinceReplan,
+		"exploration_since_replan":       snapshot.ExplorationSinceReplan,
+		"last_replan_event_id":           snapshot.LastReplanEventID,
 		"no_progress_event_count":        snapshot.NoProgressEventCount,
 		"active_no_progress":             snapshot.ActiveNoProgress,
 		"events_since_progress":          snapshot.EventsSinceProgress,

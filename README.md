@@ -307,7 +307,7 @@ plugins:
     fallback_model: anthropic/claude-opus-5
     fallback_pool: openrouter
     decision_history_turns: 5
-    decision_history_context_chars: 900
+    decision_history_context_chars: 220
     safe_control:
       enabled: true
       repeated_error_threshold: 2
@@ -317,6 +317,9 @@ plugins:
       stop_cost_usd: 3.0
       stop_agent_call_threshold: 25
       stop_length_pressure_threshold: 3
+      long_exploration_threshold: 12
+      long_exploration_call_threshold: 12
+      post_replan_no_progress_call_limit: 3
     budgeted_route:
       enabled: true
       profiles:
@@ -332,6 +335,9 @@ plugins:
         premium_recover:
           max_tokens: 4096
           timeout_ms: 180000
+        freeze_or_replan:
+          max_tokens: 2048
+          timeout_ms: 60000
         completion_guardrail:
           max_tokens: 1024
           timeout_ms: 60000
@@ -367,10 +373,14 @@ model; it inserts a short cheap cooldown after consecutive premium calls; and
 it returns to the prompt router after too many consecutive cheap probes. It can
 also stop locally before another upstream call when provider metadata is
 incomplete, cost has crossed the trial gate before verifier proximity, length
-pressure repeats without implementation/validation/delivery progress, too many agent calls happen
-without delivery/test/verifier-grade progress, or a blocked episode has already
-spent a premium recovery turn without observable progress. These stops are
-audited with `route_budget_action=stop_trial` and a specific `error_kind`.
+pressure repeats without implementation/validation/delivery/strong progress,
+too many agent calls happen without effective progress, a bounded replan has
+not produced effective progress, or a blocked episode has already spent a
+premium recovery turn without observable progress. Long exploration without
+effective progress first triggers a bounded Opus `freeze_or_replan` action;
+if the following calls still fail to produce implementation, validation,
+delivery, or strong progress, the next call is rejected locally. These stops
+are audited with `route_budget_action=stop_trial` and a specific `error_kind`.
 Requests outside those rules continue through the prompt-based smart-router.
 With `budgeted_route.enabled`, the router also attaches a route action profile
 to each decision. The gateway rewrites `max_tokens`, shortens the upstream

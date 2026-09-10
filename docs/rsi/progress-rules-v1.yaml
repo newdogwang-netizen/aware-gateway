@@ -14,13 +14,21 @@ outcome_normalization:
     rule: no deterministic outcome can be assigned
 
 progress:
+  tiers:
+    exploration: activity-only observations that do not prove task movement
+    implementation: workspace-target file changes
+    delivery: output-target file changes
+    validation: tests that check the current workspace/output target
+    strong: verifier success or fully passing final test events
   observed_progress_events:
     - test_passed
     - verifier_result
   candidate_progress_events:
-    - file_written
-    - file_modified
-    - test_run_passed
+    - file_written_workspace_target
+    - file_written_delivery_target
+    - file_modified_workspace_target
+    - file_modified_delivery_target
+    - test_run_passed_current_target
   derived_progress_conditions:
     - failure_set_reduced
     - previously_failing_test_passed
@@ -29,6 +37,7 @@ progress:
   non_progress_activity:
     - file_read
     - search
+    - bare_baseline_test_passed
     - repeated_test_execution
     - token_generation
     - response_completed
@@ -38,6 +47,9 @@ no_progress:
   length_pressure_without_progress_threshold: 3
   repeated_failure_without_frontier_reduction_threshold: 2
   agent_call_threshold_without_progress: 50
+  long_exploration_threshold: 12
+  long_exploration_call_threshold: 12
+  post_replan_no_progress_call_limit: 3
   emit_once_until_next_progress: true
   p2_windowed_interpretation:
     none: recent window has no active length/error pressure
