@@ -95,6 +95,8 @@ class EvaluateRSIPolicyGateTest(unittest.TestCase):
             self.assertEqual(payload["candidate"]["cost_per_success"], 6.0)
             self.assertEqual(payload["deltas"]["cost_per_success"], -4.0)
             self.assertEqual(payload["matched_tasks"], ["session-window-debug", "shadow-relay"])
+            self.assertEqual(len(payload["input_summaries"]["baseline"]), 2)
+            self.assertTrue(payload["input_summaries"]["candidate"][0]["summary_path"].endswith("episode-summary.json"))
 
     def test_rejects_matched_reward_regression(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

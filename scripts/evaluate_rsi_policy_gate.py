@@ -76,6 +76,10 @@ def main() -> None:
             "candidate_summaries": len(candidate),
             "candidate_replays": len(candidate_replays),
         },
+        "input_summaries": {
+            "baseline": summarize_inputs(baseline),
+            "candidate": summarize_inputs(candidate),
+        },
         "matched_tasks": matched_tasks,
         "unmatched_baseline_tasks": sorted(set(baseline_by_task) - set(candidate_by_task)),
         "unmatched_candidate_tasks": sorted(set(candidate_by_task) - set(baseline_by_task)),
@@ -183,6 +187,25 @@ def task_key(summary: dict[str, Any]) -> str:
         if value:
             return value
     return str(summary.get("_summary_path") or "unknown")
+
+
+def summarize_inputs(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out = []
+    for summary in sorted(summaries, key=lambda item: (task_key(item), str(item.get("trial_name") or ""))):
+        out.append(
+            {
+                "task": task_key(summary),
+                "episode_id": summary.get("episode_id") or "",
+                "trial_name": summary.get("trial_name") or "",
+                "reward": summary.get("reward"),
+                "total_cost_usd": summary.get("total_cost_usd"),
+                "agent_call_count": summary.get("agent_call_count"),
+                "decision_call_count": summary.get("decision_call_count"),
+                "future_evidence_leakage": summary.get("future_evidence_leakage"),
+                "summary_path": summary.get("_summary_path") or "",
+            }
+        )
+    return out
 
 
 def flatten_groups(groups: dict[str, list[dict[str, Any]]], tasks: list[str]) -> list[dict[str, Any]]:
