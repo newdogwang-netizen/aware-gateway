@@ -89,6 +89,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gate-output", type=Path)
     parser.add_argument("--min-tasks", type=int, default=0)
     parser.add_argument("--runs-per-task", type=int, default=0)
+    parser.add_argument("--success-threshold", type=float, default=1.0)
     return parser.parse_args()
 
 
@@ -269,6 +270,7 @@ def maybe_run_gate(args: argparse.Namespace, output_dir: Path, rows: list[dict[s
         cmd.extend(["--min-tasks", str(args.min_tasks)])
     if args.runs_per_task > 0:
         cmd.extend(["--runs-per-task", str(args.runs_per_task)])
+    cmd.extend(["--success-threshold", str(args.success_threshold)])
 
     completed = subprocess.run(
         cmd,

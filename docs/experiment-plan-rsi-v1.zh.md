@@ -684,6 +684,8 @@ test_passed -> completion_readiness -> premium_assess -> completion_guardrail
 - `docs/rsi/candidate-manifest.template.json`
 - `router-replay-rsi-p1.json`
 - `router-replay-rsi-p2.json`
+- `rsi-p2-screening-summary.json`
+- `rsi-p2-screening-summary.csv`
 - `rsi-pilot-summary.csv`
 - `docs/smart-router-rsi-report.html`
 
@@ -779,7 +781,7 @@ Runtime Probe Acceptance          done for deterministic local gateway/mocks
 C2 No-progress Budget Freeze      implemented; needs matched Harbor pilot acceptance
 C3 Repeated-failure Recovery      implemented; needs matched Harbor pilot acceptance
 Delivery Feedback                 partial via completion readiness, stale-proof invalidation, and guardrail evidence
-Outcome-aware Screening Pilot     not started for P2
+Outcome-aware Screening Pilot     harness done for P2; needs matched Harbor pilot data
 Outcome-aware Acceptance          gate implemented; still needs at least 3 runs per accepted task class
 Budget Policy Effectiveness       accepted or explicitly rejected
 Automatic Tool Event Capture      partial via Harbor artifact watcher; native hook not started

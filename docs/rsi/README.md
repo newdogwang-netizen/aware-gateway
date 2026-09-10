@@ -251,6 +251,25 @@ manifest, and an optional policy-gate JSON. `episode-summary.total_cost_usd`
 includes both agent call cost and decision-model cost; the split is preserved
 as `agent_cost_usd` and `decision_cost_usd`.
 
+For a P2 screening pass that wraps artifact extraction, matched policy gating,
+and a compact decision summary:
+
+```bash
+python3 scripts/run_rsi_p2_screening.py \
+  --artifact-dir /path/to/aware-v4-run \
+  --baseline-strategy all-premium \
+  --candidate-strategy smart-router \
+  --candidate-replay /path/to/router-replay-rsi-p2.json \
+  --manifest docs/rsi/candidate-manifest.template.json
+```
+
+This writes `rsi-p2-screening-summary.json` and
+`rsi-p2-screening-summary.csv`. An `accept` from the policy gate is recorded as
+`repeat_for_acceptance`: it means the candidate is good enough for repeated
+matched pilot runs, not ready for production.
+The wrapper runs strict artifact checks by default; pass `--no-strict` only for
+exploratory inspection of incomplete artifact directories.
+
 ## Boundary
 
 `finish_reason=stop` is normalized to `response_completed`, which means one model response ended normally. It is not treated as benchmark task completion.
