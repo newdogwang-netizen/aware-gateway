@@ -319,6 +319,10 @@ The first reducer tracks only stable control signals:
 - online route outcome: the latest LLM route opens a pending outcome window,
   and later posted file, test, verifier, no-progress, or exception events are
   attributed back to that route until the next LLM route starts.
+- next minimum capability: a deterministic hint derived from the current
+  outcome state, such as `cheap_execute` after target changes,
+  `premium_recover` after current validation failure, or `premium_assess` after
+  validation/verifier success.
 - the latest N projected events
 
 The next prompt receives this compact episode state. The budget layer also uses
@@ -355,6 +359,12 @@ starts as `pending`; posted events after it update `last_route_outcome_label`,
 therefore sees whether the previous route produced only output, changed files,
 passed tests, failed validation, or reached verifier success. This is a compact
 online counterpart to the offline extractor's richer route-outcome windows.
+On top of that state, the reducer derives `next_min_capability`,
+`next_budget_action_hint`, and `next_capability_reason`. This does not replace
+the semantic router; it gives the router a concrete lower bound for the next
+turn, for example: validate changed files cheaply, recover with premium after
+current failure evidence, or ask premium to assess the hidden-oracle gap after
+local validation succeeds.
 
 Online runners can post the same event shape used by RSI replay:
 

@@ -523,6 +523,9 @@ func TestTaskCompletionGuardrailIncludesEpisodeReadinessEvidence(t *testing.T) {
 		"test_failed=0",
 		"verifier_reward=1.000",
 		"last_progress=verifier_result",
+		"next_min_capability=premium_assess",
+		"next_budget_action_hint=premium_reason",
+		"next_capability_reason=verifier_passed_current_delivery",
 	} {
 		if !strings.Contains(decision.Reason, want) {
 			t.Fatalf("reason = %q, want %q", decision.Reason, want)
@@ -630,6 +633,9 @@ func TestEpisodeCompletionReadinessRegressesAfterTargetWrite(t *testing.T) {
 		"delivery_file_writes=2",
 		"verifier_reward=0.000",
 		"last_progress=file_modified",
+		"next_min_capability=cheap_execute",
+		"next_budget_action_hint=cheap_execute",
+		"next_capability_reason=target_changed_needs_validation",
 	} {
 		if !strings.Contains(decision.Reason, want) {
 			t.Fatalf("reason = %q, want %q", decision.Reason, want)
@@ -774,6 +780,7 @@ func TestRouteFeedsEpisodeStateIntoNextPrompt(t *testing.T) {
 		"length_streak=1",
 		"recent_length=1",
 		"route_outcome trace=trace-episode-prompt-1 label=pending",
+		"next_capability min=cheap_probe budget_hint=cheap_probe reason=watching_output_pressure",
 		"outcome=length_truncated",
 		"finish_reason=length",
 	} {
@@ -1023,6 +1030,108 @@ func TestEpisodeLinksPostedOutcomesToPreviousRoute(t *testing.T) {
 	}
 	if got := state["route_outcome_event_count"]; got != 3 {
 		t.Fatalf("total route outcome events = %#v, want total preserved", got)
+	}
+}
+
+func TestEpisodeDerivesNextMinimumCapabilityFromOutcomeState(t *testing.T) {
+	router := newTestSmartRouter("http://127.0.0.1:1")
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 8}
+	episodeID := "episode-next-capability"
+
+	recordEvent := func(event *plugin.EpisodeEvent) map[string]any {
+		t.Helper()
+		if err := router.RecordEpisodeEvent(event); err != nil {
+			t.Fatalf("RecordEpisodeEvent %s returned error: %v", event.EventID, err)
+		}
+		states, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: episodeID})
+		if err != nil {
+			t.Fatalf("QueryEpisodeStates returned error: %v", err)
+		}
+		if len(states) != 1 {
+			t.Fatalf("states = %d, want 1", len(states))
+		}
+		return states[0].State
+	}
+
+	state := recordEvent(&plugin.EpisodeEvent{
+		EventID:   "event-target-write",
+		EpisodeID: episodeID,
+		Timestamp: time.Now(),
+		Kind:      "file_written",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"workspace_target": true,
+			"path_count":       1,
+		},
+	})
+	if got := state["next_min_capability"]; got != nextMinCapabilityCheapExecute {
+		t.Fatalf("next min capability = %#v, want cheap_execute", got)
+	}
+	if got := state["next_budget_action_hint"]; got != budgetActionCheapExecute {
+		t.Fatalf("next budget action = %#v, want cheap_execute", got)
+	}
+	if got := state["next_capability_reason"]; got != "target_changed_needs_validation" {
+		t.Fatalf("next reason = %#v, want target_changed_needs_validation", got)
+	}
+
+	state = recordEvent(&plugin.EpisodeEvent{
+		EventID:   "event-test-passed",
+		EpisodeID: episodeID,
+		Timestamp: time.Now(),
+		Kind:      "test_run",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"outcome":      "passed",
+			"failed_count": 0,
+		},
+	})
+	if got := state["next_min_capability"]; got != nextMinCapabilityPremiumAssess {
+		t.Fatalf("next min capability = %#v, want premium_assess", got)
+	}
+	if got := state["next_budget_action_hint"]; got != budgetActionPremiumReason {
+		t.Fatalf("next budget action = %#v, want premium_reason", got)
+	}
+	if got := state["next_capability_reason"]; got != "validation_passed_assess_hidden_gap" {
+		t.Fatalf("next reason = %#v, want validation_passed_assess_hidden_gap", got)
+	}
+
+	state = recordEvent(&plugin.EpisodeEvent{
+		EventID:   "event-test-failed",
+		EpisodeID: episodeID,
+		Timestamp: time.Now(),
+		Kind:      "test_run",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"outcome":             "failed",
+			"failed_count":        1,
+			"failure_fingerprint": "assert next capability",
+		},
+	})
+	if got := state["next_min_capability"]; got != nextMinCapabilityPremiumRecover {
+		t.Fatalf("next min capability = %#v, want premium_recover", got)
+	}
+	if got := state["next_budget_action_hint"]; got != budgetActionPremiumRecover {
+		t.Fatalf("next budget action = %#v, want premium_recover", got)
+	}
+	if got := state["next_capability_reason"]; got != "validation_failed_current_delivery" {
+		t.Fatalf("next reason = %#v, want validation_failed_current_delivery", got)
+	}
+
+	state = recordEvent(&plugin.EpisodeEvent{
+		EventID:   "event-verifier-failed",
+		EpisodeID: episodeID,
+		Timestamp: time.Now(),
+		Kind:      "verifier_result",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"reward": 0,
+		},
+	})
+	if got := state["next_min_capability"]; got != nextMinCapabilityPremiumRecover {
+		t.Fatalf("next min capability = %#v, want premium_recover", got)
+	}
+	if got := state["next_capability_reason"]; got != "verifier_failed_current_delivery" {
+		t.Fatalf("next reason = %#v, want verifier_failed_current_delivery", got)
 	}
 }
 

@@ -45,6 +45,13 @@ const (
 	routeOutcomeNoProgress       = "no_progress"
 	routeOutcomeRunException     = "run_exception"
 	routeOutcomeNone             = "none"
+
+	nextMinCapabilityUnknown        = "unknown"
+	nextMinCapabilityCheapProbe     = "cheap_probe"
+	nextMinCapabilityCheapExecute   = "cheap_execute"
+	nextMinCapabilityPremiumReason  = "premium_reason"
+	nextMinCapabilityPremiumRecover = "premium_recover"
+	nextMinCapabilityPremiumAssess  = "premium_assess"
 )
 
 // EpisodeConfig enables a small in-memory event projection for one task line.
@@ -113,6 +120,9 @@ type EpisodeState struct {
 	RouteOutcomeEventCount      int
 	RouteOutcomeProgressCount   int
 	RouteOutcomeNegativeCount   int
+	NextMinCapability           string
+	NextCapabilityReason        string
+	NextBudgetActionHint        string
 	LastFailureFingerprint      string
 	SameFailureFingerprintCount int
 	FailureFrontierSize         int
@@ -173,6 +183,9 @@ type EpisodeSnapshot struct {
 	RouteOutcomeEventCount      int
 	RouteOutcomeProgressCount   int
 	RouteOutcomeNegativeCount   int
+	NextMinCapability           string
+	NextCapabilityReason        string
+	NextBudgetActionHint        string
 	LastFailureFingerprint      string
 	SameFailureFingerprintCount int
 	FailureFrontierSize         int
@@ -748,6 +761,100 @@ func routeOutcomeLabelForSnapshot(snapshot EpisodeSnapshot) string {
 	return valueOrDefault(snapshot.LastRouteOutcomeLabel, routeOutcomePending)
 }
 
+func refreshNextCapability(state *EpisodeState) {
+	if state == nil {
+		return
+	}
+	capability, reason, budgetAction := deriveNextCapability(state)
+	state.NextMinCapability = capability
+	state.NextCapabilityReason = reason
+	state.NextBudgetActionHint = budgetAction
+}
+
+func deriveNextCapability(state *EpisodeState) (string, string, string) {
+	if state == nil || state.Version == 0 {
+		return nextMinCapabilityUnknown, "empty_episode_state", ""
+	}
+
+	severity := valueOrDefault(state.NoProgressSeverity, "none")
+	if severity == "blocked" || severity == "stale" || state.ActiveNoProgress {
+		return nextMinCapabilityPremiumRecover,
+			"episode_no_progress_" + severity,
+			budgetActionPremiumRecover
+	}
+	if state.LastFailureFingerprint != "" && state.SameFailureFingerprintCount >= defaultRepeatedErrorThreshold {
+		return nextMinCapabilityPremiumRecover,
+			"repeated_test_failure_frontier",
+			budgetActionPremiumRecover
+	}
+
+	readiness := valueOrDefault(state.CompletionReadiness, completionReadinessNone)
+	switch readiness {
+	case completionReadinessVerifierFailed:
+		return nextMinCapabilityPremiumRecover,
+			"verifier_failed_current_delivery",
+			budgetActionPremiumRecover
+	case completionReadinessValidationFailed:
+		return nextMinCapabilityPremiumRecover,
+			"validation_failed_current_delivery",
+			budgetActionPremiumRecover
+	case completionReadinessVerifierPassed:
+		return nextMinCapabilityPremiumAssess,
+			"verifier_passed_current_delivery",
+			budgetActionPremiumReason
+	case completionReadinessValidationPassed:
+		return nextMinCapabilityPremiumAssess,
+			"validation_passed_assess_hidden_gap",
+			budgetActionPremiumReason
+	case completionReadinessDeliveryCandidate:
+		return nextMinCapabilityCheapExecute,
+			"target_changed_needs_validation",
+			budgetActionCheapExecute
+	}
+
+	switch routeOutcomeLabelForState(state) {
+	case routeOutcomeVerifierFailed, routeOutcomeRunException, routeOutcomeNoProgress:
+		return nextMinCapabilityPremiumRecover,
+			"last_route_outcome_negative",
+			budgetActionPremiumRecover
+	case routeOutcomeTestFailed:
+		return nextMinCapabilityPremiumRecover,
+			"last_route_validation_failed",
+			budgetActionPremiumRecover
+	case routeOutcomeVerifierPassed:
+		return nextMinCapabilityPremiumAssess,
+			"last_route_verifier_passed",
+			budgetActionPremiumReason
+	case routeOutcomeTestPassed:
+		return nextMinCapabilityPremiumAssess,
+			"last_route_validation_passed",
+			budgetActionPremiumReason
+	case routeOutcomeDeliveryChanged, routeOutcomeWorkspaceChanged:
+		return nextMinCapabilityCheapExecute,
+			"last_route_changed_files_needs_validation",
+			budgetActionCheapExecute
+	}
+
+	if severity == "watch" {
+		return nextMinCapabilityCheapProbe,
+			"watching_output_pressure",
+			budgetActionCheapProbe
+	}
+	return nextMinCapabilityCheapProbe,
+		"no_blocking_outcome",
+		budgetActionCheapProbe
+}
+
+func routeOutcomeLabelForState(state *EpisodeState) string {
+	if state == nil {
+		return routeOutcomeNone
+	}
+	if state.LastRouteTraceID == "" && state.LastRouteOutcomeLabel == "" {
+		return routeOutcomeNone
+	}
+	return valueOrDefault(state.LastRouteOutcomeLabel, routeOutcomePending)
+}
+
 func projectUniqueEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeConfig) bool {
 	if event.ID != "" {
 		if state.SeenEventIDs == nil {
@@ -864,6 +971,7 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 	}
 	state.RecentLengthFinishes = countLengthFinishes(state.RecentEvents)
 	state.NoProgressSeverity = noProgressSeverity(state, cfg)
+	refreshNextCapability(state)
 }
 
 func (s *SmartRouter) episodeSnapshot(req *http.Request) EpisodeSnapshot {
@@ -928,6 +1036,9 @@ func snapshotFromEpisodeState(state *EpisodeState) EpisodeSnapshot {
 		RouteOutcomeEventCount:      state.RouteOutcomeEventCount,
 		RouteOutcomeProgressCount:   state.RouteOutcomeProgressCount,
 		RouteOutcomeNegativeCount:   state.RouteOutcomeNegativeCount,
+		NextMinCapability:           state.NextMinCapability,
+		NextCapabilityReason:        state.NextCapabilityReason,
+		NextBudgetActionHint:        state.NextBudgetActionHint,
 		LastFailureFingerprint:      state.LastFailureFingerprint,
 		SameFailureFingerprintCount: state.SameFailureFingerprintCount,
 		FailureFrontierSize:         state.FailureFrontierSize,
@@ -991,6 +1102,12 @@ func (s *SmartRouter) renderEpisodeSnapshot(snapshot EpisodeSnapshot) string {
 			snapshot.RouteOutcomeEventCount,
 			snapshot.RouteOutcomeProgressCount,
 			snapshot.RouteOutcomeNegativeCount,
+		),
+		fmt.Sprintf(
+			"next_capability min=%s budget_hint=%s reason=%s",
+			valueOrDefault(snapshot.NextMinCapability, nextMinCapabilityUnknown),
+			valueOrUnknown(snapshot.NextBudgetActionHint),
+			valueOrUnknown(snapshot.NextCapabilityReason),
 		),
 		fmt.Sprintf(
 			"failure_frontier size=%d same_failure_count=%d last_failure=%s",
@@ -1088,6 +1205,9 @@ func episodeStatePayload(snapshot EpisodeSnapshot) map[string]any {
 		"route_outcome_event_count":      snapshot.RouteOutcomeEventCount,
 		"route_outcome_progress_count":   snapshot.RouteOutcomeProgressCount,
 		"route_outcome_negative_count":   snapshot.RouteOutcomeNegativeCount,
+		"next_min_capability":            valueOrDefault(snapshot.NextMinCapability, nextMinCapabilityUnknown),
+		"next_capability_reason":         snapshot.NextCapabilityReason,
+		"next_budget_action_hint":        snapshot.NextBudgetActionHint,
 		"last_failure_fingerprint":       snapshot.LastFailureFingerprint,
 		"same_failure_fingerprint_count": snapshot.SameFailureFingerprintCount,
 		"failure_frontier_size":          snapshot.FailureFrontierSize,

@@ -115,7 +115,7 @@ recovery loop, and that completion guardrail traces include delivery,
 validation, verifier readiness evidence, and stale-verifier invalidation when
 target files change after verification. It also checks the online route-outcome
 window that links a posted validation event back to the previous routed agent
-call.
+call and exposes the derived next minimum capability for the following turn.
 
 ### Writing a Custom Plugin
 

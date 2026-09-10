@@ -695,6 +695,13 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
             check_equal("route-outcome-total-event-count", route_outcome_payload.get("route_outcome_event_count"), 1),
             check_equal("route-outcome-progress-count", route_outcome_payload.get("route_outcome_progress_count"), 1),
             check_equal("route-outcome-negative-count", route_outcome_payload.get("route_outcome_negative_count"), 0),
+            check_equal("next-capability-after-route-outcome", route_outcome_payload.get("next_min_capability"), "premium_assess"),
+            check_equal("next-budget-after-route-outcome", route_outcome_payload.get("next_budget_action_hint"), "premium_reason"),
+            check_equal(
+                "next-capability-reason-after-route-outcome",
+                route_outcome_payload.get("next_capability_reason"),
+                "validation_passed_assess_hidden_gap",
+            ),
         ]
     )
 
@@ -895,6 +902,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
             check_equal("completion-delivery-writes", completion_payload.get("delivery_file_write_count"), 1),
             check_equal("completion-test-passed-count", completion_payload.get("test_passed_count"), 1),
             check_equal("completion-verifier-reward", completion_payload.get("verifier_reward"), 1),
+            check_equal("completion-next-capability", completion_payload.get("next_min_capability"), "premium_assess"),
+            check_equal("completion-next-budget", completion_payload.get("next_budget_action_hint"), "premium_reason"),
         ]
     )
 
@@ -943,6 +952,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
             check_contains("completion-route-tests", completion_reason, "test_passed=1"),
             check_contains("completion-route-verifier", completion_reason, "verifier_reward=1.000"),
             check_contains("completion-route-last-progress", completion_reason, "last_progress=verifier_result"),
+            check_contains("completion-route-next-capability", completion_reason, "next_min_capability=premium_assess"),
+            check_contains("completion-route-next-budget", completion_reason, "next_budget_action_hint=premium_reason"),
         ]
     )
 
@@ -1028,6 +1039,12 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
                 2,
             ),
             check_equal("completion-regress-verifier-reward", completion_regress_payload.get("verifier_reward"), 0),
+            check_equal("completion-regress-next-capability", completion_regress_payload.get("next_min_capability"), "cheap_execute"),
+            check_equal(
+                "completion-regress-next-capability-reason",
+                completion_regress_payload.get("next_capability_reason"),
+                "target_changed_needs_validation",
+            ),
         ]
     )
 
@@ -1079,6 +1096,16 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
                 "completion-regress-route-last-progress",
                 completion_regress_reason,
                 "last_progress=file_modified",
+            ),
+            check_contains(
+                "completion-regress-route-next-capability",
+                completion_regress_reason,
+                "next_min_capability=cheap_execute",
+            ),
+            check_contains(
+                "completion-regress-route-next-budget",
+                completion_regress_reason,
+                "next_budget_action_hint=cheap_execute",
             ),
         ]
     )

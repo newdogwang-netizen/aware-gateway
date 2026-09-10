@@ -1168,6 +1168,9 @@ func (s *SmartRouter) completionGuardrailReason(req *http.Request) string {
 		fmt.Sprintf("test_failed=%d", snapshot.TestFailedCount),
 		fmt.Sprintf("verifier_reward=%.3f", snapshot.VerifierReward),
 		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
+		"next_min_capability=" + valueOrDefault(snapshot.NextMinCapability, nextMinCapabilityUnknown),
+		"next_budget_action_hint=" + valueOrUnknown(snapshot.NextBudgetActionHint),
+		"next_capability_reason=" + valueOrUnknown(snapshot.NextCapabilityReason),
 	}
 	return fmt.Sprintf("%s evidence=%s", base, strings.Join(evidence, "; "))
 }

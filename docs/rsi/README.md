@@ -121,6 +121,8 @@ changes the target file after verifier success and verifies that readiness falls
 back to `delivery_candidate` instead of reusing stale proof.
 The probe also posts validation after a routed recovery call and checks that
 the online route-outcome window links that event to the previous LLM route.
+The same state now exposes a deterministic next minimum capability hint used by
+the next router prompt.
 
 For local runners, `scripts/run_episode_command.py` wraps a command and posts
 the detected events automatically:
