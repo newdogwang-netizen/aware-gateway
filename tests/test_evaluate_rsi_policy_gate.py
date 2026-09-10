@@ -120,6 +120,28 @@ class EvaluateRSIPolicyGateTest(unittest.TestCase):
             self.assertIn("reward_below_matched_baseline", payload["gate"]["triggered_rollbacks"])
             self.assertIn("task_reward_regression:shadow-relay", payload["gate"]["triggered_rollbacks"])
 
+    def test_accepts_quality_breakthrough_when_baseline_has_no_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write_summary(root, "baseline", "shadow-relay", 1, 0.0, 10.0)
+            self.write_summary(root, "candidate", "shadow-relay", 1, 1.0, 6.0)
+
+            payload = self.run_gate(
+                root / "baseline",
+                root / "candidate",
+                root / "gate.json",
+                "--min-tasks",
+                "1",
+                "--runs-per-task",
+                "1",
+            )
+
+            self.assertEqual(payload["gate"]["status"], "accept")
+            self.assertIn(
+                "quality_breakthrough_attempt_cost_not_higher",
+                payload["gate"]["acceptance_reasons"],
+            )
+
     def test_needs_more_data_when_matched_task_count_is_low(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

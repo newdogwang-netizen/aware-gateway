@@ -212,6 +212,23 @@ lower than the matched baseline. If the matched task or run count is below the
 manifest gate, it keeps the result as `needs_more_data` unless a rollback
 condition has already fired.
 
+To build those summaries from an existing V4 Harbor artifact directory:
+
+```bash
+python3 scripts/build_rsi_pilot_artifacts.py \
+  --artifact-dir /path/to/aware-v4-run \
+  --strategy all-premium,smart-router \
+  --baseline-strategy all-premium \
+  --candidate-strategy smart-router \
+  --strict
+```
+
+This writes `rsi-episode-artifacts/`, including per-trial
+`episode-events.jsonl`, `episode-summary.json`, `replay-cutoff-check.json`, a
+manifest, and an optional policy-gate JSON. `episode-summary.total_cost_usd`
+includes both agent call cost and decision-model cost; the split is preserved
+as `agent_cost_usd` and `decision_cost_usd`.
+
 ## Boundary
 
 `finish_reason=stop` is normalized to `response_completed`, which means one model response ended normally. It is not treated as benchmark task completion.

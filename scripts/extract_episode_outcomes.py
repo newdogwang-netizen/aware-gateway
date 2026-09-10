@@ -1102,7 +1102,8 @@ def build_summary(
         ),
         None,
     )
-    total_cost = sum(as_float((event.get("observation") or {}).get("cost_usd")) for event in llm_events)
+    agent_cost = sum(as_float((event.get("observation") or {}).get("cost_usd")) for event in llm_events)
+    decision_cost = sum(as_float(trace.get("cost")) for trace in traces if is_decision_trace(trace))
     agent_call_count = len(llm_events)
     length_count = outcomes.get("length_truncated", 0)
     route_outcomes = cutoff_check.get("route_outcomes") or []
@@ -1139,7 +1140,9 @@ def build_summary(
                 ).items()
             )
         ),
-        "total_cost_usd": round(total_cost, 8),
+        "agent_cost_usd": round(agent_cost, 8),
+        "decision_cost_usd": round(decision_cost, 8),
+        "total_cost_usd": round(agent_cost + decision_cost, 8),
         "length_finish_count": length_count,
         "length_finish_rate": round(length_count / agent_call_count, 4) if agent_call_count else 0,
         "episode_adjust_call_count": sum(

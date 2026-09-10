@@ -326,6 +326,7 @@ def evaluate_gate(
 ) -> dict[str, Any]:
     triggered: list[str] = []
     warnings: list[str] = []
+    acceptance_reasons: list[str] = []
 
     if not matched_tasks:
         triggered.append("no_matched_tasks")
@@ -370,6 +371,10 @@ def evaluate_gate(
         status = "needs_more_data"
     elif candidate.get("success_count", 0) >= baseline.get("success_count", 0) and cost_per_success_improved(baseline, candidate):
         status = "accept"
+        acceptance_reasons.append("matched_quality_lower_cost_per_success")
+    elif quality_breakthrough_with_bounded_cost(baseline, candidate):
+        status = "accept"
+        acceptance_reasons.append("quality_breakthrough_attempt_cost_not_higher")
     else:
         status = "needs_more_data"
         warnings.append("candidate_did_not_meet_acceptance_margin")
@@ -379,6 +384,7 @@ def evaluate_gate(
         "sufficient_data": sufficient_data,
         "triggered_rollbacks": dedupe(triggered),
         "warnings": dedupe(warnings),
+        "acceptance_reasons": dedupe(acceptance_reasons),
         "minimum_tasks_met": enough_tasks,
         "runs_per_task_met": enough_runs,
         "success_threshold": success_threshold,
@@ -393,6 +399,20 @@ def cost_per_success_improved(baseline: dict[str, Any], candidate: dict[str, Any
     return as_float(cand) < as_float(base)
 
 
+def quality_breakthrough_with_bounded_cost(baseline: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    if as_int(baseline.get("success_count")) > 0:
+        return False
+    if as_int(candidate.get("success_count")) <= 0:
+        return False
+    if as_float(candidate.get("avg_reward")) <= as_float(baseline.get("avg_reward")):
+        return False
+    base_attempt = baseline.get("cost_per_attempt")
+    cand_attempt = candidate.get("cost_per_attempt")
+    if base_attempt is None or cand_attempt is None:
+        return False
+    return as_float(cand_attempt) <= as_float(base_attempt)
+
+
 def decision_text(gate: dict[str, Any], baseline: dict[str, Any], candidate: dict[str, Any]) -> str:
     status = gate["status"]
     parts = [
@@ -400,6 +420,8 @@ def decision_text(gate: dict[str, Any], baseline: dict[str, Any], candidate: dic
         f"Baseline reward={baseline['avg_reward']} success={baseline['success_count']}/{baseline['run_count']} cost_per_success={baseline['cost_per_success']}",
         f"Candidate reward={candidate['avg_reward']} success={candidate['success_count']}/{candidate['run_count']} cost_per_success={candidate['cost_per_success']}",
     ]
+    if gate.get("acceptance_reasons"):
+        parts.append("Accepted: " + ", ".join(gate["acceptance_reasons"]))
     if gate["triggered_rollbacks"]:
         parts.append("Triggered: " + ", ".join(gate["triggered_rollbacks"]))
     if gate["warnings"]:

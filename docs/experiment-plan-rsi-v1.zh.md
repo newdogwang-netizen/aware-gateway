@@ -112,6 +112,7 @@ Episode 反馈链路能工作，
 ```text
 cost_per_attempt = total_cost_of_all_runs / run_count
 cost_per_success = total_cost_of_all_runs / successful_run_count
+episode_summary.total_cost_usd = agent_cost_usd + decision_cost_usd
 ```
 
 失败、手动停止和 provider failure 已经产生的成本都必须进入总成本。Provider 故障可以单独分层解释，
@@ -729,6 +730,7 @@ Real-history Smoke                done on A4/A5 shadow-relay
 P1 Outcome-aware Replay           done, replay-only
 P2 Windowed-progress Replay       done, candidate for next small pilot
 Policy Acceptance Gate            done for matched summary/replay evaluation
+V4 Pilot Artifact Builder         done for job/traces -> episode summaries -> policy gate
 Online Episode ID                 done for explicit X-Episode-ID fallback to session/trial
 Online Episode Resolver           done for header/body operation plus minimal interrupt/resume stack
 Online State Version Audit        done for state-before/state-after trace fields
