@@ -304,20 +304,31 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 				"model", cached.Model,
 				"reason", cached.Reason,
 			)
-			s.appendDecisionHistory(req, cached.Model, &DecisionResponse{
+			selectedPool := cached.Pool
+			selectedModel := cached.Model
+			budgetAction := s.inferBudgetAction(cached.Model, nil)
+			routingReason := "cached: " + cached.Reason
+			selectedPool, selectedModel, budgetAction, routingReason = s.applyCapabilityFloor(
+				episodeSnapshot,
+				selectedPool,
+				selectedModel,
+				budgetAction,
+				routingReason,
+			)
+			s.appendDecisionHistory(req, selectedModel, &DecisionResponse{
 				TurnType:       "cached",
 				Recoverability: "easy",
-				BudgetAction:   s.inferBudgetAction(cached.Model, nil),
+				BudgetAction:   budgetAction,
 				ContextSummary: "cached route for repeated context",
-				Reason:         cached.Reason,
+				Reason:         routingReason,
 			})
-			s.recordSafeControlOutcome(req, cached.Model)
+			s.recordSafeControlOutcome(req, selectedModel)
 			routing := &plugin.RoutingDecision{
-				Pool:   cached.Pool,
-				Model:  cached.Model,
-				Reason: "cached: " + cached.Reason,
+				Pool:   selectedPool,
+				Model:  selectedModel,
+				Reason: routingReason,
 			}
-			s.applyRouteBudget(req, routing, s.inferBudgetAction(cached.Model, nil))
+			s.applyRouteBudget(req, routing, budgetAction)
 			s.attachEpisodeMetadata(req, routing, resolution.Operation)
 			return routing, nil
 		}
@@ -377,9 +388,17 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 		return fallback, nil
 	}
 
-	routingReason := decision.RoutingReason()
 	budgetAction := s.inferBudgetAction(selectedModel, decision)
 	decision.BudgetAction = budgetAction
+	pool, selectedModel, budgetAction, decision.Reason = s.applyCapabilityFloor(
+		episodeSnapshot,
+		pool,
+		selectedModel,
+		budgetAction,
+		decision.Reason,
+	)
+	decision.BudgetAction = budgetAction
+	routingReason := decision.RoutingReason()
 
 	// Cache the decision (skip if disabled)
 	if s.cache != nil && s.cfg.CacheTTLSeconds >= 0 {
@@ -728,6 +747,102 @@ func (s *SmartRouter) fallbackDecision(req *http.Request, reason string) *plugin
 	s.applyRouteBudget(req, decision, budgetActionPremiumRecover)
 	s.attachEpisodeMetadata(req, decision, "continue")
 	return decision
+}
+
+func (s *SmartRouter) applyCapabilityFloor(snapshot EpisodeSnapshot, pool, selectedModel, budgetAction, reason string) (string, string, string, string) {
+	if snapshot.ID == "" {
+		return pool, selectedModel, budgetAction, reason
+	}
+
+	expected := valueOrDefault(snapshot.NextMinCapability, nextMinCapabilityUnknown)
+	if expected == nextMinCapabilityUnknown {
+		return pool, selectedModel, budgetAction, reason
+	}
+	observed := s.routeCapability(selectedModel, budgetAction)
+	if capabilityRank(observed) >= capabilityRank(expected) {
+		return pool, selectedModel, budgetAction, reason
+	}
+
+	status := "advisory"
+	if expected == nextMinCapabilityPremiumRecover && shouldForceCapabilityFloor(snapshot.NextCapabilityReason) {
+		if strongest, ok := s.strongestConfiguredModel(); ok {
+			pool = strongest.Pool
+			selectedModel = strongest.Name
+			budgetAction = budgetActionPremiumRecover
+			status = "forced"
+		} else {
+			status = "unmet"
+		}
+	}
+
+	annotation := fmt.Sprintf(
+		"capability_floor status=%s expected=%s observed=%s reason=%s",
+		status,
+		expected,
+		observed,
+		valueOrUnknown(snapshot.NextCapabilityReason),
+	)
+	if status == "forced" {
+		annotation += fmt.Sprintf(
+			" forced_model=%s forced_budget_action=%s",
+			selectedModel,
+			budgetAction,
+		)
+	}
+	if reason == "" {
+		reason = annotation
+	} else {
+		reason += " " + annotation
+	}
+	return pool, selectedModel, budgetAction, reason
+}
+
+func (s *SmartRouter) routeCapability(selectedModel, budgetAction string) string {
+	action, ok := normalizeBudgetAction(budgetAction)
+	if ok {
+		switch action {
+		case budgetActionPremiumRecover:
+			return nextMinCapabilityPremiumRecover
+		case budgetActionPremiumReason, budgetActionCompletionGuardrail:
+			return nextMinCapabilityPremiumAssess
+		case budgetActionCheapExecute:
+			if s.isStrongestConfiguredModel(selectedModel) {
+				return nextMinCapabilityPremiumAssess
+			}
+			return nextMinCapabilityCheapExecute
+		case budgetActionCheapProbe:
+			if s.isStrongestConfiguredModel(selectedModel) {
+				return nextMinCapabilityPremiumAssess
+			}
+			return nextMinCapabilityCheapProbe
+		}
+	}
+	if s.isStrongestConfiguredModel(selectedModel) {
+		return nextMinCapabilityPremiumAssess
+	}
+	return nextMinCapabilityCheapProbe
+}
+
+func capabilityRank(capability string) int {
+	switch capability {
+	case nextMinCapabilityPremiumRecover:
+		return 4
+	case nextMinCapabilityPremiumAssess, nextMinCapabilityPremiumReason:
+		return 3
+	case nextMinCapabilityCheapExecute:
+		return 2
+	case nextMinCapabilityCheapProbe:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func shouldForceCapabilityFloor(reason string) bool {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	return strings.HasPrefix(reason, "episode_no_progress_") ||
+		reason == "verifier_failed_current_delivery" ||
+		reason == "last_route_outcome_negative"
 }
 
 // discoverFromPools builds the model menu from pool endpoints.

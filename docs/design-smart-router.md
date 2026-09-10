@@ -365,6 +365,14 @@ the semantic router; it gives the router a concrete lower bound for the next
 turn, for example: validate changed files cheaply, recover with premium after
 current failure evidence, or ask premium to assess the hidden-oracle gap after
 local validation succeeds.
+After the semantic decision model returns, smart-router audits that lower bound
+as a capability floor. If the floor is advisory, such as `premium_assess` after
+local validation passes, the selected route is left unchanged and the mismatch
+is written into `routing_reason`. If the floor is a hard recovery signal, such
+as a failed verifier on the current delivery, a cheaper semantic decision is
+forced up to the strongest configured model with `premium_recover`. This keeps
+stateful correction narrow and visible in trace instead of broadening the local
+keyword rule layer.
 
 Online runners can post the same event shape used by RSI replay:
 

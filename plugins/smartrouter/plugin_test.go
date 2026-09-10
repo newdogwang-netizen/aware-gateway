@@ -1135,6 +1135,140 @@ func TestEpisodeDerivesNextMinimumCapabilityFromOutcomeState(t *testing.T) {
 	}
 }
 
+func TestCapabilityFloorForcesPremiumRecoverAfterVerifierFailure(t *testing.T) {
+	decisionServerCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"message": {"content": "{\"model\":\"z-ai/glm-5.3-flash\",\"turn_type\":\"mechanical_probe\",\"hypothesis_state\":\"stable\",\"critical_path\":false,\"recoverability\":\"easy\",\"budget_action\":\"cheap_probe\",\"context_summary\":\"inspect failure cheaply\",\"reason\":\"cheap check\"}"}}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+		}`)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	router.cfg.CacheTTLSeconds = -1
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionPremiumRecover: {MaxTokens: 4096, TimeoutMs: 180000},
+		},
+	}
+	if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+		EventID:   "event-verifier-failed-floor",
+		EpisodeID: "episode-capability-floor",
+		Timestamp: time.Now(),
+		Kind:      "verifier_result",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"reward": 0,
+		},
+	}); err != nil {
+		t.Fatalf("RecordEpisodeEvent returned error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-capability-floor")
+	req.Header.Set("X-Session-ID", "episode-capability-floor")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue after the verifier result."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalls != 1 {
+		t.Fatalf("decision server calls = %d, want 1", decisionServerCalls)
+	}
+	if decision.Model != "anthropic/claude-opus-5" {
+		t.Fatalf("model = %q, want forced Opus", decision.Model)
+	}
+	if decision.BudgetAction != budgetActionPremiumRecover {
+		t.Fatalf("budget action = %q, want premium_recover", decision.BudgetAction)
+	}
+	for _, want := range []string{
+		"capability_floor status=forced",
+		"expected=premium_recover",
+		"observed=cheap_probe",
+		"reason=verifier_failed_current_delivery",
+		"forced_model=anthropic/claude-opus-5",
+		"forced_budget_action=premium_recover",
+		"route_max_tokens=4096",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+}
+
+func TestCapabilityFloorAuditsPremiumAssessWithoutForcing(t *testing.T) {
+	decisionServerCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"message": {"content": "{\"model\":\"z-ai/glm-5.3-flash\",\"turn_type\":\"validation\",\"hypothesis_state\":\"stable\",\"critical_path\":false,\"recoverability\":\"easy\",\"budget_action\":\"cheap_execute\",\"context_summary\":\"run another bounded check\",\"reason\":\"cheap validation\"}"}}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+		}`)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	router.cfg.CacheTTLSeconds = -1
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionCheapExecute: {MaxTokens: 1536, TimeoutMs: 60000},
+		},
+	}
+	if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+		EventID:   "event-validation-passed-floor",
+		EpisodeID: "episode-premium-assess-advisory",
+		Timestamp: time.Now(),
+		Kind:      "test_run",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"outcome":      "passed",
+			"failed_count": 0,
+		},
+	}); err != nil {
+		t.Fatalf("RecordEpisodeEvent returned error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-premium-assess-advisory")
+	req.Header.Set("X-Session-ID", "episode-premium-assess-advisory")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Run one more already defined validation check."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalls != 1 {
+		t.Fatalf("decision server calls = %d, want 1", decisionServerCalls)
+	}
+	if decision.Model != "z-ai/glm-5.3-flash" {
+		t.Fatalf("model = %q, want advisory to keep cheap model", decision.Model)
+	}
+	if decision.BudgetAction != budgetActionCheapExecute {
+		t.Fatalf("budget action = %q, want cheap_execute", decision.BudgetAction)
+	}
+	for _, want := range []string{
+		"capability_floor status=advisory",
+		"expected=premium_assess",
+		"observed=cheap_execute",
+		"reason=validation_passed_assess_hidden_gap",
+		"route_max_tokens=1536",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+	if strings.Contains(decision.Reason, "forced_model=") {
+		t.Fatalf("reason = %q, want no forced capability floor", decision.Reason)
+	}
+}
+
 func TestEpisodeResolverInterruptsAndResumesTaskLines(t *testing.T) {
 	var prompts []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1970,6 +2104,15 @@ func TestEpisodeRepeatedTestFailureRoutesPremiumRecoveryOnce(t *testing.T) {
 	}
 	if strings.Contains(second.Reason, "rule_id=episode_repeated_failure_recovery") {
 		t.Fatalf("second reason = %q, want no repeated local recovery for same fingerprint", second.Reason)
+	}
+	for _, want := range []string{
+		"capability_floor status=advisory",
+		"expected=premium_recover",
+		"reason=repeated_test_failure_frontier",
+	} {
+		if !strings.Contains(second.Reason, want) {
+			t.Fatalf("second reason = %q, want %q", second.Reason, want)
+		}
 	}
 }
 

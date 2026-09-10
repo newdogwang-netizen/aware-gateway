@@ -122,7 +122,8 @@ back to `delivery_candidate` instead of reusing stale proof.
 The probe also posts validation after a routed recovery call and checks that
 the online route-outcome window links that event to the previous LLM route.
 The same state now exposes a deterministic next minimum capability hint used by
-the next router prompt.
+the next router prompt, and hard recovery floors can override an underpowered
+semantic decision when the verifier has already failed the current delivery.
 
 For local runners, `scripts/run_episode_command.py` wraps a command and posts
 the detected events automatically:

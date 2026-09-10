@@ -508,6 +508,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     completion_session = f"{trial}__completion_ready_agent"
     completion_regress_episode = f"{trial}__completion_regress"
     completion_regress_session = f"{trial}__completion_regress_agent"
+    capability_floor_episode = f"{trial}__capability_floor"
+    capability_floor_session = f"{trial}__capability_floor_agent"
     task = "phase2-safe-control-probe"
     checks: list[dict[str, Any]] = []
 
@@ -1110,6 +1112,97 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         ]
     )
 
+    capability_floor_event_id = f"{capability_floor_episode}__verifier-failed"
+    post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {
+            "event_id": capability_floor_event_id,
+            "episode_id": capability_floor_episode,
+            "episode_operation": "continue",
+            "sequence": 1,
+            "kind": "verifier_result",
+            "source": "safe-control-probe",
+            "observation": {
+                "reward": 0,
+            },
+            "evidence_refs": [f"probe:event:{capability_floor_event_id}"],
+            "session_id": capability_floor_session,
+            "trial_name": trial,
+            "step_name": "episode-capability-floor-verifier-failed",
+            "task_name": task,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": capability_floor_session,
+            "X-Episode-ID": capability_floor_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-capability-floor-verifier-failed",
+            "X-Task-Name": task,
+        },
+    )
+    capability_floor_state = fetch_episode_state(port, capability_floor_episode)
+    capability_floor_payload = capability_floor_state.get("state") or {}
+    checks.extend(
+        [
+            check_equal("capability-floor-state-version", capability_floor_state.get("state_version"), 1),
+            check_equal("capability-floor-next-capability", capability_floor_payload.get("next_min_capability"), "premium_recover"),
+            check_equal(
+                "capability-floor-next-reason",
+                capability_floor_payload.get("next_capability_reason"),
+                "verifier_failed_current_delivery",
+            ),
+        ]
+    )
+
+    capability_floor_step = "episode-capability-floor-route"
+    capability_floor_response = post_json(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Continue after the failed verifier result."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": capability_floor_session,
+            "X-Episode-ID": capability_floor_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": capability_floor_step,
+            "X-Task-Name": task,
+        },
+    )
+    capability_floor_traces = fetch_json(f"http://127.0.0.1:{port}/v1/traces?session_id={capability_floor_session}&limit=1000")
+    capability_floor_trace = latest_agent_trace(capability_floor_traces.get("traces", []), capability_floor_step)
+    capability_floor_reason = str(capability_floor_trace.get("routing_reason") or "")
+    checks.extend(
+        [
+            check_equal("capability-floor-route-source", classify_source(capability_floor_reason), "decision-model"),
+            check_equal(
+                "capability-floor-route-model",
+                capability_floor_trace.get("routed_model") or capability_floor_response.get("model") or "",
+                PREMIUM_MODEL,
+            ),
+            check_equal(
+                "capability-floor-route-budget-action",
+                capability_floor_trace.get("route_budget_action") or "",
+                "premium_recover",
+            ),
+            check_contains("capability-floor-route-status", capability_floor_reason, "capability_floor status=forced"),
+            check_contains("capability-floor-route-expected", capability_floor_reason, "expected=premium_recover"),
+            check_contains("capability-floor-route-observed", capability_floor_reason, "observed=cheap_execute"),
+            check_contains(
+                "capability-floor-route-reason",
+                capability_floor_reason,
+                "reason=verifier_failed_current_delivery",
+            ),
+            check_contains("capability-floor-route-forced-model", capability_floor_reason, f"forced_model={PREMIUM_MODEL}"),
+        ]
+    )
+
     return {
         "name": "episode-runtime-state-controller",
         "episode_id": episode,
@@ -1120,6 +1213,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         "completion_session_id": completion_session,
         "completion_regress_episode_id": completion_regress_episode,
         "completion_regress_session_id": completion_regress_session,
+        "capability_floor_episode_id": capability_floor_episode,
+        "capability_floor_session_id": capability_floor_session,
         "checks": checks,
         "state_before_route": state_before,
         "state_after_duplicate": state_after_duplicate,
@@ -1133,6 +1228,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         "completion_route_trace": completion_trace,
         "completion_regress_state": completion_regress_state,
         "completion_regress_route_trace": completion_regress_trace,
+        "capability_floor_state": capability_floor_state,
+        "capability_floor_route_trace": capability_floor_trace,
     }
 
 
