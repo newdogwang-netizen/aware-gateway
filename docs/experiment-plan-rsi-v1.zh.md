@@ -640,7 +640,52 @@ Effective-progress classification accepted.
 Budget policy effectiveness still not accepted.
 ```
 
-这一轮证明 gateway 已能把“无有效进展的长轨迹”截停并分类，但没有证明 smart-router 能更高质量地完成任务。下一步要做的不是继续降阈值，而是把 progress 再拆成 exploration progress、validation progress、delivery progress，并让策略在 long exploration 进入明确 replan 或 early abandon。
+这一轮证明 gateway 已能把“无有效进展的长轨迹”截停并分类，但没有证明 smart-router 能更高质量地完成任务。下一步要做的不是继续降阈值，而是把 progress 再拆成 exploration progress、implementation progress、validation progress、delivery progress，并让策略在 long exploration 进入明确 replan 或 early abandon。
+
+#### 2026-09-10 progress-tier checkpoint
+
+这轮实现了 progress 分层，不再把所有 `test_run passed` 当成有效推进：
+
+- `exploration`：读文件、查日志、跑无目标上下文的基线测试；记录为活动，但不清空 no-progress 压力。
+- `implementation`：修改 workspace 目标文件。
+- `delivery`：写入或修改 `/app/output` 等交付目标。
+- `validation`：验证当前 workspace/output 目标的测试通过；裸 `go test ./... passed` 不再自动改变 completion readiness。
+- `strong`：最终 verifier reward 或明确全量测试通过事件。
+
+同步修改：
+
+- online Episode runtime、prompt JSON、recent events 都暴露 `exploration_event_count`、`implementation_progress_count`、`validation_progress_count`、`delivery_progress_count`。
+- offline extractor 会先标注 `progress_tier` / `effective_progress`，再派生 no-progress，再重新标注一次，保证 replay 与 live 口径一致。
+- replay prompt 改为读取 progress tier，而不是只看粗粒度 `candidate_progress_count`。
+- route outcome linkage 只在测试确实对应当前目标时把 `test_run passed` 计为 progress。
+
+验证结果：
+
+```text
+make test-short GO=/usr/local/go/bin/go         passed
+make test-scripts                              passed
+make build GO=/usr/local/go/bin/go            passed
+safe-control probe                             160/160
+```
+
+真实 `shadow-relay` canary：
+
+| artifact | failure_kind | reward | total cost | agent calls | decision calls | progress tiers |
+|----------|--------------|--------|------------|-------------|----------------|----------------|
+| `/mnt/data2/aware-gateway-runs/aware-v4-20260910T111405Z` | `gateway_cost_stop_gate` | 0 | `$3.2018` | 29 | 11 | exploration `42`, implementation `0`, validation `0`, delivery `0` |
+
+离线抽取证据：
+
+```text
+episode events = 73
+candidate_progress_event_count = 0
+progress_event_count = 0
+no_progress_turn_count = 1
+length_finish_count = 11
+future_evidence_leakage = 0
+```
+
+这条 canary 说明新分层没有把读/查/裸测试误判成交付推进；gateway 在没有 verifier、没有 implementation/validation/delivery progress 的情况下按成本 stop gate 截停。runner 收尾时曾因 Docker root 只剩 `19.6GB`、低于脚本 `20GB` 检查失败；已清 unused build cache，释放约 `19.37GB`，该失败不计为路由质量失败。
 
 ### Step 5: 小规模 Harbor pilot
 
@@ -804,7 +849,7 @@ Trace Query by Episode            done for /v1/traces?episode_id=...
 Online Episode Event API          done for single/batch POST and GET /v1/episode-events
 Online Event Store                done for audit SQLite episode_events table
 Batch Sidecar Event Ingest        done for atomic validation before sink fan-out
-Online Progress Projection        done for posted file/test/verifier/no_progress events
+Online Progress Projection        done with exploration/implementation/validation/delivery/strong tiers
 Online Command Runner Adapter     done for batched wrapped command/test/file-write events
 Harbor Artifact Watcher           done for batched trajectory/patch/ctrf/result sidecar
 Stateful No-progress Recovery     done for stale/blocked -> local premium_recover
@@ -824,7 +869,7 @@ Gateway Stop Gate                 done for provider_incomplete/cost/agent_call_n
 Gateway Stop Marker               done for V4 runner interrupt + analyzer failure_kind
 Online Episode State Query        done for GET /v1/episode-state
 State Backfill                    done for persisted traces/events -> online projection
-Deterministic Runtime Probe       done for event ingest -> state query -> recovery route -> 5 local stop gates
+Deterministic Runtime Probe       done for event ingest -> state query -> recovery route -> 5 local stop gates and tiered progress
 ```
 
 RSI R1 完整结束后，aware-gateway 应达到：
@@ -836,13 +881,13 @@ Budgeted Route Action             done
 Minimal Episode Runtime           done
 Session Episode Stack             done for deterministic continue/interrupt/resume/global/unknown
 Session Stack Inspection          done for active task-line query and persisted trace/event rebuild
-Outcome Event Projection          done for offline replay, online when events are posted
+Outcome Event Projection          done for offline replay, online when events are posted, with tiered progress
 Outcome-aware Replay              done
 Event-driven State Controller     partial for no-progress recovery
 Route-to-Outcome Feedback         partial for extractor/replay windows and compact online route history
 Next-step Capability Estimate     partial via deterministic state hint, not yet acceptance-tuned
 Capability Floor Control          partial; hard verifier/no-progress and post-delivery validation assess floors enforced, delivery floors now local
-Gateway Stop Gate                 partial; five local abort paths enforced, latest canary stops no-effective-progress before wall-clock cap
+Gateway Stop Gate                 partial; five local abort paths enforced, latest canaries stop no-effective-progress/cost before wall-clock cap
 Online State Inspection           done for current in-memory projection
 Restart State Rebuild             partial for audit trace/event backfill
 Runtime Probe Acceptance          done for deterministic local gateway/mocks

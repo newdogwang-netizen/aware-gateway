@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from scripts import extract_episode_outcomes as extractor
+
 
 class ExtractEpisodeOutcomesTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -168,6 +170,39 @@ class ExtractEpisodeOutcomesTest(unittest.TestCase):
         self.assertEqual({event["source"] for event in llm_events}, {"harbor_trajectory"})
         self.assertEqual({event["observation"]["outcome"] for event in llm_events}, {"unknown"})
         self.assertTrue(all(event["evidence_refs"][0].startswith("trajectory:") for event in llm_events))
+
+    def test_progress_annotation_requires_current_target_for_passed_test(self) -> None:
+        bare_test = {
+            "event_id": "evt-bare-test",
+            "timestamp": "2026-09-10T10:00:00Z",
+            "kind": "test_run",
+            "observation": {"outcome": "passed", "command": "go test ./..."},
+        }
+        annotated = extractor.annotate_progress_events([bare_test])
+        self.assertEqual(annotated[0]["observation"]["progress_tier"], "exploration")
+        self.assertFalse(annotated[0]["observation"]["effective_progress"])
+        self.assertFalse(extractor.is_candidate_progress_event(annotated[0]))
+
+        targeted = extractor.annotate_progress_events(
+            [
+                {
+                    "event_id": "evt-code-change",
+                    "timestamp": "2026-09-10T10:00:00Z",
+                    "kind": "file_modified",
+                    "observation": {"workspace_target": True, "path_count": 1},
+                },
+                {
+                    "event_id": "evt-target-test",
+                    "timestamp": "2026-09-10T10:01:00Z",
+                    "kind": "test_run",
+                    "observation": {"outcome": "passed", "command": "go test ./..."},
+                },
+            ]
+        )
+        self.assertEqual(targeted[0]["observation"]["progress_tier"], "implementation")
+        self.assertEqual(targeted[1]["observation"]["progress_tier"], "validation")
+        self.assertTrue(targeted[1]["observation"]["effective_progress"])
+        self.assertTrue(extractor.is_candidate_progress_event(targeted[1]))
 
     def test_json_tool_validation_requires_output_target(self) -> None:
         sys.path.insert(0, str(self.repo / "scripts"))

@@ -257,7 +257,7 @@ Decision principles:
 - Use Flash for reversible probes, narrow edits, mechanical validation, formatting, and stable-hypothesis execution.
 - Use Opus when this exact turn sets or revises the core hypothesis, recovers from contradiction, interprets ambiguous validation, designs hidden-case coverage, or performs a final completion guardrail.
 - Do not treat response_completed as task completion. It only means one model response ended normally.
-- Activity is not progress. File changes are candidate progress; tests/verifier are stronger progress evidence.
+- Activity is not progress. Read progress_tier: exploration is only movement, implementation/delivery are candidate progress, validation counts only when tied to the current target, verifier success is strongest.
 - If no_progress is present and there is no newer progress event, avoid blind budget expansion. Choose freeze_or_replan or premium_recover only if the reason names a new strategy.
 - If state shows repeated length_truncated without progress, decide whether the bottleneck is output room or wrong direction. More tokens alone is not a plan.
 {variant_guidance}
@@ -294,12 +294,12 @@ def prompt_variant_guidance(prompt_id: str) -> str:
 P2 windowed progress rules:
 - Use state.no_progress_window.severity as the current stuck signal: none, watch, stale, or blocked.
 - Old no_progress_event_count is background. Do not freeze just because old no_progress exists.
-- If recent_window has candidate_progress_count or strong_progress_count, treat the episode as moving again.
+- If recent_window has implementation_progress_count, delivery_progress_count, validation_progress_count, or strong_progress_count, treat the episode as moving again.
 - watch means pressure exists but the run is not stuck; prefer cheap_probe or cheap_execute unless this turn protects final quality.
 - stale means repeated recent pressure with no recent progress; choose freeze_or_replan or premium_recover only with a concrete recovery purpose.
 - blocked means too many calls since progress; stop expanding budget and force replan or recovery.
 - file_written to /app/output is candidate delivery progress, not proof of final success.
-- validation/test passed is stronger than file_written; failed tests are useful evidence, not progress.
+- A bare passed baseline test is not delivery proof. Validation progress means the test checks current code/output or /app/output.
 - Opus should be reserved for root-cause changes, ambiguous validation, hidden-case reasoning, recovery, and final guardrails."""
 
 
@@ -397,6 +397,10 @@ def row_base(sample: dict[str, Any]) -> dict[str, Any]:
         "original_post_event_count": post_outcome.get("event_count", 0),
         "original_post_candidate_progress_event_count": post_outcome.get("candidate_progress_event_count", 0),
         "original_post_progress_event_count": post_outcome.get("progress_event_count", 0),
+        "original_post_exploration_event_count": post_outcome.get("exploration_event_count", 0),
+        "original_post_implementation_progress_event_count": post_outcome.get("implementation_progress_event_count", 0),
+        "original_post_validation_progress_event_count": post_outcome.get("validation_progress_event_count", 0),
+        "original_post_delivery_progress_event_count": post_outcome.get("delivery_progress_event_count", 0),
         "original_post_no_progress_event_count": post_outcome.get("no_progress_event_count", 0),
         "original_post_test_run_outcomes": post_outcome.get("test_run_outcomes") or {},
         "original_post_verifier_reward": post_outcome.get("verifier_reward"),
@@ -407,6 +411,10 @@ def row_base(sample: dict[str, Any]) -> dict[str, Any]:
         "state_test_run_count": state.get("test_run_count", 0),
         "state_progress_event_count": state.get("progress_event_count", 0),
         "state_candidate_progress_event_count": state.get("candidate_progress_event_count", 0),
+        "state_exploration_event_count": state.get("exploration_event_count", 0),
+        "state_implementation_progress_event_count": state.get("implementation_progress_event_count", 0),
+        "state_validation_progress_event_count": state.get("validation_progress_event_count", 0),
+        "state_delivery_progress_event_count": state.get("delivery_progress_event_count", 0),
         "state_no_progress_event_count": state.get("no_progress_event_count", 0),
         "state_events_since_progress": state.get("events_since_progress", 0),
         "state_llm_calls_since_progress": state.get("llm_calls_since_progress", 0),

@@ -49,8 +49,9 @@ def main() -> None:
     session_id = f"{episode_id}__agent"
     traces = filter_episode_traces(traces, episode_id, session_id)
 
-    events = extract_base_events(trial_dir, result, trajectory, traces, episode_id)
+    events = annotate_progress_events(extract_base_events(trial_dir, result, trajectory, traces, episode_id))
     events.extend(derive_no_progress_events(events, episode_id, rules))
+    events = annotate_progress_events(events)
     events = sorted_events(events)
     for sequence, event in enumerate(events):
         event["sequence"] = sequence
@@ -695,6 +696,90 @@ def derive_no_progress_events(
     return derived
 
 
+def annotate_progress_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    state = {
+        "delivery_file_write_count": 0,
+        "delivery_progress_count": 0,
+        "implementation_progress_count": 0,
+        "completion_readiness": "none",
+        "failure_frontier_size": 0,
+    }
+    annotated: list[dict[str, Any]] = []
+    for event in sorted_events(events):
+        event = dict(event)
+        observation = dict(event.get("observation") or {})
+        event["observation"] = observation
+
+        strong_progress = is_progress_event(event)
+        delivery_progress = is_delivery_progress_event(event)
+        implementation_progress = is_implementation_progress_event(event)
+        validation_progress = False
+        exploration_event = event.get("kind") == "tool_call"
+        candidate_progress = False
+
+        kind = event.get("kind")
+        if kind in ("file_written", "file_modified"):
+            if delivery_progress:
+                state["delivery_file_write_count"] += 1
+            if delivery_progress or implementation_progress:
+                candidate_progress = True
+                state["completion_readiness"] = "delivery_candidate"
+            else:
+                exploration_event = True
+        elif kind == "test_run":
+            applies_to_current_target = test_run_applies_to_current_target(state, event)
+            outcome = str(observation.get("outcome") or "").strip().lower()
+            if outcome == "passed" and applies_to_current_target:
+                validation_progress = True
+                candidate_progress = True
+                state["completion_readiness"] = "validation_passed"
+            elif outcome == "failed":
+                if applies_to_current_target:
+                    state["completion_readiness"] = "validation_failed"
+                state["failure_frontier_size"] = max(1, failure_frontier_size_from_observation(observation))
+            if not applies_to_current_target:
+                exploration_event = True
+        elif kind == "test_passed":
+            validation_progress = True
+            state["completion_readiness"] = "validation_passed"
+            state["failure_frontier_size"] = 0
+        elif kind == "test_failed":
+            validation_progress = True
+            state["completion_readiness"] = "validation_failed"
+            state["failure_frontier_size"] = max(1, failure_frontier_size_from_observation(observation))
+        elif kind == "verifier_result":
+            state["completion_readiness"] = (
+                "verifier_passed" if as_float(observation.get("reward")) > 0 else "verifier_failed"
+            )
+
+        if delivery_progress:
+            state["delivery_progress_count"] += 1
+        if implementation_progress:
+            state["implementation_progress_count"] += 1
+        if validation_progress and str(observation.get("outcome") or "").strip().lower() == "passed":
+            state["failure_frontier_size"] = 0
+
+        tier = ""
+        if strong_progress:
+            tier = "strong"
+        elif delivery_progress:
+            tier = "delivery"
+        elif validation_progress:
+            tier = "validation"
+        elif implementation_progress:
+            tier = "implementation"
+        elif exploration_event:
+            tier = "exploration"
+        if tier:
+            observation["progress_tier"] = tier
+        observation["effective_progress"] = bool(
+            strong_progress or delivery_progress or validation_progress or implementation_progress
+        )
+        observation["strong_progress"] = bool(strong_progress)
+        annotated.append(event)
+    return annotated
+
+
 def is_progress_event(event: dict[str, Any]) -> bool:
     kind = event.get("kind")
     observation = event.get("observation") or {}
@@ -708,17 +793,88 @@ def is_progress_event(event: dict[str, Any]) -> bool:
 def is_candidate_progress_event(event: dict[str, Any]) -> bool:
     kind = event.get("kind")
     observation = event.get("observation") or {}
+    if observation.get("effective_progress") and not observation.get("strong_progress"):
+        return True
     if kind == "file_modified" and as_int(observation.get("path_count")) > 0:
         return True
     if kind == "file_written" and (observation.get("delivery_target") or observation.get("workspace_target")):
         return True
-    if kind == "test_run" and observation.get("outcome") == "passed":
+    if kind == "test_run" and observation.get("outcome") == "passed" and is_output_validation_event(event):
         return True
     return False
 
 
 def is_any_progress_signal(event: dict[str, Any]) -> bool:
     return is_progress_event(event) or is_candidate_progress_event(event)
+
+
+def is_delivery_progress_event(event: dict[str, Any]) -> bool:
+    observation = event.get("observation") or {}
+    return event.get("kind") in ("file_written", "file_modified") and bool(observation.get("delivery_target"))
+
+
+def is_implementation_progress_event(event: dict[str, Any]) -> bool:
+    observation = event.get("observation") or {}
+    if event.get("kind") not in ("file_written", "file_modified"):
+        return False
+    if observation.get("delivery_target"):
+        return False
+    if observation.get("workspace_target"):
+        return True
+    return event.get("kind") == "file_modified" and as_int(observation.get("path_count")) > 0
+
+
+def is_output_validation_event(event: dict[str, Any]) -> bool:
+    if event.get("kind") != "test_run":
+        return False
+    observation = event.get("observation") or {}
+    if (
+        observation.get("output_validation")
+        or observation.get("delivery_validation")
+        or observation.get("validation_target")
+    ):
+        return True
+    command_kind = str(observation.get("command_kind") or "").strip().lower()
+    if command_kind in {"validation", "output_validation", "delivery_validation"}:
+        return True
+    scope = str(observation.get("validation_scope") or "").strip().lower()
+    if scope in {"output", "delivery", "current_delivery"}:
+        return True
+    command = str(observation.get("command") or observation.get("command_preview") or "").strip().lower()
+    return "/app/output/" in command
+
+
+def test_run_applies_to_current_target(state: dict[str, Any], event: dict[str, Any]) -> bool:
+    if event.get("kind") != "test_run":
+        return False
+    if is_output_validation_event(event):
+        return True
+    if as_int(state.get("delivery_progress_count")) > 0:
+        return True
+    if as_int(state.get("implementation_progress_count")) > 0:
+        return True
+    if as_int(state.get("delivery_file_write_count")) > 0:
+        return True
+    if str(state.get("completion_readiness") or "") in {
+        "delivery_candidate",
+        "validation_failed",
+        "validation_passed",
+        "verifier_failed",
+        "verifier_passed",
+    }:
+        return True
+    return as_int(state.get("failure_frontier_size")) > 0
+
+
+def failure_frontier_size_from_observation(observation: dict[str, Any]) -> int:
+    for key in ("failed_count", "failing_count", "failure_count", "failures"):
+        count = as_int(observation.get(key))
+        if count > 0:
+            return count
+    fingerprints = observation.get("failure_fingerprints")
+    if isinstance(fingerprints, list) and fingerprints:
+        return len(fingerprints)
+    return 1
 
 
 def build_replay_cutoff_check(
@@ -857,6 +1013,7 @@ def summarize_outcome_window(events: list[dict[str, Any]]) -> dict[str, Any]:
     ]
     progress_count = sum(1 for event in events if is_progress_event(event))
     candidate_progress_count = sum(1 for event in events if is_candidate_progress_event(event))
+    tier_counts = progress_tier_counts(events)
     llm_outcomes = Counter((event.get("observation") or {}).get("outcome") or "unknown" for event in llm_events)
     return {
         "event_count": len(events),
@@ -871,6 +1028,10 @@ def summarize_outcome_window(events: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "candidate_progress_event_count": candidate_progress_count,
         "progress_event_count": progress_count,
+        "exploration_event_count": tier_counts["exploration"],
+        "implementation_progress_event_count": tier_counts["implementation"],
+        "validation_progress_event_count": tier_counts["validation"],
+        "delivery_progress_event_count": tier_counts["delivery"],
         "no_progress_event_count": by_kind.get("no_progress", 0),
         "test_run_outcomes": dict(
             sorted(Counter((event.get("observation") or {}).get("outcome") or "unknown" for event in test_runs).items())
@@ -901,6 +1062,10 @@ def delivery_file_write_count(events: list[dict[str, Any]]) -> int:
         if event.get("kind") in ("file_written", "file_modified") and observation.get("delivery_target"):
             count += 1
     return count
+
+
+def progress_tier_counts(events: list[dict[str, Any]]) -> Counter:
+    return Counter(str((event.get("observation") or {}).get("progress_tier") or "") for event in events)
 
 
 def route_outcome_label(
@@ -954,6 +1119,10 @@ def empty_route_outcome() -> dict[str, Any]:
         "cost_usd": 0,
         "candidate_progress_event_count": 0,
         "progress_event_count": 0,
+        "exploration_event_count": 0,
+        "implementation_progress_event_count": 0,
+        "validation_progress_event_count": 0,
+        "delivery_progress_event_count": 0,
         "no_progress_event_count": 0,
         "test_run_outcomes": {},
         "delivery_file_write_count": 0,
@@ -986,6 +1155,7 @@ def reduce_state(events: list[dict[str, Any]], rules: dict[str, Any]) -> dict[st
     budget_actions = Counter((event.get("observation") or {}).get("budget_action") or "" for event in llm_events)
     progress_events = [event for event in events if is_progress_event(event)]
     candidate_progress_events = [event for event in events if is_candidate_progress_event(event)]
+    tier_counts = progress_tier_counts(events)
     last_event = events[-1] if events else {}
     window_size = window_size_from_rules(rules)
     recent_events = events[-window_size:] if window_size else events
@@ -1014,6 +1184,10 @@ def reduce_state(events: list[dict[str, Any]], rules: dict[str, Any]) -> dict[st
         "budget_actions": dict(sorted((k, v) for k, v in budget_actions.items() if k)),
         "progress_event_count": len(progress_events),
         "candidate_progress_event_count": len(candidate_progress_events),
+        "exploration_event_count": tier_counts["exploration"],
+        "implementation_progress_event_count": tier_counts["implementation"],
+        "validation_progress_event_count": tier_counts["validation"],
+        "delivery_progress_event_count": tier_counts["delivery"],
         "no_progress_event_count": sum(1 for event in events if event.get("kind") == "no_progress"),
         "events_since_progress": len(events_since_progress),
         "llm_calls_since_progress": len(llm_since_progress),
@@ -1031,6 +1205,7 @@ def recent_window_state(events: list[dict[str, Any]]) -> dict[str, Any]:
     llm_events = [event for event in events if event.get("kind") == "llm_call"]
     test_runs = [event for event in events if event.get("kind") == "test_run"]
     file_writes = [event for event in events if event.get("kind") == "file_written"]
+    tier_counts = progress_tier_counts(events)
     return {
         "event_count": len(events),
         "llm_call_count": len(llm_events),
@@ -1048,6 +1223,10 @@ def recent_window_state(events: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "candidate_progress_count": sum(1 for event in events if is_candidate_progress_event(event)),
         "strong_progress_count": sum(1 for event in events if is_progress_event(event)),
+        "exploration_event_count": tier_counts["exploration"],
+        "implementation_progress_count": tier_counts["implementation"],
+        "validation_progress_count": tier_counts["validation"],
+        "delivery_progress_count": tier_counts["delivery"],
     }
 
 
@@ -1101,6 +1280,7 @@ def build_summary(
     llm_events = [event for event in events if event["kind"] == "llm_call"]
     outcomes = Counter((event["observation"] or {}).get("outcome") or "unknown" for event in llm_events)
     models = Counter((event["observation"] or {}).get("routed_model") or "unknown" for event in llm_events)
+    tier_counts = progress_tier_counts(events)
     reward = next(
         (
             (event["observation"] or {}).get("reward")
@@ -1157,6 +1337,10 @@ def build_summary(
         ),
         "progress_event_count": sum(1 for event in events if is_progress_event(event)),
         "candidate_progress_event_count": sum(1 for event in events if is_candidate_progress_event(event)),
+        "exploration_event_count": tier_counts["exploration"],
+        "implementation_progress_event_count": tier_counts["implementation"],
+        "validation_progress_event_count": tier_counts["validation"],
+        "delivery_progress_event_count": tier_counts["delivery"],
         "no_progress_turn_count": by_kind.get("no_progress", 0),
         "route_outcome_count": len(route_outcomes),
         "route_outcome_labels": dict(

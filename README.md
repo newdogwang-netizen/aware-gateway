@@ -83,7 +83,7 @@ Built by refactoring the heidi model-gateway into a core engine + plugin system.
 
 ## RSI Outcome Extractor
 
-RSI R1 adds an offline extractor for turning Harbor trial artifacts and gateway traces into auditable episode state. It now projects gateway LLM calls plus Harbor tool calls, file writes, local test/validation runs, final patch/verifier output, and a windowed no-progress state:
+RSI R1 adds an offline extractor for turning Harbor trial artifacts and gateway traces into auditable episode state. It now projects gateway LLM calls plus Harbor tool calls, file writes, local test/validation runs, final patch/verifier output, tiered progress, and a windowed no-progress state:
 
 - [Event Schema v1](docs/rsi/event-schema-v1.json)
 - [Progress Rules v1](docs/rsi/progress-rules-v1.yaml)
@@ -367,7 +367,7 @@ model; it inserts a short cheap cooldown after consecutive premium calls; and
 it returns to the prompt router after too many consecutive cheap probes. It can
 also stop locally before another upstream call when provider metadata is
 incomplete, cost has crossed the trial gate before verifier proximity, length
-pressure repeats without file/test progress, too many agent calls happen
+pressure repeats without implementation/validation/delivery progress, too many agent calls happen
 without delivery/test/verifier-grade progress, or a blocked episode has already
 spent a premium recovery turn without observable progress. These stops are
 audited with `route_budget_action=stop_trial` and a specific `error_kind`.
@@ -397,7 +397,7 @@ curl -s http://localhost:12026/v1/episode-events \
   -d '{
     "kind": "test_run",
     "source": "local-runner",
-    "observation": {"outcome": "passed", "command": "go test ./..."},
+    "observation": {"outcome": "passed", "command": "go test ./...", "validation_target": true},
     "evidence_refs": ["stdout"]
   }'
 ```
@@ -407,9 +407,11 @@ The accepted event kinds mirror the RSI event schema:
 `test_failed`, `test_passed`, `verifier_result`, `no_progress`, and
 `run_exception`. The audit SQLite plugin stores these events in
 `episode_events`, and `GET /v1/episode-events?episode_id=...` returns them for
-replay or visualization. Posted progress events update the online episode state
-immediately, so the next router prompt can see file/test/verifier progress
-rather than only the last LLM finish reason.
+replay or visualization. Posted events update the online episode state
+immediately. The router separates exploration from implementation, delivery,
+validation, and strong verifier progress, so a bare baseline `test_run passed`
+is recorded but does not by itself clear no-progress pressure or prove
+completion readiness.
 
 For a first live integration, wrap local validation commands:
 

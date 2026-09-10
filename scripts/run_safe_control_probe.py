@@ -704,6 +704,7 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
             "observation": {
                 "outcome": "passed",
                 "command": "python3 validate.py",
+                "validation_target": True,
                 "passed_count": 4,
                 "failed_count": 0,
             },

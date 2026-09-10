@@ -1917,8 +1917,9 @@ func TestEpisodeProgressEventResetsLengthPressureBeforeNextBudget(t *testing.T) 
 		Kind:      "test_run",
 		Source:    "unit-test",
 		Observation: map[string]any{
-			"outcome": "passed",
-			"command": "go test ./...",
+			"outcome":           "passed",
+			"command":           "go test ./...",
+			"validation_target": true,
 		},
 		EvidenceRefs: []string{"stdout"},
 	}); err != nil {
@@ -1944,6 +1945,7 @@ func TestEpisodeProgressEventResetsLengthPressureBeforeNextBudget(t *testing.T) 
 	for _, want := range []string{
 		"test_runs=1",
 		"test_passed=1",
+		"validation=1",
 		"candidate=1",
 		"length_since_progress=0",
 		"last_progress=test_run",
@@ -2041,8 +2043,9 @@ func TestEpisodeNoProgressEventFreezesLengthBudgetExpansion(t *testing.T) {
 		Kind:      "test_run",
 		Source:    "unit-test",
 		Observation: map[string]any{
-			"outcome": "passed",
-			"command": "go test ./...",
+			"outcome":           "passed",
+			"command":           "go test ./...",
+			"validation_target": true,
 		},
 		EvidenceRefs: []string{"stdout"},
 	}); err != nil {
@@ -2092,8 +2095,11 @@ func TestRecordEpisodeEventDedupesEventIDsBeforeProjection(t *testing.T) {
 	if snapshot.TestRunCount != 1 || snapshot.TestPassedCount != 1 {
 		t.Fatalf("test counts = run %d passed %d, want 1/1", snapshot.TestRunCount, snapshot.TestPassedCount)
 	}
-	if snapshot.CandidateProgressCount != 1 {
-		t.Fatalf("candidate progress = %d, want 1", snapshot.CandidateProgressCount)
+	if snapshot.CandidateProgressCount != 0 {
+		t.Fatalf("candidate progress = %d, want 0 for a bare baseline test run", snapshot.CandidateProgressCount)
+	}
+	if snapshot.ExplorationEventCount != 1 {
+		t.Fatalf("exploration events = %d, want 1 for a bare baseline test run", snapshot.ExplorationEventCount)
 	}
 	if len(snapshot.RecentEvents) != 1 {
 		t.Fatalf("recent events = %d, want 1", len(snapshot.RecentEvents))
@@ -2147,8 +2153,17 @@ func TestQueryEpisodeStatesReturnsCurrentProjection(t *testing.T) {
 	if got := state.State["test_run_count"]; got != 1 {
 		t.Fatalf("test_run_count = %#v, want 1", got)
 	}
-	if got := state.State["last_progress_kind"]; got != "test_run" {
-		t.Fatalf("last_progress_kind = %#v, want test_run", got)
+	if got := state.State["last_progress_kind"]; got != "" {
+		t.Fatalf("last_progress_kind = %#v, want no progress for a bare baseline test run", got)
+	}
+	if got := state.State["candidate_progress_count"]; got != 0 {
+		t.Fatalf("candidate_progress_count = %#v, want 0 for a bare baseline test run", got)
+	}
+	if got := state.State["exploration_event_count"]; got != 1 {
+		t.Fatalf("exploration_event_count = %#v, want 1 for a bare baseline test run", got)
+	}
+	if got := state.State["completion_readiness"]; got != completionReadinessNone {
+		t.Fatalf("completion_readiness = %#v, want none for a bare baseline test run", got)
 	}
 
 	allStates, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{})
@@ -2157,6 +2172,64 @@ func TestQueryEpisodeStatesReturnsCurrentProjection(t *testing.T) {
 	}
 	if len(allStates) != 1 || allStates[0].EpisodeID != "episode-query" {
 		t.Fatalf("all states = %#v, want episode-query", allStates)
+	}
+}
+
+func TestEpisodeValidationProgressRequiresCurrentTarget(t *testing.T) {
+	router := newTestSmartRouter("")
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	for _, event := range []*plugin.EpisodeEvent{
+		{
+			EventID:   "event-target-code-change",
+			EpisodeID: "episode-target-validation",
+			Timestamp: time.Now(),
+			Kind:      "file_modified",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"path_count":       1,
+				"workspace_target": true,
+			},
+		},
+		{
+			EventID:   "event-target-go-test",
+			EpisodeID: "episode-target-validation",
+			Timestamp: time.Now(),
+			Kind:      "test_run",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":      "passed",
+				"command":      "go test ./...",
+				"failed_count": 0,
+			},
+		},
+	} {
+		if err := router.RecordEpisodeEvent(event); err != nil {
+			t.Fatalf("RecordEpisodeEvent %s returned error: %v", event.EventID, err)
+		}
+	}
+
+	states, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: "episode-target-validation"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates returned error: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	state := states[0].State
+	if got := state["implementation_progress_count"]; got != 1 {
+		t.Fatalf("implementation_progress_count = %#v, want 1", got)
+	}
+	if got := state["validation_progress_count"]; got != 1 {
+		t.Fatalf("validation_progress_count = %#v, want 1", got)
+	}
+	if got := state["candidate_progress_count"]; got != 2 {
+		t.Fatalf("candidate_progress_count = %#v, want 2", got)
+	}
+	if got := state["completion_readiness"]; got != completionReadinessValidationPassed {
+		t.Fatalf("completion_readiness = %#v, want validation_passed", got)
+	}
+	if got := state["last_progress_kind"]; got != "test_run" {
+		t.Fatalf("last_progress_kind = %#v, want test_run", got)
 	}
 }
 

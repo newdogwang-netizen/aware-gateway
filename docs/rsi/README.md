@@ -103,7 +103,7 @@ post-delivery validation or post-verifier assessment floors force
 `premium_reason`. Hard stop lines are handled locally before another upstream
 agent call. The first implemented stop family covers provider incomplete
 metadata, cost over threshold before verifier proximity, repeated length
-pressure without file/test progress, agent-call overflow without
+pressure without implementation/validation/delivery progress, agent-call overflow without
 delivery/test/verifier-grade progress, and blocked premium recovery without a
 route outcome. Stop traces are recorded with `pool=local`,
 `route_budget_action=stop_trial`, and a specific `error_kind`.
@@ -154,7 +154,7 @@ the next router prompt, and hard recovery floors can override an underpowered
 semantic decision when the verifier has already failed the current delivery.
 It also covers hard stop lines: provider incomplete metadata, cost over the
 trial threshold before verifier proximity, repeated length pressure without
-file/test progress, agent-call overflow without effective progress, and
+implementation/validation/delivery progress, agent-call overflow without effective progress, and
 blocked premium recovery with no route outcome are rejected locally with HTTP
 409 and audited with specific `error_kind` values.
 
@@ -214,7 +214,7 @@ If the state is already `blocked` after a `premium_recover` route and the last
 route outcome is still `pending` or `no_progress`, the controller stops the
 trial locally instead of buying another turn. The same local stop path is used
 for provider incomplete traces, cost-threshold overflow before verifier
-proximity, repeated length pressure without file/test progress, and agent-call
+proximity, repeated length pressure without implementation/validation/delivery progress, and agent-call
 overflow without delivery/test/verifier-grade progress.
 
 Route-outcome windows are closed when the next LLM call starts. If no file,
@@ -317,4 +317,4 @@ exploratory inspection of incomplete artifact directories.
 
 `finish_reason=stop` is normalized to `response_completed`, which means one model response ended normally. It is not treated as benchmark task completion.
 
-Activity such as reading files, searching, producing tokens, or repeatedly running the same command is not progress by itself. File writes are candidate progress only when they touch the workspace or `/app/output`. Local tests and output validations are stronger progress evidence; final verifier success remains the strongest evidence.
+Activity such as reading files, searching, producing tokens, or repeatedly running the same command is not progress by itself. The extractor and online runtime annotate each event with a progress tier: `exploration`, `implementation`, `delivery`, `validation`, or `strong`. Workspace changes are implementation progress, `/app/output` writes are delivery progress, tests count as validation only when they check the current workspace/output target, and final verifier success remains the strongest evidence. A bare baseline `test_run passed` is an observation, not completion proof.

@@ -46,6 +46,12 @@ const (
 	routeOutcomeRunException     = "run_exception"
 	routeOutcomeNone             = "none"
 
+	progressTierExploration    = "exploration"
+	progressTierImplementation = "implementation"
+	progressTierValidation     = "validation"
+	progressTierDelivery       = "delivery"
+	progressTierStrong         = "strong"
+
 	nextMinCapabilityUnknown        = "unknown"
 	nextMinCapabilityCheapProbe     = "cheap_probe"
 	nextMinCapabilityCheapExecute   = "cheap_execute"
@@ -108,6 +114,10 @@ type EpisodeState struct {
 	TestPassedCount             int
 	TestFailedCount             int
 	DeliveryFileWriteCount      int
+	ExplorationEventCount       int
+	ImplementationProgressCount int
+	ValidationProgressCount     int
+	DeliveryProgressCount       int
 	CandidateProgressCount      int
 	StrongProgressCount         int
 	NoProgressEventCount        int
@@ -177,6 +187,10 @@ type EpisodeSnapshot struct {
 	TestPassedCount             int
 	TestFailedCount             int
 	DeliveryFileWriteCount      int
+	ExplorationEventCount       int
+	ImplementationProgressCount int
+	ValidationProgressCount     int
+	DeliveryProgressCount       int
 	CandidateProgressCount      int
 	StrongProgressCount         int
 	NoProgressEventCount        int
@@ -711,9 +725,105 @@ func failureFrontierSizeFromEvent(event EpisodeEvent) int {
 	return 1
 }
 
-func completionAffectingWrite(event EpisodeEvent) bool {
-	return boolFromObservation(event.Observation, "delivery_target") ||
-		boolFromObservation(event.Observation, "workspace_target")
+func isDeliveryProgressEvent(event EpisodeEvent) bool {
+	return (event.Kind == "file_written" || event.Kind == "file_modified") &&
+		boolFromObservation(event.Observation, "delivery_target")
+}
+
+func isImplementationProgressEvent(event EpisodeEvent) bool {
+	if event.Kind != "file_written" && event.Kind != "file_modified" {
+		return false
+	}
+	if boolFromObservation(event.Observation, "delivery_target") {
+		return false
+	}
+	if boolFromObservation(event.Observation, "workspace_target") {
+		return true
+	}
+	return event.Kind == "file_modified" && intFromObservation(event.Observation, "path_count") > 0
+}
+
+func isOutputValidationEvent(event EpisodeEvent) bool {
+	if event.Kind != "test_run" {
+		return false
+	}
+	if boolFromObservation(event.Observation, "output_validation") ||
+		boolFromObservation(event.Observation, "delivery_validation") ||
+		boolFromObservation(event.Observation, "validation_target") {
+		return true
+	}
+	commandKind := strings.ToLower(strings.TrimSpace(stringFromObservation(event.Observation, "command_kind")))
+	if commandKind == "validation" || commandKind == "output_validation" || commandKind == "delivery_validation" {
+		return true
+	}
+	scope := strings.ToLower(strings.TrimSpace(stringFromObservation(event.Observation, "validation_scope")))
+	if scope == "output" || scope == "delivery" || scope == "current_delivery" {
+		return true
+	}
+	command := strings.ToLower(strings.TrimSpace(firstNonEmpty(
+		stringFromObservation(event.Observation, "command"),
+		stringFromObservation(event.Observation, "command_preview"),
+	)))
+	return strings.Contains(command, "/app/output/")
+}
+
+func testRunAppliesToCurrentTarget(state *EpisodeState, event EpisodeEvent) bool {
+	if event.Kind != "test_run" {
+		return false
+	}
+	if isOutputValidationEvent(event) {
+		return true
+	}
+	if state == nil {
+		return false
+	}
+	if state.DeliveryProgressCount > 0 || state.ImplementationProgressCount > 0 || state.DeliveryFileWriteCount > 0 {
+		return true
+	}
+	switch state.CompletionReadiness {
+	case completionReadinessDeliveryCandidate,
+		completionReadinessValidationFailed,
+		completionReadinessValidationPassed,
+		completionReadinessVerifierFailed,
+		completionReadinessVerifierPassed:
+		return true
+	}
+	return state.FailureFrontierSize > 0
+}
+
+func isExplorationEvent(event EpisodeEvent) bool {
+	return event.Kind == "tool_call"
+}
+
+func annotateProgressTier(event *EpisodeEvent, strongProgress, deliveryProgress, validationProgress, implementationProgress, explorationEvent bool) {
+	if event == nil {
+		return
+	}
+	if event.Observation == nil {
+		event.Observation = make(map[string]any)
+	}
+	tier := ""
+	switch {
+	case strongProgress:
+		tier = progressTierStrong
+	case deliveryProgress:
+		tier = progressTierDelivery
+	case validationProgress:
+		tier = progressTierValidation
+	case implementationProgress:
+		tier = progressTierImplementation
+	case explorationEvent:
+		tier = progressTierExploration
+	}
+	if tier != "" {
+		event.Observation["progress_tier"] = tier
+	}
+	event.Observation["effective_progress"] = strongProgress || deliveryProgress || validationProgress || implementationProgress
+	event.Observation["strong_progress"] = strongProgress
+}
+
+func progressKindFromEvent(event EpisodeEvent) string {
+	return event.Kind
 }
 
 func beginRouteOutcomeWindow(state *EpisodeState, event EpisodeEvent) {
@@ -753,7 +863,7 @@ func projectRouteOutcomeState(state *EpisodeState, event EpisodeEvent) {
 	if state == nil || state.CallCount == 0 {
 		return
 	}
-	label, progress, negative := routeOutcomeFromEvent(event)
+	label, progress, negative := routeOutcomeFromEvent(state, event)
 	if label == "" {
 		return
 	}
@@ -806,7 +916,7 @@ func trimRouteOutcomeSummaries(state *EpisodeState, limit int) {
 	}
 }
 
-func routeOutcomeFromEvent(event EpisodeEvent) (string, bool, bool) {
+func routeOutcomeFromEvent(state *EpisodeState, event EpisodeEvent) (string, bool, bool) {
 	switch event.Kind {
 	case "tool_call":
 		return routeOutcomeToolCall, false, false
@@ -821,7 +931,7 @@ func routeOutcomeFromEvent(event EpisodeEvent) (string, bool, bool) {
 	case "test_run":
 		switch strings.ToLower(strings.TrimSpace(stringFromObservation(event.Observation, "outcome"))) {
 		case "passed":
-			return routeOutcomeTestPassed, true, false
+			return routeOutcomeTestPassed, testRunAppliesToCurrentTarget(state, event), false
 		case "failed":
 			return routeOutcomeTestFailed, false, true
 		}
@@ -959,7 +1069,12 @@ func projectUniqueEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg Epis
 
 func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeConfig) {
 	state.Version++
-	progress := isStrongProgressEvent(event) || isCandidateProgressEvent(event)
+	strongProgress := isStrongProgressEvent(event)
+	implementationProgress := false
+	validationProgress := false
+	deliveryProgress := false
+	candidateProgress := false
+	explorationEvent := isExplorationEvent(event)
 
 	switch event.Kind {
 	case "llm_call":
@@ -988,31 +1103,48 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 		state.ToolCallCount++
 	case "file_written", "file_modified":
 		state.FileWriteCount++
-		if boolFromObservation(event.Observation, "delivery_target") {
+		deliveryProgress = isDeliveryProgressEvent(event)
+		implementationProgress = isImplementationProgressEvent(event)
+		if deliveryProgress {
 			state.DeliveryFileWriteCount++
 			state.LastDeliveryEventID = event.ID
 		}
-		if completionAffectingWrite(event) {
+		if deliveryProgress || implementationProgress {
+			candidateProgress = true
 			state.CompletionReadiness = completionReadinessDeliveryCandidate
 			state.VerifierReward = 0
+		} else {
+			explorationEvent = true
 		}
 	case "test_run":
 		state.TestRunCount++
+		appliesToCurrentTarget := testRunAppliesToCurrentTarget(state, event)
 		switch strings.ToLower(strings.TrimSpace(stringFromObservation(event.Observation, "outcome"))) {
 		case "passed":
 			state.TestPassedCount++
-			state.CompletionReadiness = completionReadinessValidationPassed
+			if appliesToCurrentTarget {
+				validationProgress = true
+				candidateProgress = true
+				state.CompletionReadiness = completionReadinessValidationPassed
+			}
 		case "failed":
 			state.TestFailedCount++
-			state.CompletionReadiness = completionReadinessValidationFailed
-			state.VerifierReward = 0
+			if appliesToCurrentTarget {
+				state.CompletionReadiness = completionReadinessValidationFailed
+				state.VerifierReward = 0
+			}
 			projectTestFailureState(state, event)
+		}
+		if !appliesToCurrentTarget {
+			explorationEvent = true
 		}
 	case "test_passed":
 		state.TestPassedCount++
+		validationProgress = true
 		state.CompletionReadiness = completionReadinessValidationPassed
 	case "test_failed":
 		state.TestFailedCount++
+		validationProgress = true
 		state.CompletionReadiness = completionReadinessValidationFailed
 		state.VerifierReward = 0
 		projectTestFailureState(state, event)
@@ -1031,8 +1163,22 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 		projectRouteOutcomeState(state, event)
 	}
 
+	if explorationEvent {
+		state.ExplorationEventCount++
+	}
+	if implementationProgress {
+		state.ImplementationProgressCount++
+	}
+	if validationProgress {
+		state.ValidationProgressCount++
+	}
+	if deliveryProgress {
+		state.DeliveryProgressCount++
+	}
+	annotateProgressTier(&event, strongProgress, deliveryProgress, validationProgress, implementationProgress, explorationEvent)
+	progress := strongProgress || candidateProgress
 	if progress {
-		if isStrongProgressEvent(event) {
+		if strongProgress {
 			state.StrongProgressCount++
 		} else {
 			state.CandidateProgressCount++
@@ -1048,7 +1194,7 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 			state.FailureFrontierSize = 0
 		}
 		state.LastProgressEventID = event.ID
-		state.LastProgressKind = event.Kind
+		state.LastProgressKind = progressKindFromEvent(event)
 	} else {
 		state.EventsSinceProgress++
 	}
@@ -1103,6 +1249,10 @@ func snapshotFromEpisodeState(state *EpisodeState) EpisodeSnapshot {
 		TestPassedCount:             state.TestPassedCount,
 		TestFailedCount:             state.TestFailedCount,
 		DeliveryFileWriteCount:      state.DeliveryFileWriteCount,
+		ExplorationEventCount:       state.ExplorationEventCount,
+		ImplementationProgressCount: state.ImplementationProgressCount,
+		ValidationProgressCount:     state.ValidationProgressCount,
+		DeliveryProgressCount:       state.DeliveryProgressCount,
 		CandidateProgressCount:      state.CandidateProgressCount,
 		StrongProgressCount:         state.StrongProgressCount,
 		NoProgressEventCount:        state.NoProgressEventCount,
@@ -1161,12 +1311,16 @@ func (s *SmartRouter) renderEpisodeSnapshot(snapshot EpisodeSnapshot) string {
 			valueOrUnknown(snapshot.LastFinishReason),
 		),
 		fmt.Sprintf(
-			"progress tools=%d file_writes=%d test_runs=%d test_passed=%d test_failed=%d candidate=%d strong=%d no_progress_events=%d active_no_progress=%t no_progress=%s events_since_progress=%d llm_since_progress=%d length_since_progress=%d last_progress=%s verifier_reward=%.3f",
+			"progress tools=%d file_writes=%d test_runs=%d test_passed=%d test_failed=%d exploration=%d implementation=%d validation=%d delivery=%d candidate=%d strong=%d no_progress_events=%d active_no_progress=%t no_progress=%s events_since_progress=%d llm_since_progress=%d length_since_progress=%d last_progress=%s verifier_reward=%.3f",
 			snapshot.ToolCallCount,
 			snapshot.FileWriteCount,
 			snapshot.TestRunCount,
 			snapshot.TestPassedCount,
 			snapshot.TestFailedCount,
+			snapshot.ExplorationEventCount,
+			snapshot.ImplementationProgressCount,
+			snapshot.ValidationProgressCount,
+			snapshot.DeliveryProgressCount,
 			snapshot.CandidateProgressCount,
 			snapshot.StrongProgressCount,
 			snapshot.NoProgressEventCount,
@@ -1290,6 +1444,10 @@ func episodeStatePayload(snapshot EpisodeSnapshot) map[string]any {
 		"test_passed_count":              snapshot.TestPassedCount,
 		"test_failed_count":              snapshot.TestFailedCount,
 		"delivery_file_write_count":      snapshot.DeliveryFileWriteCount,
+		"exploration_event_count":        snapshot.ExplorationEventCount,
+		"implementation_progress_count":  snapshot.ImplementationProgressCount,
+		"validation_progress_count":      snapshot.ValidationProgressCount,
+		"delivery_progress_count":        snapshot.DeliveryProgressCount,
 		"candidate_progress_count":       snapshot.CandidateProgressCount,
 		"strong_progress_count":          snapshot.StrongProgressCount,
 		"no_progress_event_count":        snapshot.NoProgressEventCount,
@@ -1328,18 +1486,20 @@ func episodeStatePayload(snapshot EpisodeSnapshot) map[string]any {
 		recent := make([]map[string]any, 0, len(snapshot.RecentEvents))
 		for _, event := range snapshot.RecentEvents {
 			recent = append(recent, map[string]any{
-				"event_id":      event.ID,
-				"kind":          event.Kind,
-				"source":        event.Source,
-				"outcome":       event.Outcome,
-				"model":         event.Model,
-				"budget_action": event.BudgetAction,
-				"finish_reason": event.FinishReason,
-				"status":        event.Status,
-				"total_tokens":  event.TotalTokens,
-				"cost":          event.Cost,
-				"latency_ms":    event.LatencyMs,
-				"evidence_refs": event.EvidenceRefs,
+				"event_id":           event.ID,
+				"kind":               event.Kind,
+				"source":             event.Source,
+				"outcome":            event.Outcome,
+				"model":              event.Model,
+				"budget_action":      event.BudgetAction,
+				"finish_reason":      event.FinishReason,
+				"status":             event.Status,
+				"total_tokens":       event.TotalTokens,
+				"cost":               event.Cost,
+				"latency_ms":         event.LatencyMs,
+				"progress_tier":      stringFromObservation(event.Observation, "progress_tier"),
+				"effective_progress": boolFromObservation(event.Observation, "effective_progress"),
+				"evidence_refs":      event.EvidenceRefs,
 			})
 		}
 		payload["recent_events"] = recent
@@ -2013,7 +2173,8 @@ func clearsFailureFrontier(event EpisodeEvent) bool {
 	case "test_passed":
 		return intFromObservation(event.Observation, "failed_count") == 0
 	case "test_run":
-		return strings.EqualFold(stringFromObservation(event.Observation, "outcome"), "passed")
+		return strings.EqualFold(stringFromObservation(event.Observation, "outcome"), "passed") &&
+			(boolFromObservation(event.Observation, "effective_progress") || isOutputValidationEvent(event))
 	case "verifier_result":
 		return floatFromObservation(event.Observation, "reward") > 0
 	default:
@@ -2022,13 +2183,16 @@ func clearsFailureFrontier(event EpisodeEvent) bool {
 }
 
 func isCandidateProgressEvent(event EpisodeEvent) bool {
+	if boolFromObservation(event.Observation, "effective_progress") && !boolFromObservation(event.Observation, "strong_progress") {
+		return true
+	}
 	switch event.Kind {
 	case "file_modified":
 		return intFromObservation(event.Observation, "path_count") > 0
 	case "file_written":
 		return boolFromObservation(event.Observation, "delivery_target") || boolFromObservation(event.Observation, "workspace_target")
 	case "test_run":
-		return strings.EqualFold(stringFromObservation(event.Observation, "outcome"), "passed")
+		return strings.EqualFold(stringFromObservation(event.Observation, "outcome"), "passed") && isOutputValidationEvent(event)
 	default:
 		return false
 	}

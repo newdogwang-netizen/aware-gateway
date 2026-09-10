@@ -259,7 +259,7 @@ prompt and handles only narrow cases:
 - Apply a short cheap-model cooldown after consecutive premium calls.
 - Stop locally for hard trial-stop signals: provider incomplete metadata,
   cost above threshold before verifier proximity, repeated length pressure
-  without file/test progress, or a blocked episode whose previous premium
+  without implementation/validation/delivery progress, or a blocked episode whose previous premium
   recovery route produced no observable progress.
 - Send control back to the semantic router after too many consecutive cheap
   probes, so local rules cannot delay early direction-setting work forever.
@@ -326,7 +326,11 @@ The first reducer tracks only stable control signals:
   `delivery_candidate`, passing validation sets `validation_passed`, a positive
   verifier reward sets `verifier_passed`, and later failed validation/verifier
   events set `validation_failed` or `verifier_failed`.
-- candidate progress: workspace/delivery file writes and passed local test runs
+- progress tiers: `exploration` for activity-only observations, `implementation`
+  for workspace changes, `delivery` for output-target writes, `validation` for
+  tests that check the current workspace/output target, and `strong` for
+  verifier reward or fully passing final test events
+- candidate progress: implementation, delivery, and validation progress
 - strong progress: verifier reward and fully passing final test events
 - no-progress pressure: explicit `no_progress` events and recent pressure
   without progress
