@@ -101,10 +101,12 @@ class WatchHarborEpisodeEventsTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertTrue(received)
         self.assertEqual({path for path, _ in received}, {"/v1/episode-events"})
-        counts = Counter(event["kind"] for _, event in received)
+        self.assertEqual(len(received), 1)
+        events = received[0][1]["events"]
+        counts = Counter(event["kind"] for event in events)
         self.assertEqual(counts["test_run"], 2)
         self.assertEqual(counts["verifier_result"], 1)
-        self.assertEqual({event["session_id"] for _, event in received}, {"sample-task__abc123__agent"})
+        self.assertEqual({event["session_id"] for event in events}, {"sample-task__abc123__agent"})
 
 
 def read_jsonl(path: Path) -> list[dict]:

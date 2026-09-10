@@ -740,8 +740,8 @@ Online Episode Event API          done for single/batch POST and GET /v1/episode
 Online Event Store                done for audit SQLite episode_events table
 Batch Sidecar Event Ingest        done for atomic validation before sink fan-out
 Online Progress Projection        done for posted file/test/verifier/no_progress events
-Online Command Runner Adapter     done for wrapped command/test/file-write events
-Harbor Artifact Watcher           done for trajectory/patch/ctrf/result sidecar
+Online Command Runner Adapter     done for batched wrapped command/test/file-write events
+Harbor Artifact Watcher           done for batched trajectory/patch/ctrf/result sidecar
 Stateful No-progress Recovery     done for stale/blocked -> local premium_recover
 No-progress Budget Freeze         done for explicit/stale/blocked no-progress state
 Repeated-failure Recovery         done for non-improving repeated test failure frontier

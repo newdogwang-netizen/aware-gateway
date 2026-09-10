@@ -96,11 +96,13 @@ class RunEpisodeCommandTest(unittest.TestCase):
             server.server_close()
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertEqual([event["kind"] for event in received], ["tool_call", "test_run"])
-        self.assertEqual(received[0]["episode_id"], "episode-post")
-        self.assertEqual(received[0]["session_id"], "trial-post__agent")
-        self.assertEqual(received[1]["observation"]["outcome"], "passed")
-        self.assertEqual(received[1]["observation"]["command_kind"], "test")
+        self.assertEqual(len(received), 1)
+        events = received[0]["events"]
+        self.assertEqual([event["kind"] for event in events], ["tool_call", "test_run"])
+        self.assertEqual(events[0]["episode_id"], "episode-post")
+        self.assertEqual(events[0]["session_id"], "trial-post__agent")
+        self.assertEqual(events[1]["observation"]["outcome"], "passed")
+        self.assertEqual(events[1]["observation"]["command_kind"], "test")
 
 
 if __name__ == "__main__":

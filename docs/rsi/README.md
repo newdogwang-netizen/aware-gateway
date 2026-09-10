@@ -127,12 +127,12 @@ python3 scripts/run_safe_control_probe.py \
 ```
 
 It verifies the Phase 2 control plane without real LLM spend. In addition to
-the fixed safe-control matrix, it posts two explicit `llm_call` events with
-`finish_reason=length`, checks `/v1/episode-state` for the reduced stale
-no-progress state, retries a duplicate event id to prove projection
-idempotency, and verifies that the next routed request locally selects
-`premium_recover` with `rule_id=episode_no_progress_recovery` while freezing
-the base recovery budget instead of compounding another length-based boost.
+the fixed safe-control matrix, it posts a batch of explicit `llm_call` events
+with `finish_reason=length`, checks `/v1/episode-state` for the reduced stale
+no-progress state, retries a duplicate event id to prove projection idempotency,
+and verifies that the next routed request locally selects `premium_recover`
+with `rule_id=episode_no_progress_recovery` while freezing the base recovery
+budget instead of compounding another length-based boost.
 It also injects repeated failed test events and checks that the first
 non-improving failure frontier triggers `episode_repeated_failure_recovery`,
 while the same fingerprint is not repeatedly escalated by the local controller.

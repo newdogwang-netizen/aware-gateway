@@ -430,12 +430,14 @@ python3 scripts/run_episode_command.py \
 ```
 
 It wraps a local command, preserves stdout/stderr, exits with the wrapped
-command's status, and posts `tool_call`, `file_written`, `test_run`, and
-`run_exception` events when the command/output supports those classifications.
+command's status, and posts a single batch containing `tool_call`,
+`file_written`, `test_run`, and `run_exception` events when the command/output
+supports those classifications.
 For Harbor benchmark runs, `scripts/watch_harbor_episode_events.py` watches the
-job artifact directory and posts deterministic events from `trajectory*.json`,
-`agent.patch`, `ctrf.json`, `reward.txt`, and `result.json`. The V4 runner can
-start that sidecar with `AWARE_V4_EPISODE_WATCHER=1`.
+job artifact directory and posts deterministic batch events from
+`trajectory*.json`, `agent.patch`, `ctrf.json`, `reward.txt`, and
+`result.json`. The V4 runner can start that sidecar with
+`AWARE_V4_EPISODE_WATCHER=1`.
 
 The online trace now carries the episode metadata needed for replay and later
 state rebuilding:

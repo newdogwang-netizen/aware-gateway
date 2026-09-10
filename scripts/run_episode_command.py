@@ -283,6 +283,8 @@ def gateway_event_url(gateway: str) -> str:
 
 
 def post_events(url: str, events: list[dict[str, Any]], args: argparse.Namespace) -> None:
+    if not events:
+        return
     headers = {"Content-Type": "application/json"}
     if args.episode_id:
         headers["X-Episode-ID"] = args.episode_id
@@ -297,15 +299,18 @@ def post_events(url: str, events: list[dict[str, Any]], args: argparse.Namespace
     if args.task_name:
         headers["X-Task-Name"] = args.task_name
 
-    for event in events:
-        data = json.dumps(event, sort_keys=True).encode("utf-8")
-        request = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(request, timeout=10) as response:
-                if response.status >= 300:
-                    raise RuntimeError(f"gateway returned HTTP {response.status}")
-        except urllib.error.URLError as exc:
-            raise SystemExit(f"failed to post episode event {event['event_id']}: {exc}") from exc
+    event_ids = [str(event.get("event_id") or "") for event in events]
+    data = json.dumps({"events": events}, sort_keys=True).encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            if response.status >= 300:
+                raise RuntimeError(f"gateway returned HTTP {response.status}")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise SystemExit(f"failed to post episode event batch {event_ids}: HTTP {exc.code}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise SystemExit(f"failed to post episode event batch {event_ids}: {exc}") from exc
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:

@@ -76,16 +76,22 @@ def scan_and_emit(args: argparse.Namespace, seen: set[str]) -> int:
         result = safe_read_json(trial_dir / "result.json") or {}
         episode_id = infer_episode_id(args, trial_dir, result)
         events = collect_trial_events(trial_dir, result, episode_id)
+        batch: list[dict[str, Any]] = []
         for event in sorted_events(events):
             enrich_event(event, args, episode_id, result)
             event_id = event.get("event_id") or ""
             if not event_id or event_id in seen:
                 continue
-            posted = True
-            if not args.dry_run:
-                posted = post_event(gateway_event_url(args.gateway), event, args, episode_id)
-            if not posted:
-                continue
+            batch.append(event)
+        if not batch:
+            continue
+        posted = True
+        if not args.dry_run:
+            posted = post_events(gateway_event_url(args.gateway), batch, args, episode_id)
+        if not posted:
+            continue
+        for event in batch:
+            event_id = event.get("event_id") or ""
             if args.events_jsonl:
                 append_jsonl(args.events_jsonl, event)
             seen.add(event_id)
@@ -186,12 +192,13 @@ def gateway_event_url(gateway: str) -> str:
     return base + "/v1/episode-events"
 
 
-def post_event(url: str, event: dict[str, Any], args: argparse.Namespace, episode_id: str) -> bool:
+def post_events(url: str, events: list[dict[str, Any]], args: argparse.Namespace, episode_id: str) -> bool:
     headers = {"Content-Type": "application/json", "X-Episode-ID": episode_id}
     session_id = args.session_id or f"{episode_id}__agent"
     if session_id:
         headers["X-Session-ID"] = session_id
-    trial_name = args.trial_name or str(event.get("trial_name") or episode_id)
+    first_event = events[0] if events else {}
+    trial_name = args.trial_name or str(first_event.get("trial_name") or episode_id)
     if trial_name:
         headers["X-Trial-Name"] = trial_name
     if args.task_name:
@@ -199,14 +206,20 @@ def post_event(url: str, event: dict[str, Any], args: argparse.Namespace, episod
     if args.episode_operation:
         headers["X-Episode-Operation"] = args.episode_operation
 
-    data = json.dumps(event, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    data = json.dumps({"events": events}, ensure_ascii=False, sort_keys=True).encode("utf-8")
     request = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             if response.status >= 300:
                 raise RuntimeError(f"gateway returned HTTP {response.status}")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        event_ids = [str(event.get("event_id") or "") for event in events]
+        print(f"failed to post episode event batch {event_ids}: HTTP {exc.code}: {body}", file=sys.stderr)
+        return False
     except (urllib.error.URLError, RuntimeError) as exc:
-        print(f"failed to post episode event {event.get('event_id')}: {exc}", file=sys.stderr)
+        event_ids = [str(event.get("event_id") or "") for event in events]
+        print(f"failed to post episode event batch {event_ids}: {exc}", file=sys.stderr)
         return False
     return True
 
