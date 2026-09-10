@@ -90,7 +90,9 @@ This is a runtime inspection surface for the state the router is using; offline
 replay still reads `episode-events.jsonl` and applies its own cutoff reducer.
 When smart-router memory has no entry for the requested episode, the runtime
 state path can backfill from persisted audit traces and explicit episode
-events exposed by installed query plugins.
+events exposed by installed query plugins. The state includes a compact
+`recent_route_outcomes` history, linking recent model/budget choices to the
+next posted delivery, test, verifier, or no-progress event window.
 
 The session-to-episode stack is queryable separately:
 

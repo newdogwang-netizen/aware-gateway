@@ -924,6 +924,16 @@ func TestEpisodeLinksPostedOutcomesToPreviousRoute(t *testing.T) {
 	if got := states[0].State["last_route_outcome_label"]; got != routeOutcomePending {
 		t.Fatalf("route outcome label = %#v, want pending", got)
 	}
+	recentRoutes, ok := states[0].State["recent_route_outcomes"].([]map[string]any)
+	if !ok || len(recentRoutes) != 1 {
+		t.Fatalf("recent route outcomes = %#v, want one pending route", states[0].State["recent_route_outcomes"])
+	}
+	if got := recentRoutes[0]["route_trace_id"]; got != "trace-route-1" {
+		t.Fatalf("recent route trace = %#v, want trace-route-1", got)
+	}
+	if got := recentRoutes[0]["outcome_label"]; got != routeOutcomePending {
+		t.Fatalf("recent route outcome = %#v, want pending", got)
+	}
 
 	for _, event := range []*plugin.EpisodeEvent{
 		{
@@ -997,6 +1007,25 @@ func TestEpisodeLinksPostedOutcomesToPreviousRoute(t *testing.T) {
 	if got := state["route_outcome_negative_count"]; got != 1 {
 		t.Fatalf("route outcome negative count = %#v, want 1", got)
 	}
+	recentRoutes, ok = state["recent_route_outcomes"].([]map[string]any)
+	if !ok || len(recentRoutes) != 1 {
+		t.Fatalf("recent route outcomes = %#v, want one completed route", state["recent_route_outcomes"])
+	}
+	if got := recentRoutes[0]["outcome_label"]; got != routeOutcomeTestPassed {
+		t.Fatalf("recent route outcome = %#v, want test_passed", got)
+	}
+	if got := recentRoutes[0]["outcome_event_id"]; got != "event-test-passed" {
+		t.Fatalf("recent route outcome event = %#v, want event-test-passed", got)
+	}
+	if got := recentRoutes[0]["event_count"]; got != 3 {
+		t.Fatalf("recent route event count = %#v, want 3", got)
+	}
+	if got := recentRoutes[0]["progress"]; got != true {
+		t.Fatalf("recent route progress = %#v, want true", got)
+	}
+	if got := recentRoutes[0]["negative"]; got != true {
+		t.Fatalf("recent route negative = %#v, want true", got)
+	}
 
 	secondRoute := &plugin.AuditRecord{
 		TraceID:      "trace-route-2",
@@ -1030,6 +1059,19 @@ func TestEpisodeLinksPostedOutcomesToPreviousRoute(t *testing.T) {
 	}
 	if got := state["route_outcome_event_count"]; got != 3 {
 		t.Fatalf("total route outcome events = %#v, want total preserved", got)
+	}
+	recentRoutes, ok = state["recent_route_outcomes"].([]map[string]any)
+	if !ok || len(recentRoutes) != 2 {
+		t.Fatalf("recent route outcomes = %#v, want two route windows", state["recent_route_outcomes"])
+	}
+	if got := recentRoutes[0]["route_trace_id"]; got != "trace-route-1" {
+		t.Fatalf("first recent route trace = %#v, want trace-route-1", got)
+	}
+	if got := recentRoutes[1]["route_trace_id"]; got != "trace-route-2" {
+		t.Fatalf("second recent route trace = %#v, want trace-route-2", got)
+	}
+	if got := recentRoutes[1]["outcome_label"]; got != routeOutcomePending {
+		t.Fatalf("second recent route outcome = %#v, want pending", got)
 	}
 }
 

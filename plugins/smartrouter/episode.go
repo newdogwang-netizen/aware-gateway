@@ -84,6 +84,18 @@ type EpisodeEvent struct {
 	EvidenceRefs []string
 }
 
+type RouteOutcomeSummary struct {
+	TraceID        string
+	Model          string
+	BudgetAction   string
+	OutcomeLabel   string
+	OutcomeEventID string
+	Progress       bool
+	Negative       bool
+	EventCount     int
+	Timestamp      time.Time
+}
+
 type EpisodeState struct {
 	ID                          string
 	Version                     int
@@ -130,6 +142,7 @@ type EpisodeState struct {
 	RecentLengthFinishes        int
 	ConsecutiveErrors           int
 	RecentEvents                []EpisodeEvent
+	RecentRouteOutcomes         []RouteOutcomeSummary
 	SeenEventIDs                map[string]struct{}
 }
 
@@ -198,6 +211,7 @@ type EpisodeSnapshot struct {
 	RecentLengthFinishes        int
 	ConsecutiveErrors           int
 	RecentEvents                []EpisodeEvent
+	RecentRouteOutcomes         []RouteOutcomeSummary
 }
 
 func (s *SmartRouter) resolveEpisodeForRequest(req *http.Request, parsed *parsedRequest) EpisodeResolution {
@@ -708,6 +722,13 @@ func beginRouteOutcomeWindow(state *EpisodeState, event EpisodeEvent) {
 	state.LastRouteOutcomeEventID = ""
 	state.LastRouteOutcomeProgress = false
 	state.LastRouteOutcomeEventCount = 0
+	state.RecentRouteOutcomes = append(state.RecentRouteOutcomes, RouteOutcomeSummary{
+		TraceID:      event.ID,
+		Model:        event.Model,
+		BudgetAction: event.BudgetAction,
+		OutcomeLabel: routeOutcomePending,
+		Timestamp:    event.Timestamp,
+	})
 }
 
 func projectRouteOutcomeState(state *EpisodeState, event EpisodeEvent) {
@@ -723,11 +744,47 @@ func projectRouteOutcomeState(state *EpisodeState, event EpisodeEvent) {
 	state.LastRouteOutcomeProgress = progress
 	state.LastRouteOutcomeEventCount++
 	state.RouteOutcomeEventCount++
+	updateRecentRouteOutcome(state, label, event.ID, progress, negative)
 	if progress {
 		state.RouteOutcomeProgressCount++
 	}
 	if negative {
 		state.RouteOutcomeNegativeCount++
+	}
+}
+
+func updateRecentRouteOutcome(state *EpisodeState, label, eventID string, progress, negative bool) {
+	if state == nil || state.LastRouteTraceID == "" {
+		return
+	}
+	for i := len(state.RecentRouteOutcomes) - 1; i >= 0; i-- {
+		summary := &state.RecentRouteOutcomes[i]
+		if summary.TraceID != state.LastRouteTraceID {
+			continue
+		}
+		summary.OutcomeLabel = label
+		summary.OutcomeEventID = eventID
+		summary.Progress = summary.Progress || progress
+		summary.Negative = summary.Negative || negative
+		summary.EventCount++
+		return
+	}
+	state.RecentRouteOutcomes = append(state.RecentRouteOutcomes, RouteOutcomeSummary{
+		TraceID:        state.LastRouteTraceID,
+		OutcomeLabel:   label,
+		OutcomeEventID: eventID,
+		Progress:       progress,
+		Negative:       negative,
+		EventCount:     1,
+	})
+}
+
+func trimRouteOutcomeSummaries(state *EpisodeState, limit int) {
+	if state == nil || limit <= 0 {
+		return
+	}
+	if len(state.RecentRouteOutcomes) > limit {
+		state.RecentRouteOutcomes = state.RecentRouteOutcomes[len(state.RecentRouteOutcomes)-limit:]
 	}
 }
 
@@ -982,6 +1039,7 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 	if len(state.RecentEvents) > cfg.RecentEvents {
 		state.RecentEvents = state.RecentEvents[len(state.RecentEvents)-cfg.RecentEvents:]
 	}
+	trimRouteOutcomeSummaries(state, cfg.RecentEvents)
 	state.RecentLengthFinishes = countLengthFinishes(state.RecentEvents)
 	state.NoProgressSeverity = noProgressSeverity(state, cfg)
 	refreshNextCapability(state)
@@ -1013,6 +1071,8 @@ func snapshotFromEpisodeState(state *EpisodeState) EpisodeSnapshot {
 	}
 	recent := make([]EpisodeEvent, len(state.RecentEvents))
 	copy(recent, state.RecentEvents)
+	routeOutcomes := make([]RouteOutcomeSummary, len(state.RecentRouteOutcomes))
+	copy(routeOutcomes, state.RecentRouteOutcomes)
 	return EpisodeSnapshot{
 		ID:                          state.ID,
 		Version:                     state.Version,
@@ -1059,6 +1119,7 @@ func snapshotFromEpisodeState(state *EpisodeState) EpisodeSnapshot {
 		RecentLengthFinishes:        state.RecentLengthFinishes,
 		ConsecutiveErrors:           state.ConsecutiveErrors,
 		RecentEvents:                recent,
+		RecentRouteOutcomes:         routeOutcomes,
 	}
 }
 
@@ -1144,6 +1205,23 @@ func (s *SmartRouter) renderEpisodeSnapshot(snapshot EpisodeSnapshot) string {
 				event.TotalTokens,
 				event.Cost,
 				event.LatencyMs,
+			))
+		}
+	}
+	if len(snapshot.RecentRouteOutcomes) > 0 {
+		lines = append(lines, "recent_route_outcomes:")
+		for i, outcome := range snapshot.RecentRouteOutcomes {
+			lines = append(lines, fmt.Sprintf(
+				"%d. trace=%s model=%s budget=%s outcome=%s event=%s progress=%t negative=%t events=%d",
+				i+1,
+				valueOrUnknown(outcome.TraceID),
+				valueOrUnknown(outcome.Model),
+				valueOrUnknown(outcome.BudgetAction),
+				valueOrDefault(outcome.OutcomeLabel, routeOutcomePending),
+				valueOrUnknown(outcome.OutcomeEventID),
+				outcome.Progress,
+				outcome.Negative,
+				outcome.EventCount,
 			))
 		}
 	}
@@ -1247,6 +1325,27 @@ func episodeStatePayload(snapshot EpisodeSnapshot) map[string]any {
 			})
 		}
 		payload["recent_events"] = recent
+	}
+	if len(snapshot.RecentRouteOutcomes) > 0 {
+		outcomes := make([]map[string]any, 0, len(snapshot.RecentRouteOutcomes))
+		for _, outcome := range snapshot.RecentRouteOutcomes {
+			timestamp := ""
+			if !outcome.Timestamp.IsZero() {
+				timestamp = outcome.Timestamp.Format(time.RFC3339Nano)
+			}
+			outcomes = append(outcomes, map[string]any{
+				"route_trace_id":   outcome.TraceID,
+				"model":            outcome.Model,
+				"budget_action":    outcome.BudgetAction,
+				"outcome_label":    valueOrDefault(outcome.OutcomeLabel, routeOutcomePending),
+				"outcome_event_id": outcome.OutcomeEventID,
+				"progress":         outcome.Progress,
+				"negative":         outcome.Negative,
+				"event_count":      outcome.EventCount,
+				"timestamp":        timestamp,
+			})
+		}
+		payload["recent_route_outcomes"] = outcomes
 	}
 	return payload
 }

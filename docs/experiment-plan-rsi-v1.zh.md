@@ -749,6 +749,7 @@ Completion Guardrail Evidence     done for state-aware task_complete routing rea
 Stale Completion Invalidation     done for target writes after verifier success
 Route Outcome Linkage             done for route -> event/test/verifier windows
 Online Route Outcome Projection   done for posted events after each LLM route
+Recent Route Outcome History      done for compact route -> outcome memory in state/prompt
 Next Minimum Capability Hint      done for state-derived router prompt guidance
 Capability Floor Enforcement      done for hard recovery floors, advisory otherwise
 Online Episode State Query        done for GET /v1/episode-state
@@ -768,7 +769,7 @@ Session Stack Inspection          done for active task-line query and persisted 
 Outcome Event Projection          done for offline replay, online when events are posted
 Outcome-aware Replay              done
 Event-driven State Controller     partial for no-progress recovery
-Route-to-Outcome Feedback         partial for extractor/replay windows and online posted-event windows
+Route-to-Outcome Feedback         partial for extractor/replay windows and compact online route history
 Next-step Capability Estimate     partial via deterministic state hint, not yet acceptance-tuned
 Capability Floor Control          partial; hard verifier/no-progress floors enforced, assess floors audited only
 Online State Inspection           done for current in-memory projection

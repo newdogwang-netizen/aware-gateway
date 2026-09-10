@@ -405,7 +405,10 @@ trace/event query sources are available, smart-router performs a one-time
 best-effort backfill from persisted audit traces and explicit episode events.
 This gives experiment tooling a direct way to inspect the reducer output that
 routing decisions are using, without reconstructing it from raw events on every
-read.
+read. The projection includes both the latest route outcome and a compact
+`recent_route_outcomes` list, so the next router prompt can see which recent
+model/budget choices led to tests, delivery writes, verifier results, or
+no-progress signals.
 Use `/v1/episode-sessions` first when debugging task-line routing, then
 `/v1/episode-state` for the active episode returned by that session view.
 

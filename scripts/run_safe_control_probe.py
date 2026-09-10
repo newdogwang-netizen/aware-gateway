@@ -455,6 +455,7 @@ def run_probe(port: int) -> dict[str, Any]:
     session = f"{trial}__agent"
     cases: list[dict[str, Any]] = []
     for index, case in enumerate(PROBE_CASES, start=1):
+        step_name = f"{index:02d}-{case.name}"
         response = post_json(
             f"http://127.0.0.1:{port}/v1/chat/completions",
             {
@@ -469,12 +470,11 @@ def run_probe(port: int) -> dict[str, Any]:
             headers={
                 "X-Trial-Name": trial,
                 "X-Session-ID": session,
-                "X-Step-Name": f"{index:02d}-{case.name}",
+                "X-Step-Name": step_name,
                 "X-Task-Name": "phase2-safe-control-probe",
             },
         )
-        traces = fetch_json(f"http://127.0.0.1:{port}/v1/traces?session_id={session}&limit=1000")
-        agent_trace = latest_agent_trace(traces.get("traces", []), f"{index:02d}-{case.name}")
+        agent_trace = wait_for_agent_trace(port, session, step_name)
         reason = str(agent_trace.get("routing_reason") or "")
         source = classify_source(reason)
         routed_model = agent_trace.get("routed_model") or response.get("model") or ""
@@ -629,8 +629,7 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
             "X-Task-Name": task,
         },
     )
-    traces = fetch_json(f"http://127.0.0.1:{port}/v1/traces?session_id={session}&limit=1000")
-    route_trace = latest_agent_trace(traces.get("traces", []), route_step)
+    route_trace = wait_for_agent_trace(port, session, route_step)
     reason = str(route_trace.get("routing_reason") or "")
     checks.extend(
         [
@@ -776,8 +775,7 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
             "X-Task-Name": task,
         },
     )
-    failure_traces = fetch_json(f"http://127.0.0.1:{port}/v1/traces?session_id={failure_session}&limit=1000")
-    first_failure_trace = latest_agent_trace(failure_traces.get("traces", []), first_failure_step)
+    first_failure_trace = wait_for_agent_trace(port, failure_session, first_failure_step)
     first_failure_reason = str(first_failure_trace.get("routing_reason") or "")
     checks.extend(
         [
@@ -820,8 +818,7 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
             "X-Task-Name": task,
         },
     )
-    failure_traces = fetch_json(f"http://127.0.0.1:{port}/v1/traces?session_id={failure_session}&limit=1000")
-    second_failure_trace = latest_agent_trace(failure_traces.get("traces", []), second_failure_step)
+    second_failure_trace = wait_for_agent_trace(port, failure_session, second_failure_step)
     second_failure_reason = str(second_failure_trace.get("routing_reason") or "")
     checks.extend(
         [
@@ -933,8 +930,7 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
             "X-Task-Name": task,
         },
     )
-    completion_traces = fetch_json(f"http://127.0.0.1:{port}/v1/traces?session_id={completion_session}&limit=1000")
-    completion_trace = latest_agent_trace(completion_traces.get("traces", []), completion_step)
+    completion_trace = wait_for_agent_trace(port, completion_session, completion_step)
     completion_reason = str(completion_trace.get("routing_reason") or "")
     checks.extend(
         [
@@ -1074,10 +1070,7 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
             "X-Task-Name": task,
         },
     )
-    completion_regress_traces = fetch_json(
-        f"http://127.0.0.1:{port}/v1/traces?session_id={completion_regress_session}&limit=1000"
-    )
-    completion_regress_trace = latest_agent_trace(completion_regress_traces.get("traces", []), completion_regress_step)
+    completion_regress_trace = wait_for_agent_trace(port, completion_regress_session, completion_regress_step)
     completion_regress_reason = str(completion_regress_trace.get("routing_reason") or "")
     checks.extend(
         [
@@ -1175,8 +1168,7 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
             "X-Task-Name": task,
         },
     )
-    capability_floor_traces = fetch_json(f"http://127.0.0.1:{port}/v1/traces?session_id={capability_floor_session}&limit=1000")
-    capability_floor_trace = latest_agent_trace(capability_floor_traces.get("traces", []), capability_floor_step)
+    capability_floor_trace = wait_for_agent_trace(port, capability_floor_session, capability_floor_step)
     capability_floor_reason = str(capability_floor_trace.get("routing_reason") or "")
     checks.extend(
         [
@@ -1242,6 +1234,18 @@ def latest_agent_trace(traces: list[dict[str, Any]], step_name: str) -> dict[str
     if not matches:
         return {}
     return sorted(matches, key=lambda trace: trace.get("timestamp") or "")[-1]
+
+
+def wait_for_agent_trace(port: int, session_id: str, step_name: str, timeout_seconds: float = 3.0) -> dict[str, Any]:
+    deadline = time.time() + timeout_seconds
+    latest: dict[str, Any] = {}
+    while time.time() < deadline:
+        traces = fetch_json(f"http://127.0.0.1:{port}/v1/traces?session_id={session_id}&limit=1000")
+        latest = latest_agent_trace(traces.get("traces", []), step_name)
+        if latest:
+            return latest
+        time.sleep(0.05)
+    return latest
 
 
 def classify_source(reason: str) -> str:
