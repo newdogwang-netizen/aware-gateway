@@ -337,14 +337,18 @@ Requests outside those rules continue through the prompt-based smart-router.
 With `budgeted_route.enabled`, the router also attaches a route action profile
 to each decision. The gateway rewrites `max_tokens`, shortens the upstream
 timeout when configured, and records the budget action in audit traces.
-With `episode_runtime.enabled`, finished agent calls are projected into a
-small online episode state keyed by `X-Episode-ID` when provided, then
-`X-Session-ID` or `X-Trial-Name`. Recent outcomes, including repeated
-`finish_reason=length` in either a streak or the recent event window, are fed
-into the next router prompt and can dynamically increase the next route budget
-within configured ceilings. Audit traces now carry the episode id, operation,
-state version before routing, compact state-before JSON, and state-after JSON
-after the request is projected.
+With `episode_runtime.enabled`, the router now resolves a minimal online task
+line before routing. An explicit `X-Episode-ID` wins. Otherwise the resolver
+uses `X-Session-ID`/`X-Trial-Name` as the main episode and recognizes a small
+set of `continue`, `interrupt`, `resume`, `global`, and `unknown` signals from
+`X-Episode-Operation` or obvious latest-message language. Interrupts push a
+temporary episode on a per-session stack; resumes return to the previous task
+line. Finished agent calls are then projected into that episode state. Recent
+outcomes, including repeated `finish_reason=length` in either a streak or the
+recent event window, are fed into the next router prompt and can dynamically
+increase the next route budget within configured ceilings. Audit traces carry
+the resolved episode id, operation, state version before routing, compact
+state-before JSON, and state-after JSON after the request is projected.
 
 ## Project Structure
 

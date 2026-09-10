@@ -108,6 +108,8 @@ type SmartRouter struct {
 	controlStates map[string]*safeControlState
 	episodeMu     sync.Mutex
 	episodes      map[string]*EpisodeState
+	sessionMu     sync.Mutex
+	sessions      map[string]*EpisodeSession
 }
 
 func (s *SmartRouter) Name() string { return "smart-router" }
@@ -190,6 +192,7 @@ func (s *SmartRouter) Init(ctx *plugin.Context) error {
 	s.histories = make(map[string][]DecisionHistory)
 	s.controlStates = make(map[string]*safeControlState)
 	s.episodes = make(map[string]*EpisodeState)
+	s.sessions = make(map[string]*EpisodeSession)
 
 	s.logger.Info("smart-router initialized",
 		"endpoint", s.cfg.Endpoint,
@@ -227,6 +230,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 	if parsed == nil {
 		return &plugin.RoutingDecision{Skip: true}, nil
 	}
+	resolution := s.resolveEpisodeForRequest(req, parsed)
 
 	// If client pinned a known model, respect it.
 	if parsed.Model != "" {
@@ -249,7 +253,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 				Reason: "smart-router guardrail: task completion confirmation requires exact agent-control output",
 			}
 			s.applyRouteBudget(req, decision, budgetActionCompletionGuardrail)
-			s.attachEpisodeMetadata(req, decision, "continue")
+			s.attachEpisodeMetadata(req, decision, resolution.Operation)
 			return decision, nil
 		}
 	}
@@ -301,7 +305,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 				Reason: "cached: " + cached.Reason,
 			}
 			s.applyRouteBudget(req, routing, s.inferBudgetAction(cached.Model, nil))
-			s.attachEpisodeMetadata(req, routing, "continue")
+			s.attachEpisodeMetadata(req, routing, resolution.Operation)
 			return routing, nil
 		}
 	}
@@ -396,7 +400,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 		Reason: fmt.Sprintf("smart-router: %s", routingReason),
 	}
 	s.applyRouteBudget(req, routing, budgetAction)
-	s.attachEpisodeMetadata(req, routing, "continue")
+	s.attachEpisodeMetadata(req, routing, resolution.Operation)
 	return routing, nil
 }
 
@@ -557,6 +561,33 @@ func (s *SmartRouter) clearDecisionStateByKey(key string) {
 	s.episodeMu.Lock()
 	delete(s.episodes, key)
 	s.episodeMu.Unlock()
+
+	s.sessionMu.Lock()
+	for sessionKey, session := range s.sessions {
+		if session == nil {
+			continue
+		}
+		if key == sessionKey {
+			session.ActiveEpisodeID = sessionKey
+			session.Stack = []string{sessionKey}
+			session.NextEpisode = 0
+			continue
+		}
+		stack := make([]string, 0, len(session.Stack))
+		for _, episodeID := range session.Stack {
+			if episodeID != key {
+				stack = append(stack, episodeID)
+			}
+		}
+		if len(stack) == 0 {
+			stack = []string{sessionKey}
+		}
+		session.Stack = stack
+		if session.ActiveEpisodeID == key {
+			session.ActiveEpisodeID = stack[len(stack)-1]
+		}
+	}
+	s.sessionMu.Unlock()
 }
 
 func (s *SmartRouter) renderDecisionHistory(history []DecisionHistory) string {

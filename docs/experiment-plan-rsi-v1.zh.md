@@ -728,6 +728,7 @@ Real-history Smoke                done on A4/A5 shadow-relay
 P1 Outcome-aware Replay           done, replay-only
 P2 Windowed-progress Replay       done, candidate for next small pilot
 Online Episode ID                 done for explicit X-Episode-ID fallback to session/trial
+Online Episode Resolver           done for header/body operation plus minimal interrupt/resume stack
 Online State Version Audit        done for state-before/state-after trace fields
 Trace Query by Episode            done for /v1/traces?episode_id=...
 ```
@@ -739,12 +740,13 @@ Prompt Router                     done
 Safe-control Rule Layer           done
 Budgeted Route Action             done
 Minimal Episode Runtime           done
+Session Episode Stack             done for deterministic continue/interrupt/resume/global/unknown
 Outcome Event Projection          done for offline replay, partial online llm_call state
 Outcome-aware Replay              done
 Outcome-aware Screening Pilot     not started for P2
 Outcome-aware Acceptance          at least 3 runs per accepted task class
 Budget Policy Effectiveness       accepted or explicitly rejected
-Issue #1                          remains open until realtime Episode/Outcome loop exists
+Issue #1                          remains open until live tool/test/verifier events close the loop
 ```
 
 这轮的重点不是证明 aware-gateway 已经“智能完成”，而是建立一条能持续打磨的工程路径：

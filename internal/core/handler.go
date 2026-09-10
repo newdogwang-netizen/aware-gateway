@@ -50,6 +50,7 @@ type TaskContext struct {
 	StepName  string // X-Step-Name (e.g. "fix-bug")
 	TaskName  string // X-Task-Name (e.g. "data-anonymization")
 	EpisodeID string // X-Episode-ID (explicit task episode, when available)
+	EpisodeOp string // X-Episode-Operation (continue/interrupt/resume/global/unknown)
 }
 
 // PoolProvider abstracts pool lookup for hot-reload support.
@@ -149,6 +150,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"step_name", taskCtx.StepName,
 		"task_name", taskCtx.TaskName,
 		"episode_id", taskCtx.EpisodeID,
+		"episode_operation", taskCtx.EpisodeOp,
 	)
 
 	// --- 2. Authenticators ---
@@ -591,7 +593,17 @@ func (h *Handler) recordAudit(
 	// Build audit record
 	episodeID := routeEpisodeID
 	if episodeID == "" {
+		episodeID = r.Header.Get("X-Episode-ID")
+	}
+	if episodeID == "" {
 		episodeID = taskCtx.EpisodeID
+	}
+	episodeOp := routeEpisodeOp
+	if episodeOp == "" {
+		episodeOp = r.Header.Get("X-Episode-Operation")
+	}
+	if episodeOp == "" {
+		episodeOp = taskCtx.EpisodeOp
 	}
 	record := &plugin.AuditRecord{
 		TraceID:        traceID,
@@ -618,7 +630,7 @@ func (h *Handler) recordAudit(
 		RoutingReason:  routingReason,
 		ErrorKind:      classifyError(dw.code),
 		EpisodeID:      episodeID,
-		EpisodeOp:      routeEpisodeOp,
+		EpisodeOp:      episodeOp,
 		StateVersion:   routeStateVersion,
 		StateBefore:    routeStateBefore,
 		SessionID:      taskCtx.SessionID,
@@ -671,6 +683,7 @@ func extractTaskContext(r *http.Request, body []byte) TaskContext {
 		StepName:  r.Header.Get("X-Step-Name"),
 		TaskName:  r.Header.Get("X-Task-Name"),
 		EpisodeID: r.Header.Get("X-Episode-ID"),
+		EpisodeOp: r.Header.Get("X-Episode-Operation"),
 	}
 
 	if taskCtx.SessionID == "" {
@@ -681,6 +694,11 @@ func extractTaskContext(r *http.Request, body []byte) TaskContext {
 	if taskCtx.EpisodeID == "" {
 		if eid := episodeIDFromBody(body); eid != "" {
 			taskCtx.EpisodeID = eid
+		}
+	}
+	if taskCtx.EpisodeOp == "" {
+		if op := episodeOperationFromBody(body); op != "" {
+			taskCtx.EpisodeOp = op
 		}
 	}
 	if taskCtx.TrialName == "" && taskCtx.SessionID != "" {
@@ -695,6 +713,10 @@ func sessionIDFromBody(body []byte) string {
 
 func episodeIDFromBody(body []byte) string {
 	return stringFieldFromBody(body, "episode_id")
+}
+
+func episodeOperationFromBody(body []byte) string {
+	return stringFieldFromBody(body, "episode_operation")
 }
 
 func stringFieldFromBody(body []byte, key string) string {
@@ -746,6 +768,9 @@ func normalizeTaskHeaders(r *http.Request, taskCtx TaskContext) {
 	if taskCtx.EpisodeID != "" {
 		r.Header.Set("X-Episode-ID", taskCtx.EpisodeID)
 	}
+	if taskCtx.EpisodeOp != "" {
+		r.Header.Set("X-Episode-Operation", taskCtx.EpisodeOp)
+	}
 }
 
 func stripInternalRequestFields(body []byte) []byte {
@@ -766,6 +791,10 @@ func stripInternalRequestFields(body []byte) []byte {
 		delete(req, "episode_id")
 		changed = true
 	}
+	if _, ok := req["episode_operation"]; ok {
+		delete(req, "episode_operation")
+		changed = true
+	}
 	if extraBody, ok := req["extra_body"].(map[string]any); ok {
 		if _, ok := extraBody["session_id"]; ok {
 			delete(extraBody, "session_id")
@@ -773,6 +802,10 @@ func stripInternalRequestFields(body []byte) []byte {
 		}
 		if _, ok := extraBody["episode_id"]; ok {
 			delete(extraBody, "episode_id")
+			changed = true
+		}
+		if _, ok := extraBody["episode_operation"]; ok {
+			delete(extraBody, "episode_operation")
 			changed = true
 		}
 		if len(extraBody) == 0 {

@@ -18,6 +18,12 @@ const (
 	defaultEpisodeTimeoutMultiplier     = 2.0
 	defaultEpisodeMaxTokensCeiling      = 8192
 	defaultEpisodeTimeoutMsCeiling      = 240000
+
+	episodeOperationContinue  = "continue"
+	episodeOperationInterrupt = "interrupt"
+	episodeOperationResume    = "resume"
+	episodeOperationGlobal    = "global"
+	episodeOperationUnknown   = "unknown"
 )
 
 // EpisodeConfig enables a small in-memory event projection for one task line.
@@ -61,6 +67,20 @@ type EpisodeState struct {
 	RecentEvents              []EpisodeEvent
 }
 
+type EpisodeSession struct {
+	Key             string
+	ActiveEpisodeID string
+	Stack           []string
+	NextEpisode     int
+}
+
+type EpisodeResolution struct {
+	EpisodeID  string
+	Operation  string
+	Confidence float64
+	Evidence   []string
+}
+
 type EpisodeSnapshot struct {
 	ID                        string
 	Version                   int
@@ -74,6 +94,220 @@ type EpisodeSnapshot struct {
 	RecentLengthFinishes      int
 	ConsecutiveErrors         int
 	RecentEvents              []EpisodeEvent
+}
+
+func (s *SmartRouter) resolveEpisodeForRequest(req *http.Request, parsed *parsedRequest) EpisodeResolution {
+	cfg := s.episodeConfig()
+	if req == nil || parsed == nil || !cfg.Enabled {
+		return EpisodeResolution{}
+	}
+
+	explicitEpisodeID := strings.TrimSpace(req.Header.Get("X-Episode-ID"))
+	sessionKey := episodeSessionKeyFromRequest(req)
+	operation := normalizeEpisodeOperation(req.Header.Get("X-Episode-Operation"))
+	if explicitEpisodeID != "" {
+		if operation == "" {
+			operation = episodeOperationContinue
+		}
+		s.rememberExplicitEpisode(sessionKey, explicitEpisodeID, operation)
+		setEpisodeHeaders(req, explicitEpisodeID, operation)
+		return EpisodeResolution{
+			EpisodeID:  explicitEpisodeID,
+			Operation:  operation,
+			Confidence: 1,
+			Evidence:   []string{"explicit_episode_id"},
+		}
+	}
+	if sessionKey == "" {
+		return EpisodeResolution{}
+	}
+
+	message := normalizeForRules(parsed.LatestUserMsg)
+	if operation == "" {
+		operation = inferEpisodeOperation(message)
+	}
+	resolution := s.resolveSessionEpisode(sessionKey, operation)
+	setEpisodeHeaders(req, resolution.EpisodeID, resolution.Operation)
+	return resolution
+}
+
+func (s *SmartRouter) resolveSessionEpisode(sessionKey, operation string) EpisodeResolution {
+	if operation == "" {
+		operation = episodeOperationContinue
+	}
+
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	if s.sessions == nil {
+		s.sessions = make(map[string]*EpisodeSession)
+	}
+	session := s.sessions[sessionKey]
+	if session == nil {
+		session = &EpisodeSession{Key: sessionKey, ActiveEpisodeID: sessionKey, Stack: []string{sessionKey}}
+		s.sessions[sessionKey] = session
+	}
+	if session.ActiveEpisodeID == "" {
+		session.ActiveEpisodeID = sessionKey
+	}
+	if len(session.Stack) == 0 {
+		session.Stack = []string{session.ActiveEpisodeID}
+	}
+
+	switch operation {
+	case episodeOperationInterrupt:
+		session.NextEpisode++
+		session.ActiveEpisodeID = fmt.Sprintf("%s#episode-%d", sessionKey, session.NextEpisode)
+		session.Stack = append(session.Stack, session.ActiveEpisodeID)
+		return EpisodeResolution{
+			EpisodeID:  session.ActiveEpisodeID,
+			Operation:  episodeOperationInterrupt,
+			Confidence: 0.86,
+			Evidence:   []string{"detected_side_task_language"},
+		}
+	case episodeOperationResume:
+		if len(session.Stack) > 1 {
+			session.Stack = session.Stack[:len(session.Stack)-1]
+			session.ActiveEpisodeID = session.Stack[len(session.Stack)-1]
+		} else {
+			session.ActiveEpisodeID = sessionKey
+			session.Stack = []string{sessionKey}
+		}
+		return EpisodeResolution{
+			EpisodeID:  session.ActiveEpisodeID,
+			Operation:  episodeOperationResume,
+			Confidence: 0.88,
+			Evidence:   []string{"detected_resume_language"},
+		}
+	case episodeOperationGlobal:
+		return EpisodeResolution{
+			EpisodeID:  session.ActiveEpisodeID,
+			Operation:  episodeOperationGlobal,
+			Confidence: 0.82,
+			Evidence:   []string{"detected_global_constraint_language"},
+		}
+	case episodeOperationUnknown:
+		return EpisodeResolution{
+			EpisodeID:  session.ActiveEpisodeID,
+			Operation:  episodeOperationUnknown,
+			Confidence: 0.5,
+			Evidence:   []string{"unknown_episode_operation"},
+		}
+	default:
+		return EpisodeResolution{
+			EpisodeID:  session.ActiveEpisodeID,
+			Operation:  episodeOperationContinue,
+			Confidence: 0.8,
+			Evidence:   []string{"active_episode"},
+		}
+	}
+}
+
+func (s *SmartRouter) rememberExplicitEpisode(sessionKey, episodeID, operation string) {
+	if sessionKey == "" || episodeID == "" {
+		return
+	}
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	if s.sessions == nil {
+		s.sessions = make(map[string]*EpisodeSession)
+	}
+	session := s.sessions[sessionKey]
+	if session == nil {
+		session = &EpisodeSession{Key: sessionKey, ActiveEpisodeID: episodeID, Stack: []string{episodeID}}
+		s.sessions[sessionKey] = session
+	}
+	if operation == episodeOperationInterrupt && session.ActiveEpisodeID != episodeID {
+		session.Stack = appendUniqueEpisode(session.Stack, episodeID)
+	}
+	if operation == episodeOperationResume {
+		session.Stack = trimStackToEpisode(session.Stack, episodeID)
+	}
+	session.ActiveEpisodeID = episodeID
+	if len(session.Stack) == 0 {
+		session.Stack = []string{episodeID}
+	}
+}
+
+func setEpisodeHeaders(req *http.Request, episodeID, operation string) {
+	if req == nil || episodeID == "" {
+		return
+	}
+	req.Header.Set("X-Episode-ID", episodeID)
+	if operation != "" {
+		req.Header.Set("X-Episode-Operation", operation)
+	}
+}
+
+func inferEpisodeOperation(message string) string {
+	switch {
+	case looksLikeEpisodeResume(message):
+		return episodeOperationResume
+	case looksLikeEpisodeInterrupt(message):
+		return episodeOperationInterrupt
+	case looksLikeEpisodeGlobal(message):
+		return episodeOperationGlobal
+	default:
+		return episodeOperationContinue
+	}
+}
+
+func looksLikeEpisodeInterrupt(message string) bool {
+	return containsAny(message, []string{
+		"顺便",
+		"支线",
+		"临时",
+		"另外",
+		"先处理",
+		"先看一下",
+		"插一下",
+		"插个",
+		"side task",
+		"side quest",
+		"quick detour",
+		"separate task",
+		"unrelated",
+		"before that",
+	})
+}
+
+func looksLikeEpisodeResume(message string) bool {
+	return containsAny(message, []string{
+		"回到",
+		"回主线",
+		"回主任务",
+		"恢复",
+		"继续主任务",
+		"继续原来的",
+		"继续之前",
+		"继续刚才",
+		"resume",
+		"back to",
+		"return to",
+		"switch back",
+	})
+}
+
+func looksLikeEpisodeGlobal(message string) bool {
+	return containsAny(message, []string{
+		"全局",
+		"以后都",
+		"所有任务",
+		"默认",
+		"总是",
+		"from now on",
+		"for all tasks",
+		"always",
+		"default behavior",
+	})
+}
+
+func normalizeEpisodeOperation(operation string) string {
+	switch strings.ToLower(strings.TrimSpace(operation)) {
+	case episodeOperationContinue, episodeOperationInterrupt, episodeOperationResume, episodeOperationGlobal, episodeOperationUnknown:
+		return strings.ToLower(strings.TrimSpace(operation))
+	default:
+		return ""
+	}
 }
 
 func (s *SmartRouter) episodeConfig() EpisodeConfig {
@@ -283,8 +517,11 @@ func (s *SmartRouter) attachEpisodeMetadata(req *http.Request, decision *plugin.
 	if decision == nil || decision.Skip {
 		return
 	}
+	if headerOperation := normalizeEpisodeOperation(req.Header.Get("X-Episode-Operation")); headerOperation != "" {
+		operation = headerOperation
+	}
 	if operation == "" {
-		operation = "continue"
+		operation = episodeOperationContinue
 	}
 	snapshot := s.episodeSnapshot(req)
 	if snapshot.ID == "" {
@@ -350,6 +587,19 @@ func episodeKeyFromRequest(req *http.Request) string {
 	return strings.TrimSpace(req.Header.Get("X-Trial-Name"))
 }
 
+func episodeSessionKeyFromRequest(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	if key := strings.TrimSpace(req.Header.Get("X-Session-ID")); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(req.Header.Get("X-Trial-Name")); key != "" {
+		return key
+	}
+	return strings.TrimSpace(req.Header.Get("X-Episode-ID"))
+}
+
 func episodeKeyFromRecord(record *plugin.AuditRecord) string {
 	if record.EpisodeID != "" {
 		return record.EpisodeID
@@ -358,6 +608,30 @@ func episodeKeyFromRecord(record *plugin.AuditRecord) string {
 		return record.SessionID
 	}
 	return record.TrialName
+}
+
+func appendUniqueEpisode(stack []string, episodeID string) []string {
+	if episodeID == "" {
+		return stack
+	}
+	for _, existing := range stack {
+		if existing == episodeID {
+			return stack
+		}
+	}
+	return append(stack, episodeID)
+}
+
+func trimStackToEpisode(stack []string, episodeID string) []string {
+	if episodeID == "" {
+		return stack
+	}
+	for index := len(stack) - 1; index >= 0; index-- {
+		if stack[index] == episodeID {
+			return stack[:index+1]
+		}
+	}
+	return append(stack, episodeID)
 }
 
 func isDecisionModelRecord(record *plugin.AuditRecord) bool {

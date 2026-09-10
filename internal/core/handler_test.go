@@ -18,10 +18,12 @@ import (
 func TestHandlerBodySessionIDFeedsRouterAuditAndIsStrippedUpstream(t *testing.T) {
 	var upstreamHeader string
 	var upstreamEpisodeHeader string
+	var upstreamEpisodeOpHeader string
 	var upstreamBody map[string]any
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHeader = r.Header.Get("X-Session-ID")
 		upstreamEpisodeHeader = r.Header.Get("X-Episode-ID")
+		upstreamEpisodeOpHeader = r.Header.Get("X-Episode-Operation")
 		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
 			t.Fatalf("decode upstream body: %v", err)
 		}
@@ -70,6 +72,7 @@ func TestHandlerBodySessionIDFeedsRouterAuditAndIsStrippedUpstream(t *testing.T)
 			"model": "auto",
 			"session_id": "trial-abc__agent",
 			"episode_id": "episode-router-state",
+			"episode_operation": "resume",
 			"messages": [{"role": "user", "content": "fix the failing tests"}]
 		}`),
 	)
@@ -90,11 +93,17 @@ func TestHandlerBodySessionIDFeedsRouterAuditAndIsStrippedUpstream(t *testing.T)
 	if router.episodeID != "episode-router-state" {
 		t.Fatalf("router episode id = %q, want episode-router-state", router.episodeID)
 	}
+	if router.seenEpisodeOp != "resume" {
+		t.Fatalf("router episode operation header = %q, want resume", router.seenEpisodeOp)
+	}
 	if _, ok := router.body["session_id"]; ok {
 		t.Fatalf("router body still has internal session_id: %#v", router.body)
 	}
 	if _, ok := router.body["episode_id"]; ok {
 		t.Fatalf("router body still has internal episode_id: %#v", router.body)
+	}
+	if _, ok := router.body["episode_operation"]; ok {
+		t.Fatalf("router body still has internal episode_operation: %#v", router.body)
 	}
 	if upstreamHeader != "" {
 		t.Fatalf("upstream X-Session-ID = %q, want stripped", upstreamHeader)
@@ -102,11 +111,17 @@ func TestHandlerBodySessionIDFeedsRouterAuditAndIsStrippedUpstream(t *testing.T)
 	if upstreamEpisodeHeader != "" {
 		t.Fatalf("upstream X-Episode-ID = %q, want stripped", upstreamEpisodeHeader)
 	}
+	if upstreamEpisodeOpHeader != "" {
+		t.Fatalf("upstream X-Episode-Operation = %q, want stripped", upstreamEpisodeOpHeader)
+	}
 	if _, ok := upstreamBody["session_id"]; ok {
 		t.Fatalf("upstream body still has internal session_id: %#v", upstreamBody)
 	}
 	if _, ok := upstreamBody["episode_id"]; ok {
 		t.Fatalf("upstream body still has internal episode_id: %#v", upstreamBody)
+	}
+	if _, ok := upstreamBody["episode_operation"]; ok {
+		t.Fatalf("upstream body still has internal episode_operation: %#v", upstreamBody)
 	}
 	if got := upstreamBody["model"]; got != "openai/gpt-5.6-sol" {
 		t.Fatalf("upstream model = %v, want openai/gpt-5.6-sol", got)
@@ -122,6 +137,9 @@ func TestHandlerBodySessionIDFeedsRouterAuditAndIsStrippedUpstream(t *testing.T)
 	}
 	if audit.records[0].EpisodeID != "episode-router-state" {
 		t.Fatalf("audit episode id = %q, want episode-router-state", audit.records[0].EpisodeID)
+	}
+	if audit.records[0].EpisodeOp != "resume" {
+		t.Fatalf("audit episode operation = %q, want resume", audit.records[0].EpisodeOp)
 	}
 }
 
@@ -459,9 +477,11 @@ func TestStripInternalRequestFieldsKeepsOtherExtraBodyFields(t *testing.T) {
 		"model": "auto",
 		"session_id": "trial-strip__agent",
 		"episode_id": "episode-strip",
+		"episode_operation": "interrupt",
 		"extra_body": {
 			"session_id": "trial-strip__agent",
 			"episode_id": "episode-strip",
+			"episode_operation": "interrupt",
 			"return_token_ids": true
 		}
 	}`)
@@ -477,6 +497,9 @@ func TestStripInternalRequestFieldsKeepsOtherExtraBodyFields(t *testing.T) {
 	if _, ok := got["episode_id"]; ok {
 		t.Fatalf("top-level episode_id was not stripped: %#v", got)
 	}
+	if _, ok := got["episode_operation"]; ok {
+		t.Fatalf("top-level episode_operation was not stripped: %#v", got)
+	}
 	extraBody, ok := got["extra_body"].(map[string]any)
 	if !ok {
 		t.Fatalf("extra_body missing or wrong type: %#v", got["extra_body"])
@@ -486,6 +509,9 @@ func TestStripInternalRequestFieldsKeepsOtherExtraBodyFields(t *testing.T) {
 	}
 	if _, ok := extraBody["episode_id"]; ok {
 		t.Fatalf("nested episode_id was not stripped: %#v", extraBody)
+	}
+	if _, ok := extraBody["episode_operation"]; ok {
+		t.Fatalf("nested episode_operation was not stripped: %#v", extraBody)
 	}
 	if got := extraBody["return_token_ids"]; got != true {
 		t.Fatalf("return_token_ids = %v, want true", got)
@@ -655,17 +681,18 @@ func TestHandlerReleasesInFlightOnNonStreamingBodyTimeout(t *testing.T) {
 }
 
 type capturingRouter struct {
-	sessionID    string
-	trialName    string
-	episodeID    string
-	body         map[string]any
-	model        string
-	budgetAction string
-	maxTokens    int
-	timeoutMs    int
-	episodeOp    string
-	stateVersion int
-	stateBefore  string
+	sessionID     string
+	trialName     string
+	episodeID     string
+	body          map[string]any
+	model         string
+	budgetAction  string
+	maxTokens     int
+	timeoutMs     int
+	episodeOp     string
+	seenEpisodeOp string
+	stateVersion  int
+	stateBefore   string
 }
 
 func (r *capturingRouter) Name() string { return "capturing-router" }
@@ -680,6 +707,7 @@ func (r *capturingRouter) Route(req *http.Request, body []byte) (*plugin.Routing
 	if headerEpisodeID := req.Header.Get("X-Episode-ID"); headerEpisodeID != "" {
 		r.episodeID = headerEpisodeID
 	}
+	r.seenEpisodeOp = req.Header.Get("X-Episode-Operation")
 	_ = json.Unmarshal(body, &r.body)
 	model := r.model
 	if model == "" {

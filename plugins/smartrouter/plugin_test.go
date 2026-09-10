@@ -615,6 +615,161 @@ func TestRouteAnnotatesEpisodeStateBeforeAndAfter(t *testing.T) {
 	}
 }
 
+func TestEpisodeResolverInterruptsAndResumesTaskLines(t *testing.T) {
+	var prompts []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll request body: %v", err)
+		}
+		var payload struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Fatalf("decode decision request: %v", err)
+		}
+		if len(payload.Messages) == 0 {
+			t.Fatal("decision request had no messages")
+		}
+		prompts = append(prompts, payload.Messages[0].Content)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"message": {"content": "{\"model\":\"z-ai/glm-5.3-flash\",\"turn_type\":\"mechanical_probe\",\"hypothesis_state\":\"stable\",\"critical_path\":false,\"recoverability\":\"easy\",\"budget_action\":\"cheap_probe\",\"context_summary\":\"bounded check\",\"reason\":\"cheap probe\"}"}}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+		}`)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	router.cfg.CacheTTLSeconds = -1
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req1.Header.Set("X-Session-ID", "session-stack")
+	body1 := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue main implementation."}]}`)
+	decision1, err := router.Route(req1, body1)
+	if err != nil {
+		t.Fatalf("first Route returned error: %v", err)
+	}
+	if decision1.EpisodeID != "session-stack" {
+		t.Fatalf("first episode id = %q, want session-stack", decision1.EpisodeID)
+	}
+	if decision1.EpisodeOperation != "continue" {
+		t.Fatalf("first episode operation = %q, want continue", decision1.EpisodeOperation)
+	}
+	mainRecord := &plugin.AuditRecord{
+		Timestamp:    time.Now(),
+		SessionID:    "session-stack",
+		EpisodeID:    decision1.EpisodeID,
+		EpisodeOp:    decision1.EpisodeOperation,
+		StateVersion: decision1.EpisodeStateVersion,
+		StateBefore:  decision1.EpisodeStateBefore,
+		Pool:         "openrouter",
+		RoutedModel:  decision1.Model,
+		Status:       200,
+		FinishReason: "stop",
+		BudgetAction: decision1.BudgetAction,
+		TotalTokens:  400,
+		Cost:         0.01,
+	}
+	if err := router.Record(mainRecord); err != nil {
+		t.Fatalf("main Record returned error: %v", err)
+	}
+
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req2.Header.Set("X-Session-ID", "session-stack")
+	body2 := []byte(`{"model":"auto","messages":[{"role":"user","content":"Before that, handle a separate task about OpenRouter 502."}]}`)
+	decision2, err := router.Route(req2, body2)
+	if err != nil {
+		t.Fatalf("interrupt Route returned error: %v", err)
+	}
+	if decision2.EpisodeID != "session-stack#episode-1" {
+		t.Fatalf("interrupt episode id = %q, want session-stack#episode-1", decision2.EpisodeID)
+	}
+	if decision2.EpisodeOperation != "interrupt" {
+		t.Fatalf("interrupt episode operation = %q, want interrupt", decision2.EpisodeOperation)
+	}
+	if decision2.EpisodeStateVersion != 0 {
+		t.Fatalf("interrupt state version = %d, want isolated empty state", decision2.EpisodeStateVersion)
+	}
+	branchRecord := &plugin.AuditRecord{
+		Timestamp:    time.Now(),
+		SessionID:    "session-stack",
+		EpisodeID:    decision2.EpisodeID,
+		EpisodeOp:    decision2.EpisodeOperation,
+		StateVersion: decision2.EpisodeStateVersion,
+		StateBefore:  decision2.EpisodeStateBefore,
+		Pool:         "openrouter",
+		RoutedModel:  decision2.Model,
+		Status:       200,
+		FinishReason: "length",
+		BudgetAction: decision2.BudgetAction,
+		TotalTokens:  900,
+		Cost:         0.02,
+	}
+	if err := router.Record(branchRecord); err != nil {
+		t.Fatalf("branch Record returned error: %v", err)
+	}
+
+	req3 := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req3.Header.Set("X-Session-ID", "session-stack")
+	body3 := []byte(`{"model":"auto","messages":[{"role":"user","content":"Back to the main task; continue stateful routing."}]}`)
+	decision3, err := router.Route(req3, body3)
+	if err != nil {
+		t.Fatalf("resume Route returned error: %v", err)
+	}
+	if decision3.EpisodeID != "session-stack" {
+		t.Fatalf("resume episode id = %q, want session-stack", decision3.EpisodeID)
+	}
+	if decision3.EpisodeOperation != "resume" {
+		t.Fatalf("resume episode operation = %q, want resume", decision3.EpisodeOperation)
+	}
+	if decision3.EpisodeStateVersion != 1 {
+		t.Fatalf("resume state version = %d, want main state version 1", decision3.EpisodeStateVersion)
+	}
+
+	if len(prompts) != 3 {
+		t.Fatalf("decision prompts = %d, want 3", len(prompts))
+	}
+	if !strings.Contains(prompts[1], "episode_id=session-stack#episode-1 state_version=0") {
+		t.Fatalf("interrupt prompt missing isolated branch state:\n%s", prompts[1])
+	}
+	if !strings.Contains(prompts[2], "episode_id=session-stack state_version=1") {
+		t.Fatalf("resume prompt missing restored main state:\n%s", prompts[2])
+	}
+}
+
+func TestClearDecisionStateResetsMainEpisodeStack(t *testing.T) {
+	router := newTestSmartRouter("")
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true}
+
+	main := router.resolveSessionEpisode("session-clear", episodeOperationContinue)
+	branch := router.resolveSessionEpisode("session-clear", episodeOperationInterrupt)
+	if main.EpisodeID != "session-clear" || branch.EpisodeID != "session-clear#episode-1" {
+		t.Fatalf("unexpected setup: main=%q branch=%q", main.EpisodeID, branch.EpisodeID)
+	}
+
+	router.clearDecisionStateByKey("session-clear")
+
+	router.sessionMu.Lock()
+	session := router.sessions["session-clear"]
+	router.sessionMu.Unlock()
+	if session == nil {
+		t.Fatal("session missing after clear")
+	}
+	if session.ActiveEpisodeID != "session-clear" {
+		t.Fatalf("active episode = %q, want session-clear", session.ActiveEpisodeID)
+	}
+	if len(session.Stack) != 1 || session.Stack[0] != "session-clear" {
+		t.Fatalf("session stack = %#v, want only session-clear", session.Stack)
+	}
+	if session.NextEpisode != 0 {
+		t.Fatalf("next episode = %d, want reset to 0", session.NextEpisode)
+	}
+}
+
 func TestEpisodeOutcomeDoesNotTreatStopAsTaskCompletion(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -1440,6 +1595,7 @@ func newTestSmartRouter(endpoint string) *SmartRouter {
 		histories:     map[string][]DecisionHistory{},
 		controlStates: map[string]*safeControlState{},
 		episodes:      map[string]*EpisodeState{},
+		sessions:      map[string]*EpisodeSession{},
 	}
 	router.menuJSON = router.buildMenuText()
 	return router

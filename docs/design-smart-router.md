@@ -281,11 +281,19 @@ The audit trace exposes these as `route_budget_action`, `route_max_tokens`, and
 
 ### Minimal Episode Runtime
 
-`episode_runtime.enabled` makes smart-router also implement an audit sink. After
-each finished agent call, the audit record is projected into an in-memory
-episode keyed by `X-Episode-ID` when provided, then `X-Session-ID` or
-`X-Trial-Name`. Decision-model audit records are ignored so the state describes
-agent work, not judge overhead.
+`episode_runtime.enabled` first resolves which task line the request belongs
+to, then makes smart-router also implement an audit sink. An explicit
+`X-Episode-ID` wins. Without one, the resolver treats `X-Session-ID` or
+`X-Trial-Name` as the main episode and keeps a small per-session stack. A
+detected `interrupt` opens `session#episode-N`; a detected `resume` pops back
+to the previous task line; `continue`, `global`, and `unknown` stay on the
+active line. The operation can be supplied with `X-Episode-Operation` or
+body/extra_body `episode_operation`, and the handler strips those internal
+fields before forwarding upstream.
+
+After each finished agent call, the audit record is projected into the resolved
+in-memory episode. Decision-model audit records are ignored so the state
+describes agent work, not judge overhead.
 
 The first reducer tracks only stable control signals:
 
@@ -321,9 +329,9 @@ is disabled. With the audit SQLite store enabled, `/v1/traces?episode_id=...`
 can fetch one task line directly.
 
 This is not the full Issue #1 runtime. It does not yet identify nested task
-lines automatically, infer continue/resume boundaries without explicit
-episode ids, project live tool/file/test events, project verifier results, or
-perform offline policy updates. It is the smallest online state chain needed to
+lines with a semantic resolver, project live tool/file/test events, project
+verifier results, or perform offline policy updates. It is the smallest online
+state chain needed to
 make route decisions auditable against the state they actually saw.
 
 A5 showed the boundary of this first loop: the episode feedback fired in a real
