@@ -1354,6 +1354,221 @@ func TestQueryEpisodeStatesBackfillsPersistedEvents(t *testing.T) {
 	}
 }
 
+func TestEpisodeRepeatedTestFailureRoutesPremiumRecoveryOnce(t *testing.T) {
+	decisionCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"message": {"content": "{\"model\":\"z-ai/glm-5.3-flash\",\"turn_type\":\"implementation\",\"hypothesis_state\":\"forming\",\"critical_path\":false,\"recoverability\":\"medium\",\"budget_action\":\"cheap_probe\",\"context_summary\":\"reassess after local recovery\",\"reason\":\"semantic judge resumes after one local repeated-failure recovery\"}"}}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+		}`)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.CacheTTLSeconds = -1
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionCheapProbe:     {MaxTokens: 500, TimeoutMs: 5000},
+			budgetActionPremiumRecover: {MaxTokens: 1000, TimeoutMs: 10000},
+		},
+	}
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	for i := 0; i < 2; i++ {
+		if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+			EventID:   fmt.Sprintf("event-repeated-failure-%d", i+1),
+			EpisodeID: "episode-repeated-failure",
+			Timestamp: time.Now(),
+			Kind:      "test_run",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":             "failed",
+				"command":             "go test ./...",
+				"failure_fingerprint": "AssertionError: expected relay id 7 got 8",
+				"failed_count":        2,
+			},
+			EvidenceRefs: []string{"stdout"},
+		}); err != nil {
+			t.Fatalf("RecordEpisodeEvent %d returned error: %v", i+1, err)
+		}
+	}
+
+	states, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: "episode-repeated-failure"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates returned error: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	if got := states[0].State["same_failure_fingerprint_count"]; got != 2 {
+		t.Fatalf("same failure count = %#v, want 2", got)
+	}
+	if got := states[0].State["failure_frontier_size"]; got != 2 {
+		t.Fatalf("failure frontier size = %#v, want 2", got)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-repeated-failure")
+	req.Header.Set("X-Session-ID", "episode-repeated-failure")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue with the next bounded implementation step."}]}`)
+	first, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("first Route returned error: %v", err)
+	}
+	if decisionCalls != 0 {
+		t.Fatal("decision server was called; want first repeated failure handled locally")
+	}
+	if first == nil || first.Model != "anthropic/claude-opus-5" {
+		t.Fatalf("first decision = %#v, want Opus recovery", first)
+	}
+	if first.BudgetAction != budgetActionPremiumRecover {
+		t.Fatalf("first budget action = %q, want %s", first.BudgetAction, budgetActionPremiumRecover)
+	}
+	for _, want := range []string{
+		"rule_id=episode_repeated_failure_recovery",
+		"same_failure_count=2",
+		"failure_frontier_size=2",
+		"failure_fingerprint=assertionerror: expected relay id # got #",
+	} {
+		if !strings.Contains(first.Reason, want) {
+			t.Fatalf("first reason = %q, want %q", first.Reason, want)
+		}
+	}
+
+	second, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("second Route returned error: %v", err)
+	}
+	if decisionCalls != 1 {
+		t.Fatalf("decision server calls = %d, want semantic judge after one local recovery", decisionCalls)
+	}
+	if second == nil || second.Model != "z-ai/glm-5.3-flash" {
+		t.Fatalf("second decision = %#v, want decision-model route", second)
+	}
+	if strings.Contains(second.Reason, "rule_id=episode_repeated_failure_recovery") {
+		t.Fatalf("second reason = %q, want no repeated local recovery for same fingerprint", second.Reason)
+	}
+}
+
+func TestEpisodeFailureFrontierReductionDoesNotTriggerRepeatedRecovery(t *testing.T) {
+	decisionCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"message": {"content": "{\"model\":\"z-ai/glm-5.3-flash\",\"turn_type\":\"validation\",\"hypothesis_state\":\"stable\",\"critical_path\":false,\"recoverability\":\"easy\",\"budget_action\":\"cheap_probe\",\"context_summary\":\"frontier shrank\",\"reason\":\"continue cheap after observed failure reduction\"}"}}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+		}`)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.CacheTTLSeconds = -1
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	for i, failedCount := range []int{3, 1} {
+		if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+			EventID:   fmt.Sprintf("event-frontier-reduced-%d", i+1),
+			EpisodeID: "episode-frontier-reduced",
+			Timestamp: time.Now(),
+			Kind:      "test_run",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":             "failed",
+				"command":             "go test ./...",
+				"failure_fingerprint": "AssertionError: expected relay id 7 got 8",
+				"failed_count":        failedCount,
+			},
+		}); err != nil {
+			t.Fatalf("RecordEpisodeEvent %d returned error: %v", i+1, err)
+		}
+	}
+
+	states, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: "episode-frontier-reduced"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates returned error: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	if got := states[0].State["same_failure_fingerprint_count"]; got != 1 {
+		t.Fatalf("same failure count = %#v, want reset after frontier shrink", got)
+	}
+	if got := states[0].State["failure_frontier_size"]; got != 1 {
+		t.Fatalf("failure frontier size = %#v, want latest reduced size", got)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-frontier-reduced")
+	req.Header.Set("X-Session-ID", "episode-frontier-reduced")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue with the next bounded implementation step."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionCalls != 1 {
+		t.Fatalf("decision server calls = %d, want semantic judge because frontier shrank", decisionCalls)
+	}
+	if decision == nil || decision.Model != "z-ai/glm-5.3-flash" {
+		t.Fatalf("decision = %#v, want decision-model route", decision)
+	}
+	if strings.Contains(decision.Reason, "rule_id=episode_repeated_failure_recovery") {
+		t.Fatalf("reason = %q, want no local repeated-failure recovery after frontier shrink", decision.Reason)
+	}
+}
+
+func TestEpisodePassingTestClearsFailureFrontier(t *testing.T) {
+	router := newTestSmartRouter("")
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+		EventID:   "event-frontier-failed",
+		EpisodeID: "episode-frontier-clear",
+		Timestamp: time.Now(),
+		Kind:      "test_failed",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"failed_count":         2,
+			"failure_fingerprints": []string{"TestAlpha", "TestBeta"},
+		},
+	}); err != nil {
+		t.Fatalf("RecordEpisodeEvent failed returned error: %v", err)
+	}
+	if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+		EventID:   "event-frontier-passed",
+		EpisodeID: "episode-frontier-clear",
+		Timestamp: time.Now(),
+		Kind:      "test_run",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"outcome":      "passed",
+			"passed_count": 8,
+			"failed_count": 0,
+		},
+	}); err != nil {
+		t.Fatalf("RecordEpisodeEvent passed returned error: %v", err)
+	}
+
+	states, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: "episode-frontier-clear"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates returned error: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	if got := states[0].State["failure_frontier_size"]; got != 0 {
+		t.Fatalf("failure frontier size = %#v, want cleared", got)
+	}
+	if got := states[0].State["same_failure_fingerprint_count"]; got != 0 {
+		t.Fatalf("same failure count = %#v, want cleared", got)
+	}
+	if got := states[0].State["last_failure_fingerprint"]; got != "" {
+		t.Fatalf("last failure fingerprint = %#v, want cleared", got)
+	}
+}
+
 func TestEpisodeNoProgressStateRoutesPremiumRecoveryWithoutDecisionModel(t *testing.T) {
 	decisionServerCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -167,14 +167,45 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 }
 
 func (s *SmartRouter) episodeStateControlDecision(req *http.Request) (*plugin.RoutingDecision, *DecisionResponse, bool) {
-	cfg := s.episodeConfig()
-	if !cfg.Enabled {
+	episodeCfg := s.episodeConfig()
+	if !episodeCfg.Enabled {
 		return nil, nil, false
 	}
 	snapshot := s.episodeSnapshot(req)
 	if snapshot.ID == "" {
 		return nil, nil, false
 	}
+
+	controlCfg := s.safeControlConfig()
+	if snapshot.LastFailureFingerprint != "" &&
+		snapshot.SameFailureFingerprintCount >= controlCfg.RepeatedErrorThreshold {
+		escalationFingerprint := "episode_test:" + snapshot.LastFailureFingerprint
+		if !s.safeControlEscalated(req, escalationFingerprint) {
+			s.markSafeControlEscalation(req, escalationFingerprint)
+			return s.safeControlRoute(
+				req,
+				"episode_repeated_failure_recovery",
+				budgetActionPremiumRecover,
+				true,
+				0.93,
+				[]string{
+					fmt.Sprintf("episode_id=%s", snapshot.ID),
+					fmt.Sprintf("state_version=%d", snapshot.Version),
+					fmt.Sprintf("same_failure_count=%d", snapshot.SameFailureFingerprintCount),
+					fmt.Sprintf("failure_frontier_size=%d", snapshot.FailureFrontierSize),
+					"failure_fingerprint=" + compactDecisionText(snapshot.LastFailureFingerprint, 90),
+					fmt.Sprintf("test_failed_count=%d", snapshot.TestFailedCount),
+					fmt.Sprintf("events_since_progress=%d", snapshot.EventsSinceProgress),
+					"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
+				},
+				"recovery",
+				"contradicted",
+				"same test failure frontier repeated without progress",
+				"repeated test failure frontier needs a new recovery strategy",
+			)
+		}
+	}
+
 	severity := valueOrDefault(snapshot.NoProgressSeverity, "none")
 	if severity != "stale" && severity != "blocked" {
 		return nil, nil, false
@@ -214,6 +245,18 @@ func (s *SmartRouter) episodeStateControlDecision(req *http.Request) (*plugin.Ro
 		summary,
 		reason,
 	)
+}
+
+func (s *SmartRouter) safeControlEscalated(req *http.Request, fingerprint string) bool {
+	key := decisionHistoryKey(req)
+	if key == "" || fingerprint == "" {
+		return false
+	}
+
+	s.controlMu.Lock()
+	defer s.controlMu.Unlock()
+	state := s.controlStates[key]
+	return state != nil && state.LastEscalatedFingerprint == fingerprint
 }
 
 func (s *SmartRouter) safeControlConfig() SafeControlConfig {

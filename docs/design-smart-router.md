@@ -306,6 +306,8 @@ The first reducer tracks only stable control signals:
 - consecutive `finish_reason=length` calls
 - repeated `finish_reason=length` pressure inside the latest N events
 - consecutive HTTP/provider errors
+- repeated test failure frontier: last normalized failure fingerprint, current
+  frontier size, and non-improving repeat count
 - candidate progress: workspace/delivery file writes and passed local test runs
 - strong progress: verifier reward and fully passing final test events
 - no-progress pressure: explicit `no_progress` events and recent pressure
@@ -327,6 +329,11 @@ episode reaches `no_progress=stale` or `no_progress=blocked`, it bypasses the
 semantic judge and routes the next ambiguous or otherwise cheap-looking turn to
 `premium_recover` with evidence such as state version, length pressure,
 LLM calls since progress, and last progress kind in the routing reason.
+It also watches failed test events: when the same normalized failure
+fingerprint repeats without the failure frontier shrinking, the router can make
+one local `episode_repeated_failure_recovery` decision and then hand later
+turns for that same fingerprint back to the semantic judge until new evidence
+arrives.
 
 Online runners can post the same event shape used by RSI replay:
 

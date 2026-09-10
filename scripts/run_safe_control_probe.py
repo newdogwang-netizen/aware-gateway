@@ -502,6 +502,8 @@ def run_probe(port: int) -> dict[str, Any]:
 def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     episode = f"{trial}__episode_runtime"
     session = f"{trial}__episode_runtime_agent"
+    failure_episode = f"{trial}__failure_frontier"
+    failure_session = f"{trial}__failure_frontier_agent"
     task = "phase2-safe-control-probe"
     checks: list[dict[str, Any]] = []
 
@@ -641,15 +643,152 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     state_after_route = fetch_episode_state(port, episode)
     checks.append(check_equal("state-version-after-route", state_after_route.get("state_version"), 3))
 
+    for index in range(1, 3):
+        event_id = f"{failure_episode}__test-failed-{index}"
+        post_json(
+            f"http://127.0.0.1:{port}/v1/episode-events",
+            {
+                "event_id": event_id,
+                "episode_id": failure_episode,
+                "episode_operation": "continue",
+                "sequence": index,
+                "kind": "test_run",
+                "source": "safe-control-probe",
+                "observation": {
+                    "outcome": "failed",
+                    "command": "go test ./...",
+                    "failure_fingerprint": "AssertionError: expected relay id 7 got 8",
+                    "failed_count": 2,
+                },
+                "evidence_refs": [f"probe:event:{event_id}"],
+                "session_id": failure_session,
+                "trial_name": trial,
+                "step_name": f"episode-failure-injected-test-{index}",
+                "task_name": task,
+            },
+            headers={
+                "X-Trial-Name": trial,
+                "X-Session-ID": failure_session,
+                "X-Episode-ID": failure_episode,
+                "X-Episode-Operation": "continue",
+                "X-Step-Name": f"episode-failure-injected-test-{index}",
+                "X-Task-Name": task,
+            },
+        )
+
+    failure_state = fetch_episode_state(port, failure_episode)
+    failure_payload = failure_state.get("state") or {}
+    checks.extend(
+        [
+            check_equal("failure-state-version-after-events", failure_state.get("state_version"), 2),
+            check_equal("failure-same-fingerprint-count", failure_payload.get("same_failure_fingerprint_count"), 2),
+            check_equal("failure-frontier-size", failure_payload.get("failure_frontier_size"), 2),
+            check_equal(
+                "failure-last-fingerprint",
+                failure_payload.get("last_failure_fingerprint") or "",
+                "assertionerror: expected relay id # got #",
+            ),
+        ]
+    )
+
+    first_failure_step = "episode-failure-recovery-route"
+    first_failure_response = post_json(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Continue with the next bounded implementation step."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": failure_session,
+            "X-Episode-ID": failure_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": first_failure_step,
+            "X-Task-Name": task,
+        },
+    )
+    failure_traces = fetch_json(f"http://127.0.0.1:{port}/v1/traces?session_id={failure_session}&limit=1000")
+    first_failure_trace = latest_agent_trace(failure_traces.get("traces", []), first_failure_step)
+    first_failure_reason = str(first_failure_trace.get("routing_reason") or "")
+    checks.extend(
+        [
+            check_equal("failure-recovery-source", classify_source(first_failure_reason), "safe-control"),
+            check_equal(
+                "failure-recovery-model",
+                first_failure_trace.get("routed_model") or first_failure_response.get("model") or "",
+                PREMIUM_MODEL,
+            ),
+            check_equal("failure-recovery-budget-action", first_failure_trace.get("route_budget_action") or "", "premium_recover"),
+            check_contains("failure-recovery-rule", first_failure_reason, "rule_id=episode_repeated_failure_recovery"),
+            check_contains("failure-recovery-same-count", first_failure_reason, "same_failure_count=2"),
+            check_contains("failure-recovery-frontier-size", first_failure_reason, "failure_frontier_size=2"),
+            check_contains(
+                "failure-recovery-fingerprint",
+                first_failure_reason,
+                "failure_fingerprint=assertionerror: expected relay id # got #",
+            ),
+        ]
+    )
+
+    second_failure_step = "episode-failure-after-local-recovery-route"
+    second_failure_response = post_json(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Continue with the next bounded implementation step."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": failure_session,
+            "X-Episode-ID": failure_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": second_failure_step,
+            "X-Task-Name": task,
+        },
+    )
+    failure_traces = fetch_json(f"http://127.0.0.1:{port}/v1/traces?session_id={failure_session}&limit=1000")
+    second_failure_trace = latest_agent_trace(failure_traces.get("traces", []), second_failure_step)
+    second_failure_reason = str(second_failure_trace.get("routing_reason") or "")
+    checks.extend(
+        [
+            check_equal("failure-second-route-source", classify_source(second_failure_reason), "decision-model"),
+            check_equal(
+                "failure-second-route-model",
+                second_failure_trace.get("routed_model") or second_failure_response.get("model") or "",
+                CHEAP_MODEL,
+            ),
+            check_not_contains(
+                "failure-second-route-no-repeat-local-rule",
+                second_failure_reason,
+                "rule_id=episode_repeated_failure_recovery",
+            ),
+        ]
+    )
+
     return {
-        "name": "episode-runtime-no-progress-recovery",
+        "name": "episode-runtime-state-controller",
         "episode_id": episode,
         "session_id": session,
+        "failure_episode_id": failure_episode,
+        "failure_session_id": failure_session,
         "checks": checks,
         "state_before_route": state_before,
         "state_after_duplicate": state_after_duplicate,
         "state_after_route": state_after_route,
         "route_trace": route_trace,
+        "failure_state": failure_state,
+        "first_failure_route_trace": first_failure_trace,
+        "second_failure_route_trace": second_failure_trace,
     }
 
 
@@ -832,6 +971,15 @@ def check_contains(name: str, actual: str, expected_fragment: str) -> dict[str, 
         "pass": expected_fragment in actual,
         "actual": actual,
         "expected": expected_fragment,
+    }
+
+
+def check_not_contains(name: str, actual: str, forbidden_fragment: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "pass": forbidden_fragment not in actual,
+        "actual": actual,
+        "forbidden": forbidden_fragment,
     }
 
 

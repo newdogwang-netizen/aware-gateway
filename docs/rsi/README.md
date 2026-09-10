@@ -111,6 +111,9 @@ no-progress state, retries a duplicate event id to prove projection
 idempotency, and verifies that the next routed request locally selects
 `premium_recover` with `rule_id=episode_no_progress_recovery` while freezing
 the base recovery budget instead of compounding another length-based boost.
+It also injects repeated failed test events and checks that the first
+non-improving failure frontier triggers `episode_repeated_failure_recovery`,
+while the same fingerprint is not repeatedly escalated by the local controller.
 
 For local runners, `scripts/run_episode_command.py` wraps a command and posts
 the detected events automatically:

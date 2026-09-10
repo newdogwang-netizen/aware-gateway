@@ -109,7 +109,9 @@ python3 scripts/run_safe_control_probe.py \
 The probe covers safe-control rules, decision-model fallthrough, budget actions,
 audit trace queries, and the online Episode loop:
 `POST /v1/episode-events` -> `GET /v1/episode-state` -> state-driven
-`premium_recover` routing.
+`premium_recover` routing. It also checks that repeated non-improving failed
+test events trigger one local recovery without creating an endless local
+recovery loop.
 
 ### Writing a Custom Plugin
 

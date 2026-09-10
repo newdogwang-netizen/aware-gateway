@@ -83,6 +83,9 @@ type EpisodeState struct {
 	LastModel                   string
 	LastBudgetAction            string
 	LastFinishReason            string
+	LastFailureFingerprint      string
+	SameFailureFingerprintCount int
+	FailureFrontierSize         int
 	ConsecutiveLengthFinishes   int
 	RecentLengthFinishes        int
 	ConsecutiveErrors           int
@@ -129,6 +132,9 @@ type EpisodeSnapshot struct {
 	LastModel                   string
 	LastBudgetAction            string
 	LastFinishReason            string
+	LastFailureFingerprint      string
+	SameFailureFingerprintCount int
+	FailureFrontierSize         int
 	ConsecutiveLengthFinishes   int
 	RecentLengthFinishes        int
 	ConsecutiveErrors           int
@@ -559,6 +565,71 @@ func episodeEventFromTraceEntry(trace plugin.TraceEntry) EpisodeEvent {
 	}
 }
 
+func projectTestFailureState(state *EpisodeState, event EpisodeEvent) {
+	fingerprint := failureFingerprintFromEvent(event)
+	if fingerprint == "" {
+		return
+	}
+	frontierSize := failureFrontierSizeFromEvent(event)
+	if fingerprint == state.LastFailureFingerprint {
+		if state.FailureFrontierSize <= 0 || frontierSize >= state.FailureFrontierSize {
+			state.SameFailureFingerprintCount++
+		} else {
+			state.SameFailureFingerprintCount = 1
+		}
+	} else {
+		state.LastFailureFingerprint = fingerprint
+		state.SameFailureFingerprintCount = 1
+	}
+	state.FailureFrontierSize = frontierSize
+}
+
+func failureFingerprintFromEvent(event EpisodeEvent) string {
+	single := stringFromObservation(event.Observation, "failure_fingerprint")
+	if single != "" {
+		return normalizeEpisodeFailureFingerprint(single)
+	}
+	multiple := stringListFromObservation(event.Observation, "failure_fingerprints")
+	if len(multiple) > 0 {
+		normalized := make([]string, 0, len(multiple))
+		seen := make(map[string]struct{}, len(multiple))
+		for _, value := range multiple {
+			fingerprint := normalizeEpisodeFailureFingerprint(value)
+			if fingerprint == "" {
+				continue
+			}
+			if _, exists := seen[fingerprint]; exists {
+				continue
+			}
+			seen[fingerprint] = struct{}{}
+			normalized = append(normalized, fingerprint)
+		}
+		sort.Strings(normalized)
+		return compactDecisionText(strings.Join(normalized, " | "), 180)
+	}
+	command := normalizeEpisodeFailureFingerprint(stringFromObservation(event.Observation, "command"))
+	if command == "" {
+		return ""
+	}
+	return compactDecisionText("failed command: "+command, 180)
+}
+
+func normalizeEpisodeFailureFingerprint(value string) string {
+	return normalizeErrorFingerprint(strings.ToLower(strings.TrimSpace(value)))
+}
+
+func failureFrontierSizeFromEvent(event EpisodeEvent) int {
+	for _, key := range []string{"failed_count", "failing_count", "failure_count", "failures"} {
+		if count := intFromObservation(event.Observation, key); count > 0 {
+			return count
+		}
+	}
+	if multiple := stringListFromObservation(event.Observation, "failure_fingerprints"); len(multiple) > 0 {
+		return len(multiple)
+	}
+	return 1
+}
+
 func projectUniqueEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeConfig) bool {
 	if event.ID != "" {
 		if state.SeenEventIDs == nil {
@@ -610,11 +681,13 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 			state.TestPassedCount++
 		case "failed":
 			state.TestFailedCount++
+			projectTestFailureState(state, event)
 		}
 	case "test_passed":
 		state.TestPassedCount++
 	case "test_failed":
 		state.TestFailedCount++
+		projectTestFailureState(state, event)
 	case "verifier_result":
 		state.VerifierReward = floatFromObservation(event.Observation, "reward")
 	case "no_progress":
@@ -633,6 +706,11 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 		state.LengthPressureSinceProgress = 0
 		state.ConsecutiveLengthFinishes = 0
 		state.ActiveNoProgress = false
+		if clearsFailureFrontier(event) {
+			state.LastFailureFingerprint = ""
+			state.SameFailureFingerprintCount = 0
+			state.FailureFrontierSize = 0
+		}
 		state.LastProgressEventID = event.ID
 		state.LastProgressKind = event.Kind
 	} else {
@@ -698,6 +776,9 @@ func snapshotFromEpisodeState(state *EpisodeState) EpisodeSnapshot {
 		LastModel:                   state.LastModel,
 		LastBudgetAction:            state.LastBudgetAction,
 		LastFinishReason:            state.LastFinishReason,
+		LastFailureFingerprint:      state.LastFailureFingerprint,
+		SameFailureFingerprintCount: state.SameFailureFingerprintCount,
+		FailureFrontierSize:         state.FailureFrontierSize,
 		ConsecutiveLengthFinishes:   state.ConsecutiveLengthFinishes,
 		RecentLengthFinishes:        state.RecentLengthFinishes,
 		ConsecutiveErrors:           state.ConsecutiveErrors,
@@ -741,6 +822,12 @@ func (s *SmartRouter) renderEpisodeSnapshot(snapshot EpisodeSnapshot) string {
 			snapshot.LengthPressureSinceProgress,
 			valueOrUnknown(snapshot.LastProgressKind),
 			snapshot.VerifierReward,
+		),
+		fmt.Sprintf(
+			"failure_frontier size=%d same_failure_count=%d last_failure=%s",
+			snapshot.FailureFrontierSize,
+			snapshot.SameFailureFingerprintCount,
+			valueOrUnknown(snapshot.LastFailureFingerprint),
 		),
 	}
 	if len(snapshot.RecentEvents) > 0 {
@@ -821,6 +908,9 @@ func episodeStatePayload(snapshot EpisodeSnapshot) map[string]any {
 		"last_model":                     snapshot.LastModel,
 		"last_budget_action":             snapshot.LastBudgetAction,
 		"last_finish_reason":             snapshot.LastFinishReason,
+		"last_failure_fingerprint":       snapshot.LastFailureFingerprint,
+		"same_failure_fingerprint_count": snapshot.SameFailureFingerprintCount,
+		"failure_frontier_size":          snapshot.FailureFrontierSize,
 		"consecutive_length_finishes":    snapshot.ConsecutiveLengthFinishes,
 		"recent_length_finishes":         snapshot.RecentLengthFinishes,
 		"consecutive_errors":             snapshot.ConsecutiveErrors,
@@ -1143,6 +1233,19 @@ func isStrongProgressEvent(event EpisodeEvent) bool {
 	}
 }
 
+func clearsFailureFrontier(event EpisodeEvent) bool {
+	switch event.Kind {
+	case "test_passed":
+		return intFromObservation(event.Observation, "failed_count") == 0
+	case "test_run":
+		return strings.EqualFold(stringFromObservation(event.Observation, "outcome"), "passed")
+	case "verifier_result":
+		return floatFromObservation(event.Observation, "reward") > 0
+	default:
+		return false
+	}
+}
+
 func isCandidateProgressEvent(event EpisodeEvent) bool {
 	switch event.Kind {
 	case "file_modified":
@@ -1181,6 +1284,40 @@ func stringFromObservation(observation map[string]any, key string) string {
 			return ""
 		}
 		return strings.TrimSpace(fmt.Sprint(value))
+	}
+}
+
+func stringListFromObservation(observation map[string]any, key string) []string {
+	if observation == nil {
+		return nil
+	}
+	switch values := observation[key].(type) {
+	case []string:
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				out = append(out, value)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			text := strings.TrimSpace(fmt.Sprint(value))
+			if text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	case string:
+		value := strings.TrimSpace(values)
+		if value == "" {
+			return nil
+		}
+		return []string{value}
+	default:
+		return nil
 	}
 }
 
