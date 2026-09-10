@@ -530,6 +530,164 @@ func TestTaskCompletionGuardrailIncludesEpisodeReadinessEvidence(t *testing.T) {
 	}
 }
 
+func TestEpisodeCompletionReadinessRegressesAfterTargetWrite(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionCompletionGuardrail: {MaxTokens: 1024, TimeoutMs: 60000},
+		},
+	}
+
+	events := []*plugin.EpisodeEvent{
+		{
+			EventID:   "event-delivery-file",
+			EpisodeID: "episode-completion-regress",
+			Timestamp: time.Now(),
+			Kind:      "file_written",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"delivery_target": true,
+			},
+		},
+		{
+			EventID:   "event-validation-passed",
+			EpisodeID: "episode-completion-regress",
+			Timestamp: time.Now(),
+			Kind:      "test_run",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":      "passed",
+				"failed_count": 0,
+			},
+		},
+		{
+			EventID:   "event-verifier-passed",
+			EpisodeID: "episode-completion-regress",
+			Timestamp: time.Now(),
+			Kind:      "verifier_result",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"reward": 1.0,
+			},
+		},
+		{
+			EventID:   "event-delivery-update",
+			EpisodeID: "episode-completion-regress",
+			Timestamp: time.Now(),
+			Kind:      "file_modified",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"path_count":      1,
+				"delivery_target": true,
+			},
+		},
+	}
+	for _, event := range events {
+		if err := router.RecordEpisodeEvent(event); err != nil {
+			t.Fatalf("RecordEpisodeEvent %s returned error: %v", event.EventID, err)
+		}
+	}
+
+	states, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: "episode-completion-regress"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates returned error: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	if got := states[0].State["completion_readiness"]; got != completionReadinessDeliveryCandidate {
+		t.Fatalf("completion readiness = %#v, want delivery_candidate", got)
+	}
+	if got := states[0].State["delivery_file_write_count"]; got != 2 {
+		t.Fatalf("delivery file writes = %#v, want 2", got)
+	}
+	if got := states[0].State["verifier_reward"]; got != float64(0) {
+		t.Fatalf("verifier reward = %#v, want 0 after target write", got)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-completion-regress")
+	req.Header.Set("X-Session-ID", "episode-completion-regress")
+	body := []byte(`{
+		"model": "auto",
+		"messages": [
+			{"role": "user", "content": "Are you sure you want to mark the task as complete? Include \"task_complete\": true."}
+		]
+	}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	for _, want := range []string{
+		"completion_readiness=delivery_candidate",
+		"delivery_file_writes=2",
+		"verifier_reward=0.000",
+		"last_progress=file_modified",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+	if strings.Contains(decision.Reason, "completion_readiness=verifier_passed") {
+		t.Fatalf("reason = %q, want current readiness instead of stale verifier_passed", decision.Reason)
+	}
+}
+
+func TestEpisodeCompletionReadinessMarksFailedValidation(t *testing.T) {
+	router := newTestSmartRouter("http://127.0.0.1:1")
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+
+	for _, event := range []*plugin.EpisodeEvent{
+		{
+			EventID:   "event-delivery-file",
+			EpisodeID: "episode-validation-failed",
+			Timestamp: time.Now(),
+			Kind:      "file_written",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"delivery_target": true,
+			},
+		},
+		{
+			EventID:   "event-validation-failed",
+			EpisodeID: "episode-validation-failed",
+			Timestamp: time.Now(),
+			Kind:      "test_run",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":             "failed",
+				"failed_count":        2,
+				"failure_fingerprint": "assert total == 42",
+			},
+		},
+	} {
+		if err := router.RecordEpisodeEvent(event); err != nil {
+			t.Fatalf("RecordEpisodeEvent %s returned error: %v", event.EventID, err)
+		}
+	}
+
+	states, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: "episode-validation-failed"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates returned error: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	if got := states[0].State["completion_readiness"]; got != completionReadinessValidationFailed {
+		t.Fatalf("completion readiness = %#v, want validation_failed", got)
+	}
+	if got := states[0].State["test_failed_count"]; got != 1 {
+		t.Fatalf("test failed count = %#v, want 1", got)
+	}
+}
+
 func TestBuildPromptIncludesCostQualityTurnRiskGuidance(t *testing.T) {
 	router := newTestSmartRouter("http://127.0.0.1:1")
 	prompt := router.buildPrompt(&parsedRequest{

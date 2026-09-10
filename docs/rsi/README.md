@@ -116,7 +116,9 @@ non-improving failure frontier triggers `episode_repeated_failure_recovery`,
 while the same fingerprint is not repeatedly escalated by the local controller.
 Finally, it injects delivery, passed validation, and verifier events, then
 checks that final task-completion routing carries `completion_readiness` and
-the supporting evidence in the guardrail trace.
+the supporting evidence in the guardrail trace. A second completion scenario
+changes the target file after verifier success and verifies that readiness falls
+back to `delivery_candidate` instead of reusing stale proof.
 
 For local runners, `scripts/run_episode_command.py` wraps a command and posts
 the detected events automatically:

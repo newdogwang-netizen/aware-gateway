@@ -29,7 +29,9 @@ const (
 
 	completionReadinessNone              = "none"
 	completionReadinessDeliveryCandidate = "delivery_candidate"
+	completionReadinessValidationFailed  = "validation_failed"
 	completionReadinessValidationPassed  = "validation_passed"
+	completionReadinessVerifierFailed    = "verifier_failed"
 	completionReadinessVerifierPassed    = "verifier_passed"
 )
 
@@ -629,29 +631,6 @@ func normalizeEpisodeFailureFingerprint(value string) string {
 	return normalizeErrorFingerprint(strings.ToLower(strings.TrimSpace(value)))
 }
 
-func promoteCompletionReadiness(current string, candidate string) string {
-	if completionReadinessRank(candidate) > completionReadinessRank(current) {
-		return candidate
-	}
-	if strings.TrimSpace(current) == "" {
-		return completionReadinessNone
-	}
-	return current
-}
-
-func completionReadinessRank(readiness string) int {
-	switch strings.TrimSpace(readiness) {
-	case completionReadinessVerifierPassed:
-		return 3
-	case completionReadinessValidationPassed:
-		return 2
-	case completionReadinessDeliveryCandidate:
-		return 1
-	default:
-		return 0
-	}
-}
-
 func failureFrontierSizeFromEvent(event EpisodeEvent) int {
 	for _, key := range []string{"failed_count", "failing_count", "failure_count", "failures"} {
 		if count := intFromObservation(event.Observation, key); count > 0 {
@@ -662,6 +641,11 @@ func failureFrontierSizeFromEvent(event EpisodeEvent) int {
 		return len(multiple)
 	}
 	return 1
+}
+
+func completionAffectingWrite(event EpisodeEvent) bool {
+	return boolFromObservation(event.Observation, "delivery_target") ||
+		boolFromObservation(event.Observation, "workspace_target")
 }
 
 func projectUniqueEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeConfig) bool {
@@ -711,40 +695,37 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 		if boolFromObservation(event.Observation, "delivery_target") {
 			state.DeliveryFileWriteCount++
 			state.LastDeliveryEventID = event.ID
-			state.CompletionReadiness = promoteCompletionReadiness(
-				state.CompletionReadiness,
-				completionReadinessDeliveryCandidate,
-			)
+		}
+		if completionAffectingWrite(event) {
+			state.CompletionReadiness = completionReadinessDeliveryCandidate
+			state.VerifierReward = 0
 		}
 	case "test_run":
 		state.TestRunCount++
 		switch strings.ToLower(strings.TrimSpace(stringFromObservation(event.Observation, "outcome"))) {
 		case "passed":
 			state.TestPassedCount++
-			state.CompletionReadiness = promoteCompletionReadiness(
-				state.CompletionReadiness,
-				completionReadinessValidationPassed,
-			)
+			state.CompletionReadiness = completionReadinessValidationPassed
 		case "failed":
 			state.TestFailedCount++
+			state.CompletionReadiness = completionReadinessValidationFailed
+			state.VerifierReward = 0
 			projectTestFailureState(state, event)
 		}
 	case "test_passed":
 		state.TestPassedCount++
-		state.CompletionReadiness = promoteCompletionReadiness(
-			state.CompletionReadiness,
-			completionReadinessValidationPassed,
-		)
+		state.CompletionReadiness = completionReadinessValidationPassed
 	case "test_failed":
 		state.TestFailedCount++
+		state.CompletionReadiness = completionReadinessValidationFailed
+		state.VerifierReward = 0
 		projectTestFailureState(state, event)
 	case "verifier_result":
 		state.VerifierReward = floatFromObservation(event.Observation, "reward")
 		if state.VerifierReward > 0 {
-			state.CompletionReadiness = promoteCompletionReadiness(
-				state.CompletionReadiness,
-				completionReadinessVerifierPassed,
-			)
+			state.CompletionReadiness = completionReadinessVerifierPassed
+		} else {
+			state.CompletionReadiness = completionReadinessVerifierFailed
 		}
 	case "no_progress":
 		state.NoProgressEventCount++

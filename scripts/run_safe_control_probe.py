@@ -506,6 +506,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     failure_session = f"{trial}__failure_frontier_agent"
     completion_episode = f"{trial}__completion_ready"
     completion_session = f"{trial}__completion_ready_agent"
+    completion_regress_episode = f"{trial}__completion_regress"
+    completion_regress_session = f"{trial}__completion_regress_agent"
     task = "phase2-safe-control-probe"
     checks: list[dict[str, Any]] = []
 
@@ -893,6 +895,143 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         ]
     )
 
+    completion_regress_events = [
+        (
+            "delivery-file",
+            "file_written",
+            {
+                "target_paths": ["/app/output/answer.json"],
+                "delivery_target": True,
+                "workspace_target": False,
+            },
+        ),
+        (
+            "validation-passed",
+            "test_run",
+            {
+                "outcome": "passed",
+                "command": "python3 validate.py",
+                "passed_count": 7,
+                "failed_count": 0,
+            },
+        ),
+        (
+            "verifier-passed",
+            "verifier_result",
+            {
+                "reward": 1.0,
+            },
+        ),
+        (
+            "delivery-update",
+            "file_modified",
+            {
+                "target_paths": ["/app/output/answer.json"],
+                "path_count": 1,
+                "delivery_target": True,
+                "workspace_target": False,
+            },
+        ),
+    ]
+    for index, (name, kind, observation) in enumerate(completion_regress_events, start=1):
+        event_id = f"{completion_regress_episode}__{name}"
+        post_json(
+            f"http://127.0.0.1:{port}/v1/episode-events",
+            {
+                "event_id": event_id,
+                "episode_id": completion_regress_episode,
+                "episode_operation": "continue",
+                "sequence": index,
+                "kind": kind,
+                "source": "safe-control-probe",
+                "observation": observation,
+                "evidence_refs": [f"probe:event:{event_id}"],
+                "session_id": completion_regress_session,
+                "trial_name": trial,
+                "step_name": f"episode-completion-regress-{name}",
+                "task_name": task,
+            },
+            headers={
+                "X-Trial-Name": trial,
+                "X-Session-ID": completion_regress_session,
+                "X-Episode-ID": completion_regress_episode,
+                "X-Episode-Operation": "continue",
+                "X-Step-Name": f"episode-completion-regress-{name}",
+                "X-Task-Name": task,
+            },
+        )
+
+    completion_regress_state = fetch_episode_state(port, completion_regress_episode)
+    completion_regress_payload = completion_regress_state.get("state") or {}
+    checks.extend(
+        [
+            check_equal("completion-regress-state-version-after-events", completion_regress_state.get("state_version"), 4),
+            check_equal(
+                "completion-regress-readiness",
+                completion_regress_payload.get("completion_readiness"),
+                "delivery_candidate",
+            ),
+            check_equal(
+                "completion-regress-delivery-writes",
+                completion_regress_payload.get("delivery_file_write_count"),
+                2,
+            ),
+            check_equal("completion-regress-verifier-reward", completion_regress_payload.get("verifier_reward"), 0),
+        ]
+    )
+
+    completion_regress_step = "episode-completion-regress-guardrail-route"
+    completion_regress_response = post_json(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {
+                    "role": "user",
+                    "content": 'Are you sure you want to mark the task as complete? Include "task_complete": true.',
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": completion_regress_session,
+            "X-Episode-ID": completion_regress_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": completion_regress_step,
+            "X-Task-Name": task,
+        },
+    )
+    completion_regress_traces = fetch_json(
+        f"http://127.0.0.1:{port}/v1/traces?session_id={completion_regress_session}&limit=1000"
+    )
+    completion_regress_trace = latest_agent_trace(completion_regress_traces.get("traces", []), completion_regress_step)
+    completion_regress_reason = str(completion_regress_trace.get("routing_reason") or "")
+    checks.extend(
+        [
+            check_equal("completion-regress-route-source", classify_source(completion_regress_reason), "guardrail"),
+            check_equal(
+                "completion-regress-route-model",
+                completion_regress_trace.get("routed_model") or completion_regress_response.get("model") or "",
+                PREMIUM_MODEL,
+            ),
+            check_contains(
+                "completion-regress-route-readiness",
+                completion_regress_reason,
+                "completion_readiness=delivery_candidate",
+            ),
+            check_contains("completion-regress-route-delivery", completion_regress_reason, "delivery_file_writes=2"),
+            check_contains("completion-regress-route-verifier", completion_regress_reason, "verifier_reward=0.000"),
+            check_contains(
+                "completion-regress-route-last-progress",
+                completion_regress_reason,
+                "last_progress=file_modified",
+            ),
+        ]
+    )
+
     return {
         "name": "episode-runtime-state-controller",
         "episode_id": episode,
@@ -901,6 +1040,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         "failure_session_id": failure_session,
         "completion_episode_id": completion_episode,
         "completion_session_id": completion_session,
+        "completion_regress_episode_id": completion_regress_episode,
+        "completion_regress_session_id": completion_regress_session,
         "checks": checks,
         "state_before_route": state_before,
         "state_after_duplicate": state_after_duplicate,
@@ -911,6 +1052,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         "second_failure_route_trace": second_failure_trace,
         "completion_state": completion_state,
         "completion_route_trace": completion_trace,
+        "completion_regress_state": completion_regress_state,
+        "completion_regress_route_trace": completion_regress_trace,
     }
 
 

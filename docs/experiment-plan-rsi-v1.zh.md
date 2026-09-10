@@ -740,8 +740,9 @@ Harbor Artifact Watcher           done for trajectory/patch/ctrf/result sidecar
 Stateful No-progress Recovery     done for stale/blocked -> local premium_recover
 No-progress Budget Freeze         done for explicit/stale/blocked no-progress state
 Repeated-failure Recovery         done for non-improving repeated test failure frontier
-Completion Readiness Projection   done for delivery/test/verifier evidence
+Completion Readiness Projection   done for current delivery/test/verifier state
 Completion Guardrail Evidence     done for state-aware task_complete routing reason
+Stale Completion Invalidation     done for target writes after verifier success
 Route Outcome Linkage             done for route -> event/test/verifier windows
 Online Episode State Query        done for GET /v1/episode-state
 State Backfill                    done for persisted traces/events -> online projection
@@ -765,7 +766,7 @@ Restart State Rebuild             partial for audit trace/event backfill
 Runtime Probe Acceptance          done for deterministic local gateway/mocks
 C2 No-progress Budget Freeze      implemented; needs matched Harbor pilot acceptance
 C3 Repeated-failure Recovery      implemented; needs matched Harbor pilot acceptance
-Delivery Feedback                 partial via completion readiness and guardrail evidence
+Delivery Feedback                 partial via completion readiness, stale-proof invalidation, and guardrail evidence
 Outcome-aware Screening Pilot     not started for P2
 Outcome-aware Acceptance          at least 3 runs per accepted task class
 Budget Policy Effectiveness       accepted or explicitly rejected

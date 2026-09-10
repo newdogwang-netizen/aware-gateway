@@ -112,7 +112,8 @@ audit trace queries, and the online Episode loop:
 `premium_recover` routing. It also checks that repeated non-improving failed
 test events trigger one local recovery without creating an endless local
 recovery loop, and that completion guardrail traces include delivery,
-validation, and verifier readiness evidence when those events exist.
+validation, verifier readiness evidence, and stale-verifier invalidation when
+target files change after verification.
 
 ### Writing a Custom Plugin
 

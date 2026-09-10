@@ -308,9 +308,10 @@ The first reducer tracks only stable control signals:
 - consecutive HTTP/provider errors
 - repeated test failure frontier: last normalized failure fingerprint, current
   frontier size, and non-improving repeat count
-- completion readiness: delivery-target writes, passed validation, and verifier
-  reward promoted as `delivery_candidate`, `validation_passed`, or
-  `verifier_passed`
+- completion readiness: current delivery state. Delivery/workspace writes set
+  `delivery_candidate`, passing validation sets `validation_passed`, a positive
+  verifier reward sets `verifier_passed`, and later failed validation/verifier
+  events set `validation_failed` or `verifier_failed`.
 - candidate progress: workspace/delivery file writes and passed local test runs
 - strong progress: verifier reward and fully passing final test events
 - no-progress pressure: explicit `no_progress` events and recent pressure
@@ -340,8 +341,11 @@ arrives.
 For final `task_complete` confirmations, the guardrail still forces the
 strongest model, but its routing reason now includes the episode readiness,
 delivery write count, test pass/fail counts, verifier reward, and last progress
-kind. The gateway does not mark completion by itself; it exposes the evidence
-used for the final model choice.
+kind. New target writes after a verifier pass move readiness back to
+`delivery_candidate` and clear the current verifier reward, so the final trace
+does not treat stale success evidence as current proof. The gateway does not
+mark completion by itself; it exposes the evidence used for the final model
+choice.
 
 Online runners can post the same event shape used by RSI replay:
 
