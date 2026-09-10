@@ -102,7 +102,7 @@ def scan_and_emit(args: argparse.Namespace, seen: set[str]) -> int:
 def discover_trial_dirs(root: Path) -> list[Path]:
     if not root.exists():
         return []
-    if (root / "agent").is_dir() or (root / "result.json").exists():
+    if (root / "agent").is_dir():
         return [root]
 
     dirs: set[Path] = set()
@@ -112,6 +112,8 @@ def discover_trial_dirs(root: Path) -> list[Path]:
     for path in root.glob("*/result.json"):
         if path.is_file():
             dirs.add(path.parent)
+    if not dirs and (root / "result.json").exists():
+        return [root]
     return sorted(dirs)
 
 

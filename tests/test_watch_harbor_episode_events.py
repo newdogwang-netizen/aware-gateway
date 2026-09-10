@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -56,6 +57,42 @@ class WatchHarborEpisodeEventsTest(unittest.TestCase):
             second = subprocess.run(cmd, cwd=self.repo, text=True, capture_output=True)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertEqual(read_jsonl(events_path), events)
+
+    def test_job_level_result_does_not_hide_nested_trial(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            job_dir = tmp_path / "job"
+            trial_dir = job_dir / "sample-task__abc123"
+            shutil.copytree(self.trial_dir, trial_dir)
+            (job_dir / "result.json").write_text(
+                json.dumps({"schema_version": "harbor-job-result-v1"}) + "\n",
+                encoding="utf-8",
+            )
+            events_path = tmp_path / "events.jsonl"
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(self.script),
+                    "--job-dir",
+                    str(job_dir),
+                    "--once",
+                    "--dry-run",
+                    "--state-file",
+                    str(tmp_path / "state.json"),
+                    "--events-jsonl",
+                    str(events_path),
+                ],
+                cwd=self.repo,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            events = read_jsonl(events_path)
+            counts = Counter(event["kind"] for event in events)
+            self.assertEqual(counts["tool_call"], 4)
+            self.assertEqual(counts["verifier_result"], 1)
 
     def test_posts_harbor_events_to_gateway_endpoint(self) -> None:
         received: list[tuple[str, dict]] = []
