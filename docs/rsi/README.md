@@ -193,6 +193,19 @@ only. `stale` and `blocked` are strong enough for the local safe-control layer
 to skip the semantic judge and select `premium_recover`; the routing reason
 records the episode state version and pressure evidence that triggered it.
 
+Delivery feedback is also promoted into the local state layer. Once a delivery
+target has passed validation, or a verifier result is observed, the router can
+skip the semantic judge and apply a local capability floor:
+
+- `validation_passed_assess_hidden_gap` routes to premium assessment when there
+  is delivery-target evidence.
+- `verifier_passed_current_delivery` routes to premium assessment.
+- `verifier_failed_current_delivery` routes to premium recovery.
+
+Plain `validation_failed_current_delivery` is not forced by this floor because
+the failure frontier may be shrinking; repeated, non-improving failures are
+handled by the repeated-failure recovery rule instead.
+
 ## Replay
 
 Replay router decisions with outcome state:

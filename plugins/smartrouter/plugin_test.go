@@ -1190,6 +1190,7 @@ func TestCapabilityFloorForcesPremiumRecoverAfterVerifierFailure(t *testing.T) {
 	defer server.Close()
 
 	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
 	router.cfg.CacheTTLSeconds = -1
 	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
 	router.cfg.BudgetedRoute = BudgetedRouteConfig{
@@ -1219,22 +1220,22 @@ func TestCapabilityFloorForcesPremiumRecoverAfterVerifierFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Route returned error: %v", err)
 	}
-	if decisionServerCalls != 1 {
-		t.Fatalf("decision server calls = %d, want 1", decisionServerCalls)
+	if decisionServerCalls != 0 {
+		t.Fatalf("decision server calls = %d, want local verifier recovery floor", decisionServerCalls)
 	}
 	if decision.Model != "anthropic/claude-opus-5" {
-		t.Fatalf("model = %q, want forced Opus", decision.Model)
+		t.Fatalf("model = %q, want local Opus recovery", decision.Model)
 	}
 	if decision.BudgetAction != budgetActionPremiumRecover {
 		t.Fatalf("budget action = %q, want premium_recover", decision.BudgetAction)
 	}
 	for _, want := range []string{
-		"capability_floor status=forced",
+		"rule_id=episode_verifier_recovery_floor",
+		"capability_floor status=local",
 		"expected=premium_recover",
-		"observed=cheap_probe",
 		"reason=verifier_failed_current_delivery",
-		"forced_model=anthropic/claude-opus-5",
-		"forced_budget_action=premium_recover",
+		"completion_readiness=verifier_failed",
+		"verifier_reward=0.000",
 		"route_max_tokens=4096",
 	} {
 		if !strings.Contains(decision.Reason, want) {
@@ -1256,6 +1257,7 @@ func TestCapabilityFloorForcesPremiumAssessAfterDeliveryValidationPass(t *testin
 	defer server.Close()
 
 	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
 	router.cfg.CacheTTLSeconds = -1
 	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
 	router.cfg.BudgetedRoute = BudgetedRouteConfig{
@@ -1299,27 +1301,118 @@ func TestCapabilityFloorForcesPremiumAssessAfterDeliveryValidationPass(t *testin
 	if err != nil {
 		t.Fatalf("Route returned error: %v", err)
 	}
-	if decisionServerCalls != 1 {
-		t.Fatalf("decision server calls = %d, want 1", decisionServerCalls)
+	if decisionServerCalls != 0 {
+		t.Fatalf("decision server calls = %d, want local validation assessment floor", decisionServerCalls)
 	}
 	if decision.Model != "anthropic/claude-opus-5" {
-		t.Fatalf("model = %q, want forced Opus", decision.Model)
+		t.Fatalf("model = %q, want local Opus assessment", decision.Model)
 	}
 	if decision.BudgetAction != budgetActionPremiumReason {
 		t.Fatalf("budget action = %q, want premium_reason", decision.BudgetAction)
 	}
 	for _, want := range []string{
-		"capability_floor status=forced",
+		"rule_id=episode_validation_assessment_floor",
+		"capability_floor status=local",
 		"expected=premium_assess",
-		"observed=cheap_execute",
 		"reason=validation_passed_assess_hidden_gap",
-		"forced_model=anthropic/claude-opus-5",
-		"forced_budget_action=premium_reason",
+		"completion_readiness=validation_passed",
+		"test_passed=1",
 		"route_max_tokens=4096",
 	} {
 		if !strings.Contains(decision.Reason, want) {
 			t.Fatalf("reason = %q, want %q", decision.Reason, want)
 		}
+	}
+}
+
+func TestEpisodeDeliveryFloorPreemptsPremiumCooldown(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionPremiumReason: {MaxTokens: 4096, TimeoutMs: 180000},
+			budgetActionCheapProbe:    {MaxTokens: 2048, TimeoutMs: 60000},
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-delivery-floor-cooldown")
+	req.Header.Set("X-Session-ID", "episode-delivery-floor-cooldown")
+	premiumBody := []byte(`{"model":"auto","messages":[{"role":"user","content":"The hypothesis was contradicted; recover with a new approach."}]}`)
+	for i := 0; i < 2; i++ {
+		decision, err := router.Route(req, premiumBody)
+		if err != nil {
+			t.Fatalf("premium Route %d returned error: %v", i+1, err)
+		}
+		if decision == nil || decision.Model != "anthropic/claude-opus-5" {
+			t.Fatalf("premium Route %d = %#v, want Opus", i+1, decision)
+		}
+	}
+
+	for _, event := range []*plugin.EpisodeEvent{
+		{
+			EventID:   "event-delivery-floor-cooldown-write",
+			EpisodeID: "episode-delivery-floor-cooldown",
+			Timestamp: time.Now(),
+			Kind:      "file_written",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"delivery_target": true,
+				"path_count":      1,
+			},
+		},
+		{
+			EventID:   "event-delivery-floor-cooldown-pass",
+			EpisodeID: "episode-delivery-floor-cooldown",
+			Timestamp: time.Now(),
+			Kind:      "test_run",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":      "passed",
+				"failed_count": 0,
+			},
+		},
+	} {
+		if err := router.RecordEpisodeEvent(event); err != nil {
+			t.Fatalf("RecordEpisodeEvent %s returned error: %v", event.EventID, err)
+		}
+	}
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue with the next bounded step."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local delivery floor before cooldown")
+	}
+	if decision == nil || decision.Model != "anthropic/claude-opus-5" {
+		t.Fatalf("decision = %#v, want Opus assessment", decision)
+	}
+	if decision.BudgetAction != budgetActionPremiumReason {
+		t.Fatalf("budget action = %q, want premium_reason", decision.BudgetAction)
+	}
+	for _, want := range []string{
+		"rule_id=episode_validation_assessment_floor",
+		"capability_floor status=local",
+		"expected=premium_assess",
+		"reason=validation_passed_assess_hidden_gap",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+	if strings.Contains(decision.Reason, "rule_id=premium_cooldown") {
+		t.Fatalf("reason = %q, delivery floor should preempt premium cooldown", decision.Reason)
 	}
 }
 

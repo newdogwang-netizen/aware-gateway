@@ -750,6 +750,7 @@ Repeated-failure Recovery         done for non-improving repeated test failure f
 Completion Readiness Projection   done for current delivery/test/verifier state
 Completion Guardrail Evidence     done for state-aware task_complete routing reason
 Stale Completion Invalidation     done for target writes after verifier success
+Delivery State Floor              done for verifier pass/fail and validated delivery assessment without Judge
 Route Outcome Linkage             done for route -> event/test/verifier windows
 Online Route Outcome Projection   done for posted events after each LLM route
 Recent Route Outcome History      done for compact route -> outcome memory in state/prompt
@@ -774,13 +775,13 @@ Outcome-aware Replay              done
 Event-driven State Controller     partial for no-progress recovery
 Route-to-Outcome Feedback         partial for extractor/replay windows and compact online route history
 Next-step Capability Estimate     partial via deterministic state hint, not yet acceptance-tuned
-Capability Floor Control          partial; hard verifier/no-progress and post-delivery validation assess floors enforced
+Capability Floor Control          partial; hard verifier/no-progress and post-delivery validation assess floors enforced, delivery floors now local
 Online State Inspection           done for current in-memory projection
 Restart State Rebuild             partial for audit trace/event backfill
 Runtime Probe Acceptance          done for deterministic local gateway/mocks
 C2 No-progress Budget Freeze      implemented; needs matched Harbor pilot acceptance
 C3 Repeated-failure Recovery      implemented; needs matched Harbor pilot acceptance
-Delivery Feedback                 partial via completion readiness, stale-proof invalidation, and guardrail evidence
+Delivery Feedback                 partial via completion readiness, stale-proof invalidation, guardrail evidence, and local delivery floor routing
 Outcome-aware Screening Pilot     harness done for P2; needs matched Harbor pilot data
 Outcome-aware Acceptance          gate implemented; still needs at least 3 runs per accepted task class
 Budget Policy Effectiveness       accepted or explicitly rejected

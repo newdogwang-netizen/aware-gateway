@@ -92,6 +92,10 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 		)
 	}
 
+	if decision, history, ok := s.episodeDeliveryStateControlDecision(req); ok {
+		return decision, history, true
+	}
+
 	if obs.State.CooldownRemaining > 0 && !looksLikePremiumRequired(message) {
 		return s.safeControlCheapRoute(
 			req,
@@ -164,6 +168,114 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 	}
 
 	return nil, nil, false
+}
+
+func (s *SmartRouter) episodeDeliveryStateControlDecision(req *http.Request) (*plugin.RoutingDecision, *DecisionResponse, bool) {
+	episodeCfg := s.episodeConfig()
+	if !episodeCfg.Enabled {
+		return nil, nil, false
+	}
+	snapshot := s.episodeSnapshot(req)
+	if snapshot.ID == "" {
+		return nil, nil, false
+	}
+	expected := valueOrDefault(snapshot.NextMinCapability, nextMinCapabilityUnknown)
+	if expected != nextMinCapabilityPremiumAssess && expected != nextMinCapabilityPremiumReason && expected != nextMinCapabilityPremiumRecover {
+		return nil, nil, false
+	}
+	reason := valueOrDefault(snapshot.NextCapabilityReason, "state_floor")
+	if !isDeliveryCapabilityFloor(snapshot, expected, reason) {
+		return nil, nil, false
+	}
+
+	action := budgetActionForCapabilityFloor(expected)
+	if hint, ok := normalizeBudgetAction(snapshot.NextBudgetActionHint); ok {
+		action = hint
+	}
+	if action == "" {
+		return nil, nil, false
+	}
+
+	ruleID := episodeDeliveryFloorRuleID(expected, reason)
+	turnType := "assessment"
+	hypothesisState := "stable"
+	summary := "delivery evidence requires premium assessment"
+	shortReason := "episode delivery state requires premium assessment"
+	confidence := 0.95
+	if expected == nextMinCapabilityPremiumRecover {
+		turnType = "recovery"
+		hypothesisState = "contradicted"
+		summary = "delivery evidence requires premium recovery"
+		shortReason = "episode delivery state requires premium recovery"
+		confidence = 0.96
+	}
+
+	return s.safeControlRoute(
+		req,
+		ruleID,
+		action,
+		true,
+		confidence,
+		episodeDeliveryFloorEvidence(snapshot, expected, reason),
+		turnType,
+		hypothesisState,
+		summary,
+		shortReason,
+	)
+}
+
+func episodeDeliveryFloorRuleID(expected, reason string) string {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "verifier_failed_current_delivery":
+		return "episode_verifier_recovery_floor"
+	case "validation_failed_current_delivery":
+		return "episode_validation_recovery_floor"
+	case "verifier_passed_current_delivery":
+		return "episode_verifier_assessment_floor"
+	case "validation_passed_assess_hidden_gap":
+		return "episode_validation_assessment_floor"
+	case "last_route_verifier_failed", "last_route_outcome_negative", "last_route_validation_failed":
+		return "episode_route_outcome_recovery_floor"
+	case "last_route_verifier_passed", "last_route_validation_passed":
+		return "episode_route_outcome_assessment_floor"
+	default:
+		if expected == nextMinCapabilityPremiumRecover {
+			return "episode_delivery_recovery_floor"
+		}
+		return "episode_delivery_assessment_floor"
+	}
+}
+
+func isDeliveryCapabilityFloor(snapshot EpisodeSnapshot, expected, reason string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(reason))
+	switch normalized {
+	case "verifier_failed_current_delivery",
+		"verifier_passed_current_delivery":
+		return true
+	case "validation_passed_assess_hidden_gap":
+		return snapshot.DeliveryFileWriteCount > 0 || snapshot.LastDeliveryEventID != ""
+	default:
+		return false
+	}
+}
+
+func episodeDeliveryFloorEvidence(snapshot EpisodeSnapshot, expected, reason string) []string {
+	return []string{
+		fmt.Sprintf("episode_id=%s", snapshot.ID),
+		fmt.Sprintf("state_version=%d", snapshot.Version),
+		"capability_floor status=local",
+		"expected=" + expected,
+		"reason=" + valueOrUnknown(reason),
+		"budget_hint=" + valueOrUnknown(snapshot.NextBudgetActionHint),
+		"completion_readiness=" + valueOrDefault(snapshot.CompletionReadiness, completionReadinessNone),
+		fmt.Sprintf("delivery_file_writes=%d", snapshot.DeliveryFileWriteCount),
+		fmt.Sprintf("test_passed=%d", snapshot.TestPassedCount),
+		fmt.Sprintf("test_failed=%d", snapshot.TestFailedCount),
+		fmt.Sprintf("verifier_reward=%.3f", snapshot.VerifierReward),
+		"last_delivery=" + valueOrUnknown(snapshot.LastDeliveryEventID),
+		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
+		"last_route_outcome=" + routeOutcomeLabelForSnapshot(snapshot),
+	}
 }
 
 func (s *SmartRouter) episodeStateControlDecision(req *http.Request) (*plugin.RoutingDecision, *DecisionResponse, bool) {

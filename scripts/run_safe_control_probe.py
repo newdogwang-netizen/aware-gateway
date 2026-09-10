@@ -941,18 +941,19 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     assessment_reason = str(assessment_trace.get("routing_reason") or "")
     checks.extend(
         [
-            check_equal("assessment-route-source", classify_source(assessment_reason), "decision-model"),
+            check_equal("assessment-route-source", classify_source(assessment_reason), "safe-control"),
             check_equal(
                 "assessment-route-model",
                 assessment_trace.get("routed_model") or assessment_response.get("model") or "",
                 PREMIUM_MODEL,
             ),
             check_equal("assessment-route-budget-action", assessment_trace.get("route_budget_action") or "", "premium_reason"),
-            check_contains("assessment-route-floor", assessment_reason, "capability_floor status=forced"),
+            check_contains("assessment-route-rule", assessment_reason, "rule_id=episode_verifier_assessment_floor"),
+            check_contains("assessment-route-floor", assessment_reason, "capability_floor status=local"),
             check_contains("assessment-route-expected", assessment_reason, "expected=premium_assess"),
-            check_contains("assessment-route-observed", assessment_reason, "observed=cheap_execute"),
             check_contains("assessment-route-reason", assessment_reason, "reason=verifier_passed_current_delivery"),
-            check_contains("assessment-route-forced-budget", assessment_reason, "forced_budget_action=premium_reason"),
+            check_contains("assessment-route-readiness", assessment_reason, "completion_readiness=verifier_passed"),
+            check_contains("assessment-route-verifier", assessment_reason, "verifier_reward=1.000"),
         ]
     )
 
@@ -1222,7 +1223,7 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     capability_floor_reason = str(capability_floor_trace.get("routing_reason") or "")
     checks.extend(
         [
-            check_equal("capability-floor-route-source", classify_source(capability_floor_reason), "decision-model"),
+            check_equal("capability-floor-route-source", classify_source(capability_floor_reason), "safe-control"),
             check_equal(
                 "capability-floor-route-model",
                 capability_floor_trace.get("routed_model") or capability_floor_response.get("model") or "",
@@ -1233,15 +1234,16 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
                 capability_floor_trace.get("route_budget_action") or "",
                 "premium_recover",
             ),
-            check_contains("capability-floor-route-status", capability_floor_reason, "capability_floor status=forced"),
+            check_contains("capability-floor-route-rule", capability_floor_reason, "rule_id=episode_verifier_recovery_floor"),
+            check_contains("capability-floor-route-status", capability_floor_reason, "capability_floor status=local"),
             check_contains("capability-floor-route-expected", capability_floor_reason, "expected=premium_recover"),
-            check_contains("capability-floor-route-observed", capability_floor_reason, "observed=cheap_execute"),
             check_contains(
                 "capability-floor-route-reason",
                 capability_floor_reason,
                 "reason=verifier_failed_current_delivery",
             ),
-            check_contains("capability-floor-route-forced-model", capability_floor_reason, f"forced_model={PREMIUM_MODEL}"),
+            check_contains("capability-floor-route-readiness", capability_floor_reason, "completion_readiness=verifier_failed"),
+            check_contains("capability-floor-route-verifier", capability_floor_reason, "verifier_reward=0.000"),
         ]
     )
 
