@@ -315,7 +315,7 @@ plugins:
       premium_cooldown_turns: 1
       cheap_probe_burst_limit: 3
       stop_cost_usd: 4.0
-      stop_agent_call_threshold: 40
+      stop_agent_call_threshold: 30
       stop_length_pressure_threshold: 3
     budgeted_route:
       enabled: true

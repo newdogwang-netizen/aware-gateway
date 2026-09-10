@@ -660,7 +660,7 @@ Do not call it accepted yet.
 
 ```text
 成本 > $4.00 且未接近 verifier: stop
-agent 调用 > 40 且没有 delivery/test/verifier 级有效进展: stop
+agent 调用 > 30 且没有 delivery/test/verifier 级有效进展: stop
 连续 3 次 length boost 后没有 file/test 进展: stop
 length_pressure + no_progress: freeze budget expansion
 premium_recover + no_progress: stop or replan gate

@@ -169,6 +169,19 @@ class ExtractEpisodeOutcomesTest(unittest.TestCase):
         self.assertEqual({event["observation"]["outcome"] for event in llm_events}, {"unknown"})
         self.assertTrue(all(event["evidence_refs"][0].startswith("trajectory:") for event in llm_events))
 
+    def test_json_tool_validation_requires_output_target(self) -> None:
+        sys.path.insert(0, str(self.repo / "scripts"))
+        from extract_episode_outcomes import classify_command
+
+        self.assertEqual(
+            classify_command("bash_command", "python3 -m json.tool /app/data/vm/traces/trace_01.json"),
+            "execution_probe",
+        )
+        self.assertEqual(
+            classify_command("bash_command", "python3 -m json.tool /app/output/result.json"),
+            "validation",
+        )
+
     def test_incomplete_trial_ignores_unmatched_session_traces(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

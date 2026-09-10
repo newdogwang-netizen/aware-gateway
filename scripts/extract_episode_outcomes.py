@@ -28,9 +28,7 @@ SED_INPLACE_RE = re.compile(r"\bsed\s+-i\b.*?\s(/[^\s;&|]+)")
 TEST_COMMAND_RE = re.compile(
     r"\b(pytest|python3?\s+-m\s+pytest|python3?\s+-m\s+unittest|go\s+test|npm\s+test|pnpm\s+test|yarn\s+test|cargo\s+test|make\s+test|ctest|bats)\b"
 )
-VALIDATION_COMMAND_RE = re.compile(
-    r"\bpython3?\s+-m\s+json\.tool\b|(?:\b(cat|grep|diff|cmp|test)\b[^\n;|]*?/app/output/)"
-)
+OUTPUT_VALIDATION_COMMAND_RE = re.compile(r"\bpython3?\s+-m\s+json\.tool\b|\b(cat|grep|diff|cmp|test)\b")
 FAILURE_OUTPUT_RE = re.compile(
     r"(FAILED|ERROR|Traceback|AssertionError|SyntaxError|IndentationError|command not found|No such file|ModuleNotFoundError|Exception:)"
 )
@@ -484,7 +482,7 @@ def classify_command(function_name: str, command: str) -> str:
         return "completion_signal"
     if TEST_COMMAND_RE.search(command):
         return "test"
-    if VALIDATION_COMMAND_RE.search(command):
+    if is_output_validation_command(command):
         return "validation"
     if extract_written_paths(command):
         return "file_write"
@@ -493,6 +491,10 @@ def classify_command(function_name: str, command: str) -> str:
     if "python" in command:
         return "execution_probe"
     return function_name or "unknown"
+
+
+def is_output_validation_command(command: str) -> bool:
+    return "/app/output/" in command and bool(OUTPUT_VALIDATION_COMMAND_RE.search(command))
 
 
 def classify_tool_result(output: str) -> tuple[str, str]:

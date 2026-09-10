@@ -373,7 +373,7 @@ plugins:
       premium_cooldown_turns: 1
       cheap_probe_burst_limit: 3
       stop_cost_usd: 4.0
-      stop_agent_call_threshold: 40
+      stop_agent_call_threshold: 30
       stop_length_pressure_threshold: 3
     budgeted_route:
       enabled: true
@@ -1382,7 +1382,7 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     )
 
     agent_call_stop_events: list[dict[str, Any]] = []
-    for index in range(1, 42):
+    for index in range(1, 32):
         event_id = f"{agent_call_stop_episode}__llm-{index}"
         agent_call_stop_events.append(
             {
@@ -1424,7 +1424,7 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     )
     checks.extend(
         [
-            check_equal("agent-call-stop-batch-event-ingest-count", agent_call_batch_response.get("count"), 41),
+            check_equal("agent-call-stop-batch-event-ingest-count", agent_call_batch_response.get("count"), 31),
             check_equal("agent-call-stop-batch-event-ingest-sinks", agent_call_batch_response.get("sinks"), 2),
         ]
     )
@@ -1433,8 +1433,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     agent_call_stop_payload = agent_call_stop_state.get("state") or {}
     checks.extend(
         [
-            check_equal("agent-call-stop-state-version", agent_call_stop_state.get("state_version"), 41),
-            check_equal("agent-call-stop-call-count", agent_call_stop_payload.get("call_count"), 41),
+            check_equal("agent-call-stop-state-version", agent_call_stop_state.get("state_version"), 31),
+            check_equal("agent-call-stop-call-count", agent_call_stop_payload.get("call_count"), 31),
             check_equal("agent-call-stop-candidate-progress", agent_call_stop_payload.get("candidate_progress_count"), 0),
             check_equal("agent-call-stop-strong-progress", agent_call_stop_payload.get("strong_progress_count"), 0),
         ]
@@ -1475,8 +1475,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
                 agent_call_stop_reason,
                 "rule_id=episode_agent_call_no_progress_stop_gate",
             ),
-            check_contains("agent-call-stop-count", agent_call_stop_reason, "call_count=41"),
-            check_contains("agent-call-stop-threshold", agent_call_stop_reason, "stop_agent_call_threshold=40"),
+            check_contains("agent-call-stop-count", agent_call_stop_reason, "call_count=31"),
+            check_contains("agent-call-stop-threshold", agent_call_stop_reason, "stop_agent_call_threshold=30"),
             check_contains("agent-call-stop-candidate-progress", agent_call_stop_reason, "candidate_progress=0"),
             check_contains("agent-call-stop-strong-progress", agent_call_stop_reason, "strong_progress=0"),
         ]
