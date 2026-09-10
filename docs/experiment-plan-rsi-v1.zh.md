@@ -676,6 +676,10 @@ provider incomplete: stop and classify separately
 
 这些本地停止都会返回 HTTP `409`，不会请求上游模型。对应 trace 记录
 `pool=local`、`route_budget_action=stop_trial`、具体 `error_kind` 和完整 episode evidence。
+V4 runner 会在 Harbor 运行中轮询这些 trace：一旦看到 `stop_trial` 或
+`gateway_*stop_gate`，就写入 `gateway-stop-gate.json`、中断 Harbor、刷新一次
+episode watcher。后处理 analyzer 会把这类样本输出为对应的 `failure_kind`，
+不再和 provider 5xx、wall-clock cap 或 verifier failed 混在一起。
 
 这些 gate 不是为了省时间，而是为了避免把坏策略误跑成“长尾样本”。
 
@@ -769,6 +773,7 @@ Recent Route Outcome History      done for compact route -> outcome memory in st
 Next Minimum Capability Hint      done for state-derived router prompt guidance
 Capability Floor Enforcement      done for hard recovery and post-delivery validation assess floors, advisory otherwise
 Gateway Stop Gate                 done for provider_incomplete/cost/length_pressure/blocked_recovery local aborts
+Gateway Stop Marker               done for V4 runner interrupt + analyzer failure_kind
 Online Episode State Query        done for GET /v1/episode-state
 State Backfill                    done for persisted traces/events -> online projection
 Deterministic Runtime Probe       done for event ingest -> state query -> recovery route -> 4 local stop gates

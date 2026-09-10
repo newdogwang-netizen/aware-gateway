@@ -21,6 +21,7 @@ PILOT_STRATEGY="${AWARE_V4_PILOT_STRATEGY:-smart-router}"
 PILOT_ATTEMPT="${AWARE_V4_PILOT_ATTEMPT:-1}"
 EARLY_FAIL_ON_AGENT_5XX="${AWARE_V4_EARLY_FAIL_ON_AGENT_5XX:-1}"
 EARLY_FAIL_MIN_AGENT_5XX="${AWARE_V4_EARLY_FAIL_MIN_AGENT_5XX:-2}"
+EARLY_FAIL_ON_GATEWAY_STOP="${AWARE_V4_EARLY_FAIL_ON_GATEWAY_STOP:-1}"
 DATA_MIN_GB="${AWARE_V4_DATA_MIN_GB:-40}"
 DOCKER_WARMSTART_MIN_GB="${AWARE_V4_DOCKER_WARMSTART_MIN_GB:-30}"
 RUN_MIN_GB="${AWARE_V4_RUN_MIN_GB:-20}"
@@ -60,6 +61,9 @@ Environment:
   AWARE_V4_PILOT_ATTEMPT      pilot attempt label (default: 1)
   AWARE_V4_EPISODE_WATCHER    set 1 to stream Harbor trajectory/verifier events
                               into /v1/episode-events during each job
+  AWARE_V4_EARLY_FAIL_ON_GATEWAY_STOP
+                              set 0 to ignore gateway stop_trial traces
+                              (default: 1)
 EOF
 }
 
@@ -370,6 +374,79 @@ write_early_failure_marker() {
     }' > "$marker"
 }
 
+session_has_gateway_stop_gate() {
+  local session_id="$1"
+  local job="$2"
+  local tmp="$ARTIFACT_DIR/.${job}.gateway-stop-traces.tmp"
+
+  curl -sf "http://localhost:12026/v1/traces?session_id=$session_id&limit=1000" > "$tmp" ||
+    return 1
+
+  local stop_count
+  stop_count="$(
+    jq '[.traces[]?
+      | select((.pool // "") != "decision-model")
+      | select(
+          ((.route_budget_action // "") == "stop_trial")
+          or ((.error_kind // "") | test("^gateway_.*stop_gate$"))
+        )
+    ] | length' "$tmp"
+  )"
+
+  if [ "$stop_count" -gt 0 ]; then
+    cp "$tmp" "$ARTIFACT_DIR/traces-gateway-stop-${job}.json"
+    return 0
+  fi
+
+  return 1
+}
+
+write_gateway_stop_marker() {
+  local job="$1"
+  local task="$2"
+  local attempt="$3"
+  local strategy="$4"
+  local gateway_model="$5"
+  local harbor_model="$6"
+  local session_id="$7"
+  local marker="$ARTIFACT_DIR/jobs/$job/gateway-stop-gate.json"
+  local traces="$ARTIFACT_DIR/traces-gateway-stop-${job}.json"
+
+  mkdir -p "$ARTIFACT_DIR/jobs/$job"
+  jq -n \
+    --arg job "$job" \
+    --arg task "$task" \
+    --arg attempt "$attempt" \
+    --arg strategy "$strategy" \
+    --arg gateway_model "$gateway_model" \
+    --arg harbor_model "$harbor_model" \
+    --arg session_id "$session_id" \
+    --arg detected_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --slurpfile traces "$traces" \
+    '($traces[0].traces
+      | map(select((.pool // "") != "decision-model"))
+      | map(select(
+          ((.route_budget_action // "") == "stop_trial")
+          or ((.error_kind // "") | test("^gateway_.*stop_gate$"))
+        ))
+      | first) as $first
+    | {
+      job: $job,
+      task: $task,
+      attempt: $attempt,
+      strategy: $strategy,
+      gateway_model: $gateway_model,
+      harbor_model: $harbor_model,
+      session_id: $session_id,
+      trial_name: ($session_id | sub("__agent$"; "")),
+      failure_kind: (($first.error_kind // "") | if . == "" then "gateway_stop_gate" else . end),
+      error_kind: ($first.error_kind // ""),
+      route_budget_action: ($first.route_budget_action // ""),
+      detected_at: $detected_at,
+      first_stop_trace: $first
+    }' > "$marker"
+}
+
 write_wall_clock_cap_marker() {
   local job="$1"
   local task="$2"
@@ -504,6 +581,7 @@ run_harbor_job() {
   local harbor_pid=$!
   local harbor_rc=0
   local early_failed=0
+  local gateway_stopped=0
   local wall_clock_capped=0
   local job_started_epoch
   local max_seconds
@@ -552,13 +630,24 @@ run_harbor_job() {
       fi
     fi
 
-    if [ "$EARLY_FAIL_ON_AGENT_5XX" = "1" ]; then
+    if [ "$EARLY_FAIL_ON_GATEWAY_STOP" = "1" ] || [ "$EARLY_FAIL_ON_AGENT_5XX" = "1" ]; then
       local trial_dir
       trial_dir="$(find_trial_dir "$job" || true)"
       if [ -n "$trial_dir" ]; then
         local session_id
         session_id="$(basename "$trial_dir")__agent"
-        if session_has_agent_5xx "$session_id" "$job"; then
+        if [ "$EARLY_FAIL_ON_GATEWAY_STOP" = "1" ] && session_has_gateway_stop_gate "$session_id" "$job"; then
+          log "gateway stop gate detected for $job session=$session_id; interrupting Harbor"
+          write_gateway_stop_marker "$job" "$task" "$attempt" "$strategy" "$gateway_model" "$harbor_model" "$session_id"
+          gateway_stopped=1
+          kill -INT "$harbor_pid" 2>/dev/null || true
+          sleep 20
+          if kill -0 "$harbor_pid" 2>/dev/null; then
+            kill -TERM "$harbor_pid" 2>/dev/null || true
+          fi
+          break
+        fi
+        if [ "$EARLY_FAIL_ON_AGENT_5XX" = "1" ] && session_has_agent_5xx "$session_id" "$job"; then
           log "provider 5xx detected for $job session=$session_id; interrupting Harbor"
           write_early_failure_marker "$job" "$task" "$attempt" "$strategy" "$gateway_model" "$harbor_model" "$session_id"
           early_failed=1
@@ -583,6 +672,8 @@ run_harbor_job() {
 
   if [ "$wall_clock_capped" = "1" ]; then
     log "recorded wall-clock cap for $job"
+  elif [ "$gateway_stopped" = "1" ]; then
+    log "recorded gateway stop gate for $job"
   elif [ "$early_failed" = "1" ]; then
     log "recorded early provider failure for $job"
   elif [ "$harbor_rc" -ne 0 ]; then

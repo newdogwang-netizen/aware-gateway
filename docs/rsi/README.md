@@ -193,6 +193,13 @@ once while the job is running. In the V4 runner this is opt-in:
 AWARE_V4_EPISODE_WATCHER=1 scripts/run_v4_matrix.sh pilot
 ```
 
+During V4 Harbor jobs, the runner also polls gateway traces for local stop
+signals. If an agent trace contains `route_budget_action=stop_trial` or a
+`gateway_*stop_gate` `error_kind`, it writes `gateway-stop-gate.json`,
+interrupts Harbor, flushes the episode watcher once, and lets
+`scripts/analyze_v3_results.py` classify the row with the specific stop-gate
+`failure_kind`.
+
 The reducer keeps two no-progress views. `no_progress_event_count` is historical
 background. `no_progress_window.severity` is the current state used by P2 replay:
 `none`, `watch`, `stale`, or `blocked`.

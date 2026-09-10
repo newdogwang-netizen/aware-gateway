@@ -60,8 +60,13 @@ def main() -> None:
             rows.append(build_row(args.artifact_dir, trial_result_path, result, traces_by_session, prices))
             emitted_job_rows += 1
 
+        stop_marker_path = job_dir / "gateway-stop-gate.json"
+        if emitted_job_rows == 0 and stop_marker_path.exists():
+            rows.append(
+                build_gateway_stop_gate_row(args.artifact_dir, job_dir, stop_marker_path, traces_by_session, prices)
+            )
         cap_marker_path = job_dir / "wall-clock-cap.json"
-        if emitted_job_rows == 0 and cap_marker_path.exists():
+        if emitted_job_rows == 0 and not stop_marker_path.exists() and cap_marker_path.exists():
             rows.append(
                 build_wall_clock_cap_row(args.artifact_dir, job_dir, cap_marker_path, traces_by_session, prices)
             )
@@ -228,12 +233,16 @@ def build_row(
     early_failure_marker = job_dir / "early-provider-failure.json"
     if early_failure_marker.exists():
         provider_error = True
+    gateway_stop_marker = read_json_if_exists(job_dir / "gateway-stop-gate.json")
+    gateway_stop_kind = ""
+    if gateway_stop_marker:
+        gateway_stop_kind = str(gateway_stop_marker.get("failure_kind") or gateway_stop_marker.get("error_kind") or "gateway_stop_gate")
 
     exception_info = result.get("exception_info") or {}
     exception_type = exception_info.get("exception_type") or ""
-    if reward is None and exception_info:
+    if reward is None and (exception_info or gateway_stop_kind):
         reward = 0.0
-    failure_kind = classify_failure(reward, provider_error, incomplete_provider_response, exception_type)
+    failure_kind = gateway_stop_kind or classify_failure(reward, provider_error, incomplete_provider_response, exception_type)
 
     return {
         "experiment_id": artifact_dir.name,
@@ -308,6 +317,36 @@ def build_wall_clock_cap_row(
     return row
 
 
+def build_gateway_stop_gate_row(
+    artifact_dir: Path,
+    job_dir: Path,
+    marker_path: Path,
+    traces_by_session: dict[str, list[dict[str, Any]]],
+    prices: dict[str, tuple[float, float]],
+) -> dict[str, Any]:
+    marker = json.loads(marker_path.read_text())
+    trial_name = marker.get("trial_name") or infer_trial_name(job_dir)
+    stop_kind = marker.get("failure_kind") or marker.get("error_kind") or "gateway_stop_gate"
+    synthetic_result = {
+        "trial_name": trial_name,
+        "task_name": f"terminal-bench/{marker.get('task') or ''}",
+        "config": {"agent": {"model_name": marker.get("harbor_model") or ""}},
+        "started_at": marker.get("started_at") or "",
+        "finished_at": marker.get("detected_at") or "",
+        "exception_info": {"exception_type": stop_kind},
+    }
+    synthetic_result_path = job_dir / trial_name / "result.json"
+    row = build_row(artifact_dir, synthetic_result_path, synthetic_result, traces_by_session, prices)
+    row["attempt"] = marker.get("attempt") or row["attempt"]
+    row["strategy"] = marker.get("strategy") or row["strategy"]
+    row["model_sent"] = marker.get("gateway_model") or row["model_sent"]
+    row["reward"] = 0.0
+    row["failure_kind"] = stop_kind
+    if marker.get("session_id") and not row.get("trace_key"):
+        row["trace_key"] = marker["session_id"]
+    return row
+
+
 def infer_trial_name(job_dir: Path) -> str:
     for child in sorted(job_dir.iterdir()):
         if child.is_dir() and (child / "agent").is_dir():
@@ -325,6 +364,15 @@ def load_trajectories(agent_dir: Path) -> list[dict[str, Any]]:
         else:
             steps.extend(data.get("steps", []))
     return steps
+
+
+def read_json_if_exists(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
 def aggregate_agent_usage(steps: list[dict[str, Any]], prices: dict[str, tuple[float, float]]) -> dict[str, Any]:

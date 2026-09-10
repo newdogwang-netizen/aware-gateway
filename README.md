@@ -440,6 +440,11 @@ posting each deterministic event id once. V4 experiments can enable it with:
 AWARE_V4_EPISODE_WATCHER=1 scripts/run_v4_matrix.sh pilot
 ```
 
+The V4 runner also watches gateway traces while Harbor is running. If an agent
+trace records `route_budget_action=stop_trial` or a `gateway_*stop_gate`
+`error_kind`, the runner writes `gateway-stop-gate.json`, interrupts the Harbor
+job, and the analyzer reports that stop type as `failure_kind`.
+
 Inspect the router's current online projection for one task line:
 
 ```bash
