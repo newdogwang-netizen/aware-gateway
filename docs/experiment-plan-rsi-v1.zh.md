@@ -728,6 +728,7 @@ Fixture Test                      done
 Real-history Smoke                done on A4/A5 shadow-relay
 P1 Outcome-aware Replay           done, replay-only
 P2 Windowed-progress Replay       done, candidate for next small pilot
+Policy Acceptance Gate            done for matched summary/replay evaluation
 Online Episode ID                 done for explicit X-Episode-ID fallback to session/trial
 Online Episode Resolver           done for header/body operation plus minimal interrupt/resume stack
 Online State Version Audit        done for state-before/state-after trace fields
@@ -773,7 +774,7 @@ C2 No-progress Budget Freeze      implemented; needs matched Harbor pilot accept
 C3 Repeated-failure Recovery      implemented; needs matched Harbor pilot acceptance
 Delivery Feedback                 partial via completion readiness, stale-proof invalidation, and guardrail evidence
 Outcome-aware Screening Pilot     not started for P2
-Outcome-aware Acceptance          at least 3 runs per accepted task class
+Outcome-aware Acceptance          gate implemented; still needs at least 3 runs per accepted task class
 Budget Policy Effectiveness       accepted or explicitly rejected
 Automatic Tool Event Capture      partial via Harbor artifact watcher; native hook not started
 Command-level Event Adapter       done for local command wrapping

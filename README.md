@@ -94,6 +94,13 @@ Run the extractor with `python3 scripts/extract_episode_outcomes.py --trial-dir 
 
 Replay outcome-aware routing with `python3 scripts/replay_episode_decisions.py --episode-dir <out> --output <router-replay-rsi-p2.json> --prompt-id rsi-p2-windowed-progress-v1 --model openai/gpt-5.6-sol --resume`.
 
+Evaluate a candidate policy against matched baseline/candidate episode
+summaries with
+`python3 scripts/evaluate_rsi_policy_gate.py --baseline-summary <baseline-out> --candidate-summary <candidate-out> --candidate-replay <router-replay-rsi-p2.json> --output <policy-gate.json>`.
+The gate returns `accept`, `reject`, or `needs_more_data` from final reward,
+cost per success, future-evidence leakage, replay evidence coverage, and
+matched task/run counts.
+
 Use `make test-scripts` to validate the extractor fixture and replay cutoff guard.
 After building the gateway, run the deterministic runtime probe to exercise the
 compiled proxy with mock upstreams:

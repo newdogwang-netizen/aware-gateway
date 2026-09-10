@@ -190,6 +190,28 @@ evidence-reference coverage, estimated decision-model cost, and future evidence
 leakage. Replay is a screening gate only; it can reject unsafe or incoherent
 policies, but it cannot prove benchmark quality without a real pilot.
 
+## Policy Gate
+
+After a matched baseline/candidate pilot, evaluate the candidate against final
+episode summaries:
+
+```bash
+python3 scripts/evaluate_rsi_policy_gate.py \
+  --baseline-summary /path/to/baseline-rsi-output \
+  --candidate-summary /path/to/candidate-rsi-output \
+  --candidate-replay /path/to/router-replay-rsi-p2.json \
+  --manifest docs/rsi/candidate-manifest.template.json \
+  --output /path/to/policy-gate.json
+```
+
+The gate groups summaries by task, compares only matched tasks, and reports
+`accept`, `reject`, or `needs_more_data`. It rejects future-evidence leakage,
+reward regressions, missing successes against a successful baseline, replay
+evidence coverage below 100%, and candidates whose cost per success is not
+lower than the matched baseline. If the matched task or run count is below the
+manifest gate, it keeps the result as `needs_more_data` unless a rollback
+condition has already fired.
+
 ## Boundary
 
 `finish_reason=stop` is normalized to `response_completed`, which means one model response ended normally. It is not treated as benchmark task completion.
