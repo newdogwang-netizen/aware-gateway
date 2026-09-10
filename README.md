@@ -111,7 +111,8 @@ audit trace queries, and the online Episode loop:
 `POST /v1/episode-events` -> `GET /v1/episode-state` -> state-driven
 `premium_recover` routing. It also checks that repeated non-improving failed
 test events trigger one local recovery without creating an endless local
-recovery loop.
+recovery loop, and that completion guardrail traces include delivery,
+validation, and verifier readiness evidence when those events exist.
 
 ### Writing a Custom Plugin
 

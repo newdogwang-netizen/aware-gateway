@@ -263,7 +263,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 			decision := &plugin.RoutingDecision{
 				Pool:   strongest.Pool,
 				Model:  strongest.Name,
-				Reason: "smart-router guardrail: task completion confirmation requires exact agent-control output",
+				Reason: s.completionGuardrailReason(req),
 			}
 			s.applyRouteBudget(req, decision, budgetActionCompletionGuardrail)
 			s.attachEpisodeMetadata(req, decision, resolution.Operation)
@@ -1151,6 +1151,25 @@ func isTaskCompletionConfirmation(message string) bool {
 	}
 	return strings.Contains(lower, `"task_complete": true`) ||
 		strings.Contains(lower, "<task_complete>true</task_complete>")
+}
+
+func (s *SmartRouter) completionGuardrailReason(req *http.Request) string {
+	base := "smart-router guardrail: task completion confirmation requires exact agent-control output"
+	snapshot := s.episodeSnapshot(req)
+	if snapshot.ID == "" {
+		return base
+	}
+	evidence := []string{
+		fmt.Sprintf("episode_id=%s", snapshot.ID),
+		fmt.Sprintf("state_version=%d", snapshot.Version),
+		fmt.Sprintf("completion_readiness=%s", valueOrDefault(snapshot.CompletionReadiness, completionReadinessNone)),
+		fmt.Sprintf("delivery_file_writes=%d", snapshot.DeliveryFileWriteCount),
+		fmt.Sprintf("test_passed=%d", snapshot.TestPassedCount),
+		fmt.Sprintf("test_failed=%d", snapshot.TestFailedCount),
+		fmt.Sprintf("verifier_reward=%.3f", snapshot.VerifierReward),
+		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
+	}
+	return fmt.Sprintf("%s evidence=%s", base, strings.Join(evidence, "; "))
 }
 
 // --- Prompt building ---

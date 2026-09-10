@@ -114,6 +114,9 @@ the base recovery budget instead of compounding another length-based boost.
 It also injects repeated failed test events and checks that the first
 non-improving failure frontier triggers `episode_repeated_failure_recovery`,
 while the same fingerprint is not repeatedly escalated by the local controller.
+Finally, it injects delivery, passed validation, and verifier events, then
+checks that final task-completion routing carries `completion_readiness` and
+the supporting evidence in the guardrail trace.
 
 For local runners, `scripts/run_episode_command.py` wraps a command and posts
 the detected events automatically:

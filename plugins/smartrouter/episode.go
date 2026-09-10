@@ -26,6 +26,11 @@ const (
 	episodeOperationResume    = "resume"
 	episodeOperationGlobal    = "global"
 	episodeOperationUnknown   = "unknown"
+
+	completionReadinessNone              = "none"
+	completionReadinessDeliveryCandidate = "delivery_candidate"
+	completionReadinessValidationPassed  = "validation_passed"
+	completionReadinessVerifierPassed    = "verifier_passed"
 )
 
 // EpisodeConfig enables a small in-memory event projection for one task line.
@@ -69,6 +74,7 @@ type EpisodeState struct {
 	TestRunCount                int
 	TestPassedCount             int
 	TestFailedCount             int
+	DeliveryFileWriteCount      int
 	CandidateProgressCount      int
 	StrongProgressCount         int
 	NoProgressEventCount        int
@@ -79,6 +85,8 @@ type EpisodeState struct {
 	LastProgressEventID         string
 	LastProgressKind            string
 	VerifierReward              float64
+	CompletionReadiness         string
+	LastDeliveryEventID         string
 	NoProgressSeverity          string
 	LastModel                   string
 	LastBudgetAction            string
@@ -118,6 +126,7 @@ type EpisodeSnapshot struct {
 	TestRunCount                int
 	TestPassedCount             int
 	TestFailedCount             int
+	DeliveryFileWriteCount      int
 	CandidateProgressCount      int
 	StrongProgressCount         int
 	NoProgressEventCount        int
@@ -128,6 +137,8 @@ type EpisodeSnapshot struct {
 	LastProgressEventID         string
 	LastProgressKind            string
 	VerifierReward              float64
+	CompletionReadiness         string
+	LastDeliveryEventID         string
 	NoProgressSeverity          string
 	LastModel                   string
 	LastBudgetAction            string
@@ -618,6 +629,29 @@ func normalizeEpisodeFailureFingerprint(value string) string {
 	return normalizeErrorFingerprint(strings.ToLower(strings.TrimSpace(value)))
 }
 
+func promoteCompletionReadiness(current string, candidate string) string {
+	if completionReadinessRank(candidate) > completionReadinessRank(current) {
+		return candidate
+	}
+	if strings.TrimSpace(current) == "" {
+		return completionReadinessNone
+	}
+	return current
+}
+
+func completionReadinessRank(readiness string) int {
+	switch strings.TrimSpace(readiness) {
+	case completionReadinessVerifierPassed:
+		return 3
+	case completionReadinessValidationPassed:
+		return 2
+	case completionReadinessDeliveryCandidate:
+		return 1
+	default:
+		return 0
+	}
+}
+
 func failureFrontierSizeFromEvent(event EpisodeEvent) int {
 	for _, key := range []string{"failed_count", "failing_count", "failure_count", "failures"} {
 		if count := intFromObservation(event.Observation, key); count > 0 {
@@ -674,22 +708,44 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 		state.ToolCallCount++
 	case "file_written", "file_modified":
 		state.FileWriteCount++
+		if boolFromObservation(event.Observation, "delivery_target") {
+			state.DeliveryFileWriteCount++
+			state.LastDeliveryEventID = event.ID
+			state.CompletionReadiness = promoteCompletionReadiness(
+				state.CompletionReadiness,
+				completionReadinessDeliveryCandidate,
+			)
+		}
 	case "test_run":
 		state.TestRunCount++
 		switch strings.ToLower(strings.TrimSpace(stringFromObservation(event.Observation, "outcome"))) {
 		case "passed":
 			state.TestPassedCount++
+			state.CompletionReadiness = promoteCompletionReadiness(
+				state.CompletionReadiness,
+				completionReadinessValidationPassed,
+			)
 		case "failed":
 			state.TestFailedCount++
 			projectTestFailureState(state, event)
 		}
 	case "test_passed":
 		state.TestPassedCount++
+		state.CompletionReadiness = promoteCompletionReadiness(
+			state.CompletionReadiness,
+			completionReadinessValidationPassed,
+		)
 	case "test_failed":
 		state.TestFailedCount++
 		projectTestFailureState(state, event)
 	case "verifier_result":
 		state.VerifierReward = floatFromObservation(event.Observation, "reward")
+		if state.VerifierReward > 0 {
+			state.CompletionReadiness = promoteCompletionReadiness(
+				state.CompletionReadiness,
+				completionReadinessVerifierPassed,
+			)
+		}
 	case "no_progress":
 		state.NoProgressEventCount++
 		state.ActiveNoProgress = true
@@ -762,6 +818,7 @@ func snapshotFromEpisodeState(state *EpisodeState) EpisodeSnapshot {
 		TestRunCount:                state.TestRunCount,
 		TestPassedCount:             state.TestPassedCount,
 		TestFailedCount:             state.TestFailedCount,
+		DeliveryFileWriteCount:      state.DeliveryFileWriteCount,
 		CandidateProgressCount:      state.CandidateProgressCount,
 		StrongProgressCount:         state.StrongProgressCount,
 		NoProgressEventCount:        state.NoProgressEventCount,
@@ -772,6 +829,8 @@ func snapshotFromEpisodeState(state *EpisodeState) EpisodeSnapshot {
 		LastProgressEventID:         state.LastProgressEventID,
 		LastProgressKind:            state.LastProgressKind,
 		VerifierReward:              state.VerifierReward,
+		CompletionReadiness:         state.CompletionReadiness,
+		LastDeliveryEventID:         state.LastDeliveryEventID,
 		NoProgressSeverity:          state.NoProgressSeverity,
 		LastModel:                   state.LastModel,
 		LastBudgetAction:            state.LastBudgetAction,
@@ -822,6 +881,12 @@ func (s *SmartRouter) renderEpisodeSnapshot(snapshot EpisodeSnapshot) string {
 			snapshot.LengthPressureSinceProgress,
 			valueOrUnknown(snapshot.LastProgressKind),
 			snapshot.VerifierReward,
+		),
+		fmt.Sprintf(
+			"delivery readiness=%s delivery_file_writes=%d last_delivery=%s",
+			valueOrDefault(snapshot.CompletionReadiness, completionReadinessNone),
+			snapshot.DeliveryFileWriteCount,
+			valueOrUnknown(snapshot.LastDeliveryEventID),
 		),
 		fmt.Sprintf(
 			"failure_frontier size=%d same_failure_count=%d last_failure=%s",
@@ -894,6 +959,7 @@ func episodeStatePayload(snapshot EpisodeSnapshot) map[string]any {
 		"test_run_count":                 snapshot.TestRunCount,
 		"test_passed_count":              snapshot.TestPassedCount,
 		"test_failed_count":              snapshot.TestFailedCount,
+		"delivery_file_write_count":      snapshot.DeliveryFileWriteCount,
 		"candidate_progress_count":       snapshot.CandidateProgressCount,
 		"strong_progress_count":          snapshot.StrongProgressCount,
 		"no_progress_event_count":        snapshot.NoProgressEventCount,
@@ -904,6 +970,8 @@ func episodeStatePayload(snapshot EpisodeSnapshot) map[string]any {
 		"last_progress_event_id":         snapshot.LastProgressEventID,
 		"last_progress_kind":             snapshot.LastProgressKind,
 		"verifier_reward":                snapshot.VerifierReward,
+		"completion_readiness":           valueOrDefault(snapshot.CompletionReadiness, completionReadinessNone),
+		"last_delivery_event_id":         snapshot.LastDeliveryEventID,
 		"no_progress_severity":           valueOrDefault(snapshot.NoProgressSeverity, "none"),
 		"last_model":                     snapshot.LastModel,
 		"last_budget_action":             snapshot.LastBudgetAction,

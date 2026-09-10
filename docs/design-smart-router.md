@@ -308,6 +308,9 @@ The first reducer tracks only stable control signals:
 - consecutive HTTP/provider errors
 - repeated test failure frontier: last normalized failure fingerprint, current
   frontier size, and non-improving repeat count
+- completion readiness: delivery-target writes, passed validation, and verifier
+  reward promoted as `delivery_candidate`, `validation_passed`, or
+  `verifier_passed`
 - candidate progress: workspace/delivery file writes and passed local test runs
 - strong progress: verifier reward and fully passing final test events
 - no-progress pressure: explicit `no_progress` events and recent pressure
@@ -334,6 +337,11 @@ fingerprint repeats without the failure frontier shrinking, the router can make
 one local `episode_repeated_failure_recovery` decision and then hand later
 turns for that same fingerprint back to the semantic judge until new evidence
 arrives.
+For final `task_complete` confirmations, the guardrail still forces the
+strongest model, but its routing reason now includes the episode readiness,
+delivery write count, test pass/fail counts, verifier reward, and last progress
+kind. The gateway does not mark completion by itself; it exposes the evidence
+used for the final model choice.
 
 Online runners can post the same event shape used by RSI replay:
 

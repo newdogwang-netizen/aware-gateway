@@ -504,6 +504,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     session = f"{trial}__episode_runtime_agent"
     failure_episode = f"{trial}__failure_frontier"
     failure_session = f"{trial}__failure_frontier_agent"
+    completion_episode = f"{trial}__completion_ready"
+    completion_session = f"{trial}__completion_ready_agent"
     task = "phase2-safe-control-probe"
     checks: list[dict[str, Any]] = []
 
@@ -775,12 +777,130 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         ]
     )
 
+    completion_events = [
+        (
+            "delivery-file",
+            "file_written",
+            {
+                "target_paths": ["/app/output/answer.json"],
+                "delivery_target": True,
+                "workspace_target": False,
+            },
+        ),
+        (
+            "validation-passed",
+            "test_run",
+            {
+                "outcome": "passed",
+                "command": "python3 validate.py",
+                "passed_count": 7,
+                "failed_count": 0,
+            },
+        ),
+        (
+            "verifier-passed",
+            "verifier_result",
+            {
+                "reward": 1.0,
+            },
+        ),
+    ]
+    for index, (name, kind, observation) in enumerate(completion_events, start=1):
+        event_id = f"{completion_episode}__{name}"
+        post_json(
+            f"http://127.0.0.1:{port}/v1/episode-events",
+            {
+                "event_id": event_id,
+                "episode_id": completion_episode,
+                "episode_operation": "continue",
+                "sequence": index,
+                "kind": kind,
+                "source": "safe-control-probe",
+                "observation": observation,
+                "evidence_refs": [f"probe:event:{event_id}"],
+                "session_id": completion_session,
+                "trial_name": trial,
+                "step_name": f"episode-completion-{name}",
+                "task_name": task,
+            },
+            headers={
+                "X-Trial-Name": trial,
+                "X-Session-ID": completion_session,
+                "X-Episode-ID": completion_episode,
+                "X-Episode-Operation": "continue",
+                "X-Step-Name": f"episode-completion-{name}",
+                "X-Task-Name": task,
+            },
+        )
+
+    completion_state = fetch_episode_state(port, completion_episode)
+    completion_payload = completion_state.get("state") or {}
+    checks.extend(
+        [
+            check_equal("completion-state-version-after-events", completion_state.get("state_version"), 3),
+            check_equal("completion-readiness", completion_payload.get("completion_readiness"), "verifier_passed"),
+            check_equal("completion-delivery-writes", completion_payload.get("delivery_file_write_count"), 1),
+            check_equal("completion-test-passed-count", completion_payload.get("test_passed_count"), 1),
+            check_equal("completion-verifier-reward", completion_payload.get("verifier_reward"), 1),
+        ]
+    )
+
+    completion_step = "episode-completion-guardrail-route"
+    completion_response = post_json(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {
+                    "role": "user",
+                    "content": 'Are you sure you want to mark the task as complete? Include "task_complete": true.',
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": completion_session,
+            "X-Episode-ID": completion_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": completion_step,
+            "X-Task-Name": task,
+        },
+    )
+    completion_traces = fetch_json(f"http://127.0.0.1:{port}/v1/traces?session_id={completion_session}&limit=1000")
+    completion_trace = latest_agent_trace(completion_traces.get("traces", []), completion_step)
+    completion_reason = str(completion_trace.get("routing_reason") or "")
+    checks.extend(
+        [
+            check_equal("completion-route-source", classify_source(completion_reason), "guardrail"),
+            check_equal(
+                "completion-route-model",
+                completion_trace.get("routed_model") or completion_response.get("model") or "",
+                PREMIUM_MODEL,
+            ),
+            check_equal(
+                "completion-route-budget-action",
+                completion_trace.get("route_budget_action") or "",
+                "completion_guardrail",
+            ),
+            check_contains("completion-route-readiness", completion_reason, "completion_readiness=verifier_passed"),
+            check_contains("completion-route-delivery", completion_reason, "delivery_file_writes=1"),
+            check_contains("completion-route-tests", completion_reason, "test_passed=1"),
+            check_contains("completion-route-verifier", completion_reason, "verifier_reward=1.000"),
+            check_contains("completion-route-last-progress", completion_reason, "last_progress=verifier_result"),
+        ]
+    )
+
     return {
         "name": "episode-runtime-state-controller",
         "episode_id": episode,
         "session_id": session,
         "failure_episode_id": failure_episode,
         "failure_session_id": failure_session,
+        "completion_episode_id": completion_episode,
+        "completion_session_id": completion_session,
         "checks": checks,
         "state_before_route": state_before,
         "state_after_duplicate": state_after_duplicate,
@@ -789,6 +909,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         "failure_state": failure_state,
         "first_failure_route_trace": first_failure_trace,
         "second_failure_route_trace": second_failure_trace,
+        "completion_state": completion_state,
+        "completion_route_trace": completion_trace,
     }
 
 
