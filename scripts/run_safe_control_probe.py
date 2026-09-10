@@ -23,6 +23,7 @@ import subprocess
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -255,14 +256,20 @@ def main() -> None:
             wait_for_gateway(gateway_port, gateway)
             result = run_probe(gateway_port)
             traces = fetch_json(f"http://127.0.0.1:{gateway_port}/v1/traces?limit=1000")
-            session_traces = [
+            trial_traces = [
                 trace
                 for trace in traces.get("traces", [])
+                if trace.get("trial_name") == result["trial_name"]
+            ]
+            case_session_traces = [
+                trace
+                for trace in trial_traces
                 if trace.get("session_id") == result["session_id"]
             ]
-            result["traces"] = session_traces
+            result["traces"] = trial_traces
+            result["case_session_traces"] = case_session_traces
             result["decision_endpoint_calls"] = len(MockDecisionHandler.calls)
-            result["summary"] = summarize(result["cases"], session_traces)
+            result["summary"] = summarize(result["cases"], trial_traces, result["episode_probe"])
             write_outputs(out_dir, result)
             print(json.dumps(result["summary"], indent=2, sort_keys=True))
             if result["summary"]["failed_expectations"]:
@@ -488,7 +495,160 @@ def run_probe(port: int) -> dict[str, Any]:
                 "response_model": response.get("model"),
             }
         )
-    return {"trial_name": trial, "session_id": session, "cases": cases}
+    episode_probe = run_episode_runtime_probe(port, trial)
+    return {"trial_name": trial, "session_id": session, "cases": cases, "episode_probe": episode_probe}
+
+
+def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
+    episode = f"{trial}__episode_runtime"
+    session = f"{trial}__episode_runtime_agent"
+    task = "phase2-safe-control-probe"
+    checks: list[dict[str, Any]] = []
+
+    for index in range(1, 3):
+        event_id = f"{episode}__length-{index}"
+        post_json(
+            f"http://127.0.0.1:{port}/v1/episode-events",
+            {
+                "event_id": event_id,
+                "episode_id": episode,
+                "episode_operation": "continue",
+                "sequence": index,
+                "kind": "llm_call",
+                "source": "safe-control-probe",
+                "observation": {
+                    "outcome": "length_truncated",
+                    "model": CHEAP_MODEL,
+                    "routed_model": CHEAP_MODEL,
+                    "budget_action": "cheap_execute",
+                    "finish_reason": "length",
+                    "status": 200,
+                    "total_tokens": 1536,
+                    "cost_usd": 0.0001,
+                    "latency_ms": 60000,
+                },
+                "evidence_refs": [f"probe:event:{event_id}"],
+                "session_id": session,
+                "trial_name": trial,
+                "step_name": f"episode-runtime-injected-length-{index}",
+                "task_name": task,
+            },
+            headers={
+                "X-Trial-Name": trial,
+                "X-Session-ID": session,
+                "X-Episode-ID": episode,
+                "X-Episode-Operation": "continue",
+                "X-Step-Name": f"episode-runtime-injected-length-{index}",
+                "X-Task-Name": task,
+            },
+        )
+
+    state_before = fetch_episode_state(port, episode)
+    state_payload = state_before.get("state") or {}
+    checks.extend(
+        [
+            check_equal("state-version-after-events", state_before.get("state_version"), 2),
+            check_equal("call-count-after-events", state_payload.get("call_count"), 2),
+            check_equal("recent-length-after-events", state_payload.get("recent_length_finishes"), 2),
+            check_equal("length-streak-after-events", state_payload.get("consecutive_length_finishes"), 2),
+            check_equal("no-progress-severity-after-events", state_payload.get("no_progress_severity"), "stale"),
+        ]
+    )
+
+    duplicate_event_id = f"{episode}__length-2"
+    post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {
+            "event_id": duplicate_event_id,
+            "episode_id": episode,
+            "episode_operation": "continue",
+            "sequence": 2,
+            "kind": "llm_call",
+            "source": "safe-control-probe",
+            "observation": {
+                "outcome": "length_truncated",
+                "model": CHEAP_MODEL,
+                "routed_model": CHEAP_MODEL,
+                "budget_action": "cheap_execute",
+                "finish_reason": "length",
+                "status": 200,
+                "total_tokens": 1536,
+                "cost_usd": 0.0001,
+                "latency_ms": 60000,
+            },
+            "evidence_refs": [f"probe:event:{duplicate_event_id}:duplicate"],
+            "session_id": session,
+            "trial_name": trial,
+            "step_name": "episode-runtime-duplicate-length",
+            "task_name": task,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": session,
+            "X-Episode-ID": episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-runtime-duplicate-length",
+            "X-Task-Name": task,
+        },
+    )
+    state_after_duplicate = fetch_episode_state(port, episode)
+    checks.append(
+        check_equal(
+            "state-version-after-duplicate-event",
+            state_after_duplicate.get("state_version"),
+            state_before.get("state_version"),
+        )
+    )
+
+    route_step = "episode-runtime-recovery-route"
+    response = post_json(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Run the existing tests and recover the blocked path."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": session,
+            "X-Episode-ID": episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": route_step,
+            "X-Task-Name": task,
+        },
+    )
+    traces = fetch_json(f"http://127.0.0.1:{port}/v1/traces?session_id={session}&limit=1000")
+    route_trace = latest_agent_trace(traces.get("traces", []), route_step)
+    reason = str(route_trace.get("routing_reason") or "")
+    checks.extend(
+        [
+            check_equal("recovery-route-source", classify_source(reason), "safe-control"),
+            check_equal("recovery-route-model", route_trace.get("routed_model") or response.get("model") or "", PREMIUM_MODEL),
+            check_equal("recovery-route-budget-action", route_trace.get("route_budget_action") or "", "premium_recover"),
+            check_contains("recovery-route-rule", reason, "rule_id=episode_no_progress_recovery"),
+            check_contains("recovery-route-state-version", reason, "state_version=2"),
+            check_contains("recovery-route-length-pressure", reason, "recent_length=2"),
+            check_contains("recovery-route-budget-adjust", reason, "episode_adjust=length_boost"),
+        ]
+    )
+
+    state_after_route = fetch_episode_state(port, episode)
+    checks.append(check_equal("state-version-after-route", state_after_route.get("state_version"), 3))
+
+    return {
+        "name": "episode-runtime-no-progress-recovery",
+        "episode_id": episode,
+        "session_id": session,
+        "checks": checks,
+        "state_before_route": state_before,
+        "state_after_duplicate": state_after_duplicate,
+        "state_after_route": state_after_route,
+        "route_trace": route_trace,
+    }
 
 
 def latest_agent_trace(traces: list[dict[str, Any]], step_name: str) -> dict[str, Any]:
@@ -516,7 +676,7 @@ def classify_source(reason: str) -> str:
     return "unknown"
 
 
-def summarize(cases: list[dict[str, Any]], traces: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize(cases: list[dict[str, Any]], traces: list[dict[str, Any]], episode_probe: dict[str, Any]) -> dict[str, Any]:
     agent_traces = [trace for trace in traces if trace.get("pool") != "decision-model"]
     decision_traces = [trace for trace in traces if trace.get("pool") == "decision-model"]
     source_counts: dict[str, int] = {}
@@ -535,19 +695,77 @@ def summarize(cases: list[dict[str, Any]], traces: list[dict[str, Any]]) -> dict
             rule_counts[rule_id] = rule_counts.get(rule_id, 0) + 1
         if "episode_adjust=" in case["routing_reason"]:
             episode_adjust_calls += 1
+    trace_counts = summarize_traces(agent_traces)
+    episode_summary = summarize_episode_probe(episode_probe)
+    case_failures = [case["name"] for case in cases if not case["pass"]]
+    episode_failures = [f"episode:{name}" for name in episode_summary["failed_checks"]]
     return {
         "cases": len(cases),
         "passed_expectations": sum(1 for case in cases if case["pass"]),
-        "failed_expectations": [case["name"] for case in cases if not case["pass"]],
+        "failed_expectations": case_failures + episode_failures,
+        "failed_case_expectations": case_failures,
         "missing_route_budget": [case["name"] for case in cases if not case.get("route_budget_action")],
         "agent_traces": len(agent_traces),
         "decision_traces": len(decision_traces),
+        "source_counts": trace_counts["source_counts"],
+        "model_counts": trace_counts["model_counts"],
+        "safe_control_rule_counts": trace_counts["safe_control_rule_counts"],
+        "route_budget_action_counts": trace_counts["route_budget_action_counts"],
+        "episode_adjust_call_count": trace_counts["episode_adjust_call_count"],
+        "case_source_counts": source_counts,
+        "case_model_counts": model_counts,
+        "case_safe_control_rule_counts": rule_counts,
+        "case_route_budget_action_counts": budget_counts,
+        "case_episode_adjust_call_count": episode_adjust_calls,
+        "trace_source_counts": trace_counts["source_counts"],
+        "trace_model_counts": trace_counts["model_counts"],
+        "trace_safe_control_rule_counts": trace_counts["safe_control_rule_counts"],
+        "trace_route_budget_action_counts": trace_counts["route_budget_action_counts"],
+        "trace_episode_adjust_call_count": trace_counts["episode_adjust_call_count"],
+        "episode_probe": episode_summary,
+        "total_cost_usd": round(sum(float(trace.get("cost") or 0) for trace in traces), 8),
+    }
+
+
+def summarize_traces(agent_traces: list[dict[str, Any]]) -> dict[str, Any]:
+    source_counts: dict[str, int] = {}
+    model_counts: dict[str, int] = {}
+    rule_counts: dict[str, int] = {}
+    budget_counts: dict[str, int] = {}
+    episode_adjust_calls = 0
+    for trace in agent_traces:
+        reason = str(trace.get("routing_reason") or "")
+        source = classify_source(reason)
+        source_counts[source] = source_counts.get(source, 0) + 1
+        model = str(trace.get("routed_model") or trace.get("model") or "")
+        if model:
+            model_counts[model] = model_counts.get(model, 0) + 1
+        budget_action = str(trace.get("route_budget_action") or "")
+        if budget_action:
+            budget_counts[budget_action] = budget_counts.get(budget_action, 0) + 1
+        if source == "safe-control":
+            rule_id = extract_rule_id(reason)
+            rule_counts[rule_id] = rule_counts.get(rule_id, 0) + 1
+        if "episode_adjust=" in reason:
+            episode_adjust_calls += 1
+    return {
         "source_counts": source_counts,
         "model_counts": model_counts,
         "safe_control_rule_counts": rule_counts,
         "route_budget_action_counts": budget_counts,
         "episode_adjust_call_count": episode_adjust_calls,
-        "total_cost_usd": round(sum(float(trace.get("cost") or 0) for trace in traces), 8),
+    }
+
+
+def summarize_episode_probe(episode_probe: dict[str, Any]) -> dict[str, Any]:
+    checks = episode_probe.get("checks") or []
+    failed = [check["name"] for check in checks if not check.get("pass")]
+    return {
+        "name": episode_probe.get("name") or "",
+        "checks": len(checks),
+        "passed_checks": len(checks) - len(failed),
+        "failed_checks": failed,
+        "episode_id": episode_probe.get("episode_id") or "",
     }
 
 
@@ -583,6 +801,36 @@ def write_outputs(out_dir: Path, result: dict[str, Any]) -> None:
         )
         writer.writeheader()
         writer.writerows(result["cases"])
+
+
+def fetch_episode_state(port: int, episode_id: str) -> dict[str, Any]:
+    encoded = urllib.parse.quote(episode_id, safe="")
+    body = fetch_json(f"http://127.0.0.1:{port}/v1/episode-state?episode_id={encoded}&limit=10")
+    states = body.get("states") or []
+    if not states:
+        return {}
+    for state in states:
+        if state.get("episode_id") == episode_id:
+            return state
+    return states[0]
+
+
+def check_equal(name: str, actual: Any, expected: Any) -> dict[str, Any]:
+    return {
+        "name": name,
+        "pass": actual == expected,
+        "actual": actual,
+        "expected": expected,
+    }
+
+
+def check_contains(name: str, actual: str, expected_fragment: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "pass": expected_fragment in actual,
+        "actual": actual,
+        "expected": expected_fragment,
+    }
 
 
 def post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:

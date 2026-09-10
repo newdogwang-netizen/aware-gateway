@@ -741,6 +741,7 @@ Stateful No-progress Recovery     done for stale/blocked -> local premium_recove
 Route Outcome Linkage             done for route -> event/test/verifier windows
 Online Episode State Query        done for GET /v1/episode-state
 State Backfill                    done for persisted traces/events -> online projection
+Deterministic Runtime Probe       done for event ingest -> state query -> recovery route
 ```
 
 RSI R1 完整结束后，aware-gateway 应达到：
@@ -757,6 +758,7 @@ Event-driven State Controller     partial for no-progress recovery
 Route-to-Outcome Feedback         partial for extractor/replay analysis windows
 Online State Inspection           done for current in-memory projection
 Restart State Rebuild             partial for audit trace/event backfill
+Runtime Probe Acceptance          done for deterministic local gateway/mocks
 Outcome-aware Screening Pilot     not started for P2
 Outcome-aware Acceptance          at least 3 runs per accepted task class
 Budget Policy Effectiveness       accepted or explicitly rejected

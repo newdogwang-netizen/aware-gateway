@@ -91,6 +91,26 @@ When smart-router memory has no entry for the requested episode, the runtime
 state path can backfill from persisted audit traces and explicit episode
 events exposed by installed query plugins.
 
+## Deterministic Runtime Probe
+
+The local safe-control probe runs the compiled gateway against mock provider and
+decision endpoints:
+
+```bash
+make build
+python3 scripts/run_safe_control_probe.py \
+  --repo . \
+  --gateway-bin ./aware-gateway \
+  --out-dir /tmp/aware-safe-control-probe
+```
+
+It verifies the Phase 2 control plane without real LLM spend. In addition to
+the fixed safe-control matrix, it posts two explicit `llm_call` events with
+`finish_reason=length`, checks `/v1/episode-state` for the reduced stale
+no-progress state, retries a duplicate event id to prove projection
+idempotency, and verifies that the next routed request locally selects
+`premium_recover` with `rule_id=episode_no_progress_recovery`.
+
 For local runners, `scripts/run_episode_command.py` wraps a command and posts
 the detected events automatically:
 
