@@ -193,6 +193,12 @@ only. `stale` and `blocked` are strong enough for the local safe-control layer
 to skip the semantic judge and select `premium_recover`; the routing reason
 records the episode state version and pressure evidence that triggered it.
 
+Route-outcome windows are closed when the next LLM call starts. If no file,
+tool, test, verifier, or explicit progress event was observed between the two
+LLM calls, the previous route is recorded as an implicit `no_progress` outcome.
+This affects compact route memory and negative route-outcome counts, but it
+does not increment historical `no_progress_event_count`.
+
 Delivery feedback is also promoted into the local state layer. Once a delivery
 target has passed validation, or a verifier result is observed, the router can
 skip the semantic judge and apply a local capability floor:

@@ -563,6 +563,9 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
 
     state_before = fetch_episode_state(port, episode)
     state_payload = state_before.get("state") or {}
+    recent_routes = state_payload.get("recent_route_outcomes") or []
+    first_recent_route = recent_routes[0] if recent_routes else {}
+    last_recent_route = recent_routes[-1] if recent_routes else {}
     checks.extend(
         [
             check_equal("state-version-after-events", state_before.get("state_version"), 2),
@@ -570,6 +573,12 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
             check_equal("recent-length-after-events", state_payload.get("recent_length_finishes"), 2),
             check_equal("length-streak-after-events", state_payload.get("consecutive_length_finishes"), 2),
             check_equal("no-progress-severity-after-events", state_payload.get("no_progress_severity"), "stale"),
+            check_equal("implicit-route-total-after-events", state_payload.get("route_outcome_event_count"), 1),
+            check_equal("implicit-route-negative-after-events", state_payload.get("route_outcome_negative_count"), 1),
+            check_equal("implicit-route-recent-count-after-events", len(recent_routes), 2),
+            check_equal("implicit-route-first-label", first_recent_route.get("outcome_label"), "no_progress"),
+            check_equal("implicit-route-first-event", first_recent_route.get("outcome_event_id"), f"{episode}__length-2"),
+            check_equal("implicit-route-current-label", last_recent_route.get("outcome_label"), "pending"),
         ]
     )
 
@@ -656,7 +665,18 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     )
 
     state_after_route = fetch_episode_state(port, episode)
-    checks.append(check_equal("state-version-after-route", state_after_route.get("state_version"), 3))
+    state_after_route_payload = state_after_route.get("state") or {}
+    checks.extend(
+        [
+            check_equal("state-version-after-route", state_after_route.get("state_version"), 3),
+            check_equal("implicit-route-total-after-recovery-route", state_after_route_payload.get("route_outcome_event_count"), 2),
+            check_equal(
+                "implicit-route-negative-after-recovery-route",
+                state_after_route_payload.get("route_outcome_negative_count"),
+                2,
+            ),
+        ]
+    )
 
     route_outcome_event_id = f"{episode}__post-route-test-passed"
     post_json(
@@ -703,9 +723,9 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
             ),
             check_equal("route-outcome-progress", route_outcome_payload.get("last_route_outcome_progress"), True),
             check_equal("route-outcome-window-event-count", route_outcome_payload.get("last_route_outcome_event_count"), 1),
-            check_equal("route-outcome-total-event-count", route_outcome_payload.get("route_outcome_event_count"), 1),
+            check_equal("route-outcome-total-event-count", route_outcome_payload.get("route_outcome_event_count"), 3),
             check_equal("route-outcome-progress-count", route_outcome_payload.get("route_outcome_progress_count"), 1),
-            check_equal("route-outcome-negative-count", route_outcome_payload.get("route_outcome_negative_count"), 0),
+            check_equal("route-outcome-negative-count", route_outcome_payload.get("route_outcome_negative_count"), 2),
             check_equal("next-capability-after-route-outcome", route_outcome_payload.get("next_min_capability"), "premium_assess"),
             check_equal("next-budget-after-route-outcome", route_outcome_payload.get("next_budget_action_hint"), "premium_reason"),
             check_equal(

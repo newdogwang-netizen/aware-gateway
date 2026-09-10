@@ -753,6 +753,7 @@ Stale Completion Invalidation     done for target writes after verifier success
 Delivery State Floor              done for verifier pass/fail and validated delivery assessment without Judge
 Route Outcome Linkage             done for route -> event/test/verifier windows
 Online Route Outcome Projection   done for posted events after each LLM route
+Implicit Pending Route Closure    done for pending route -> no_progress when next LLM call arrives without observable event
 Recent Route Outcome History      done for compact route -> outcome memory in state/prompt
 Next Minimum Capability Hint      done for state-derived router prompt guidance
 Capability Floor Enforcement      done for hard recovery and post-delivery validation assess floors, advisory otherwise

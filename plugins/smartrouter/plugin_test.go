@@ -1075,6 +1075,91 @@ func TestEpisodeLinksPostedOutcomesToPreviousRoute(t *testing.T) {
 	}
 }
 
+func TestEpisodeClosesPendingRouteAsNoProgressOnNextLLMCall(t *testing.T) {
+	router := newTestSmartRouter("http://127.0.0.1:1")
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 8}
+
+	firstRoute := &plugin.AuditRecord{
+		TraceID:      "trace-pending-route-1",
+		Timestamp:    time.Now(),
+		SessionID:    "session-pending-route",
+		EpisodeID:    "episode-pending-route",
+		Pool:         "openrouter",
+		RoutedModel:  "z-ai/glm-5.3-flash",
+		Status:       200,
+		FinishReason: "stop",
+		BudgetAction: budgetActionCheapProbe,
+		TotalTokens:  300,
+		Cost:         0.01,
+	}
+	if err := router.Record(firstRoute); err != nil {
+		t.Fatalf("Record first route returned error: %v", err)
+	}
+
+	secondRoute := &plugin.AuditRecord{
+		TraceID:      "trace-pending-route-2",
+		Timestamp:    time.Now(),
+		SessionID:    "session-pending-route",
+		EpisodeID:    "episode-pending-route",
+		Pool:         "openrouter",
+		RoutedModel:  "anthropic/claude-opus-5",
+		Status:       200,
+		FinishReason: "stop",
+		BudgetAction: budgetActionPremiumReason,
+		TotalTokens:  700,
+		Cost:         0.08,
+	}
+	if err := router.Record(secondRoute); err != nil {
+		t.Fatalf("Record second route returned error: %v", err)
+	}
+
+	states, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: "episode-pending-route"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates returned error: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	state := states[0].State
+	if got := state["last_route_trace_id"]; got != "trace-pending-route-2" {
+		t.Fatalf("last route trace = %#v, want trace-pending-route-2", got)
+	}
+	if got := state["last_route_outcome_label"]; got != routeOutcomePending {
+		t.Fatalf("last route outcome = %#v, want current route pending", got)
+	}
+	if got := state["route_outcome_event_count"]; got != 1 {
+		t.Fatalf("route outcome event count = %#v, want implicit no-progress closure", got)
+	}
+	if got := state["route_outcome_negative_count"]; got != 1 {
+		t.Fatalf("route outcome negative count = %#v, want one implicit no-progress", got)
+	}
+	recentRoutes, ok := state["recent_route_outcomes"].([]map[string]any)
+	if !ok || len(recentRoutes) != 2 {
+		t.Fatalf("recent route outcomes = %#v, want two route windows", state["recent_route_outcomes"])
+	}
+	if got := recentRoutes[0]["route_trace_id"]; got != "trace-pending-route-1" {
+		t.Fatalf("first recent route trace = %#v, want trace-pending-route-1", got)
+	}
+	if got := recentRoutes[0]["outcome_label"]; got != routeOutcomeNoProgress {
+		t.Fatalf("first recent route outcome = %#v, want no_progress", got)
+	}
+	if got := recentRoutes[0]["outcome_event_id"]; got != "trace-pending-route-2" {
+		t.Fatalf("first recent route outcome event = %#v, want closing next trace", got)
+	}
+	if got := recentRoutes[0]["event_count"]; got != 1 {
+		t.Fatalf("first recent route event count = %#v, want one closing observation", got)
+	}
+	if got := recentRoutes[0]["negative"]; got != true {
+		t.Fatalf("first recent route negative = %#v, want true", got)
+	}
+	if got := recentRoutes[1]["route_trace_id"]; got != "trace-pending-route-2" {
+		t.Fatalf("second recent route trace = %#v, want trace-pending-route-2", got)
+	}
+	if got := recentRoutes[1]["outcome_label"]; got != routeOutcomePending {
+		t.Fatalf("second recent route outcome = %#v, want pending", got)
+	}
+}
+
 func TestEpisodeDerivesNextMinimumCapabilityFromOutcomeState(t *testing.T) {
 	router := newTestSmartRouter("http://127.0.0.1:1")
 	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 8}

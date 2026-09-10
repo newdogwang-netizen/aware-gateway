@@ -717,6 +717,7 @@ func completionAffectingWrite(event EpisodeEvent) bool {
 }
 
 func beginRouteOutcomeWindow(state *EpisodeState, event EpisodeEvent) {
+	closePendingRouteOutcomeBeforeNextRoute(state, event)
 	state.LastRouteTraceID = event.ID
 	state.LastRouteOutcomeLabel = routeOutcomePending
 	state.LastRouteOutcomeEventID = ""
@@ -729,6 +730,23 @@ func beginRouteOutcomeWindow(state *EpisodeState, event EpisodeEvent) {
 		OutcomeLabel: routeOutcomePending,
 		Timestamp:    event.Timestamp,
 	})
+}
+
+func closePendingRouteOutcomeBeforeNextRoute(state *EpisodeState, event EpisodeEvent) {
+	if state == nil || state.LastRouteTraceID == "" {
+		return
+	}
+	label := valueOrDefault(state.LastRouteOutcomeLabel, routeOutcomePending)
+	if label != routeOutcomePending || state.LastRouteOutcomeEventCount != 0 {
+		return
+	}
+	state.LastRouteOutcomeLabel = routeOutcomeNoProgress
+	state.LastRouteOutcomeEventID = event.ID
+	state.LastRouteOutcomeProgress = false
+	state.LastRouteOutcomeEventCount = 1
+	state.RouteOutcomeEventCount++
+	state.RouteOutcomeNegativeCount++
+	updateRecentRouteOutcome(state, routeOutcomeNoProgress, event.ID, false, true)
 }
 
 func projectRouteOutcomeState(state *EpisodeState, event EpisodeEvent) {

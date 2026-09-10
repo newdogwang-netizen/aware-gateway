@@ -323,7 +323,9 @@ The first reducer tracks only stable control signals:
   without progress
 - online route outcome: the latest LLM route opens a pending outcome window,
   and later posted file, test, verifier, no-progress, or exception events are
-  attributed back to that route until the next LLM route starts.
+  attributed back to that route until the next LLM route starts. If the next
+  LLM route starts without any intervening observable event, the previous
+  pending route is closed as an implicit `no_progress` route outcome.
 - next minimum capability: a deterministic hint derived from the current
   outcome state, such as `cheap_execute` after target changes,
   `premium_recover` after current validation failure, or `premium_assess` after
@@ -362,8 +364,9 @@ The reducer also keeps a small online route-outcome window. Each agent LLM call
 starts as `pending`; posted events after it update `last_route_outcome_label`,
 `last_route_outcome_event_id`, and progress/negative counts. The next prompt
 therefore sees whether the previous route produced only output, changed files,
-passed tests, failed validation, or reached verifier success. This is a compact
-online counterpart to the offline extractor's richer route-outcome windows.
+passed tests, failed validation, reached verifier success, or produced no
+observable event before the next LLM call. This is a compact online counterpart
+to the offline extractor's richer route-outcome windows.
 On top of that state, the reducer derives `next_min_capability`,
 `next_budget_action_hint`, and `next_capability_reason`. This does not replace
 the semantic router; it gives the router a concrete lower bound for the next
