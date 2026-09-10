@@ -641,6 +641,60 @@ func TestEpisodeStateEndpointQueriesCurrentProjection(t *testing.T) {
 	}
 }
 
+func TestEpisodeSessionEndpointQueriesCurrentStack(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := &config.Config{}
+	store := &capturingEpisodeSessionStore{
+		sessions: []plugin.EpisodeSessionEntry{
+			{
+				SessionID:       "session-api",
+				ActiveEpisodeID: "session-api#episode-1",
+				EpisodeStack:    []string{"session-api", "session-api#episode-1"},
+				StackDepth:      2,
+				NextEpisode:     1,
+				Version:         2,
+				LastOperation:   "interrupt",
+				LastConfidence:  0.86,
+				LastEvidence:    []string{"detected_side_task_language"},
+				Source:          "unit-test",
+			},
+		},
+	}
+	reg := plugin.NewRegistry(logger)
+	if err := reg.Register(store); err != nil {
+		t.Fatalf("register session store: %v", err)
+	}
+	if err := reg.Init(&plugin.Context{Config: cfg, Logger: logger}); err != nil {
+		t.Fatalf("init registry: %v", err)
+	}
+
+	router := BuildRouter(cfg, MapPoolProvider{}, reg, logger)
+	req := httptest.NewRequest(http.MethodGet, "/v1/episode-sessions?session_id=session-api", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Count    int                          `json:"count"`
+		Sessions []plugin.EpisodeSessionEntry `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode session response: %v", err)
+	}
+	if payload.Count != 1 || len(payload.Sessions) != 1 {
+		t.Fatalf("session payload = %#v, want one session", payload)
+	}
+	session := payload.Sessions[0]
+	if session.ActiveEpisodeID != "session-api#episode-1" || session.StackDepth != 2 {
+		t.Fatalf("session = %#v, want branch active with depth 2", session)
+	}
+	if session.LastOperation != "interrupt" {
+		t.Fatalf("last operation = %q, want interrupt", session.LastOperation)
+	}
+}
+
 func TestEnsureStreamUsageAddsIncludeUsage(t *testing.T) {
 	body := []byte(`{
 		"model": "auto",
@@ -924,6 +978,30 @@ func (s *capturingEpisodeStateStore) QueryEpisodeStates(filter plugin.EpisodeSta
 			continue
 		}
 		out = append(out, state)
+		if filter.Limit > 0 && len(out) >= filter.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+type capturingEpisodeSessionStore struct {
+	sessions []plugin.EpisodeSessionEntry
+}
+
+func (s *capturingEpisodeSessionStore) Name() string { return "capturing-episode-session" }
+
+func (s *capturingEpisodeSessionStore) Init(*plugin.Context) error { return nil }
+
+func (s *capturingEpisodeSessionStore) Close() error { return nil }
+
+func (s *capturingEpisodeSessionStore) QueryEpisodeSessions(filter plugin.EpisodeSessionFilter) ([]plugin.EpisodeSessionEntry, error) {
+	var out []plugin.EpisodeSessionEntry
+	for _, session := range s.sessions {
+		if filter.SessionID != "" && session.SessionID != filter.SessionID {
+			continue
+		}
+		out = append(out, session)
 		if filter.Limit > 0 && len(out) >= filter.Limit {
 			break
 		}

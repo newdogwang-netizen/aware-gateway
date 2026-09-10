@@ -290,6 +290,11 @@ to the previous task line; `continue`, `global`, and `unknown` stay on the
 active line. The operation can be supplied with `X-Episode-Operation` or
 body/extra_body `episode_operation`, and the handler strips those internal
 fields before forwarding upstream.
+`GET /v1/episode-sessions?session_id=...` exposes the current stack, active
+episode, last operation, confidence, and resolver evidence. When the stack is
+not in memory, smart-router can rebuild a best-effort session view from
+persisted audit traces carrying `session_id`, `episode_id`, and
+`episode_operation`.
 
 After each finished agent call, the audit record is projected into the resolved
 in-memory episode. Decision-model audit records are ignored so the state
@@ -400,6 +405,8 @@ best-effort backfill from persisted audit traces and explicit episode events.
 This gives experiment tooling a direct way to inspect the reducer output that
 routing decisions are using, without reconstructing it from raw events on every
 read.
+Use `/v1/episode-sessions` first when debugging task-line routing, then
+`/v1/episode-state` for the active episode returned by that session view.
 
 The first online adapter is command-based:
 

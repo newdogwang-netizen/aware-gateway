@@ -188,6 +188,12 @@ type EpisodeStateFilter struct {
 	Limit     int
 }
 
+// EpisodeSessionFilter holds query parameters for current task-line stacks.
+type EpisodeSessionFilter struct {
+	SessionID string
+	Limit     int
+}
+
 // EpisodeStateEntry is a compact, queryable state projection for one task
 // episode. State is intentionally extensible because reducer dimensions evolve
 // as policy experiments add new signals.
@@ -196,6 +202,24 @@ type EpisodeStateEntry struct {
 	StateVersion int            `json:"state_version"`
 	Source       string         `json:"source"`
 	State        map[string]any `json:"state"`
+}
+
+// EpisodeSessionEntry exposes the current episode stack for one user/session.
+// It lets operators verify which task line the stateful router is using before
+// inspecting the per-episode reducer state.
+type EpisodeSessionEntry struct {
+	SessionID       string         `json:"session_id"`
+	ActiveEpisodeID string         `json:"active_episode_id"`
+	EpisodeStack    []string       `json:"episode_stack"`
+	StackDepth      int            `json:"stack_depth"`
+	NextEpisode     int            `json:"next_episode_index"`
+	Version         int            `json:"version"`
+	LastOperation   string         `json:"last_operation"`
+	LastConfidence  float64        `json:"last_confidence"`
+	LastEvidence    []string       `json:"last_evidence"`
+	UpdatedAt       string         `json:"updated_at,omitempty"`
+	Source          string         `json:"source"`
+	State           map[string]any `json:"state,omitempty"`
 }
 
 // TraceQueryer is an optional interface that AuditSink plugins can implement
@@ -214,4 +238,10 @@ type EpisodeEventQueryer interface {
 // current reduced task episode state.
 type EpisodeStateQueryer interface {
 	QueryEpisodeStates(filter EpisodeStateFilter) ([]EpisodeStateEntry, error)
+}
+
+// EpisodeSessionQueryer is an optional interface for plugins that can expose
+// current session-to-episode stack state.
+type EpisodeSessionQueryer interface {
+	QueryEpisodeSessions(filter EpisodeSessionFilter) ([]EpisodeSessionEntry, error)
 }

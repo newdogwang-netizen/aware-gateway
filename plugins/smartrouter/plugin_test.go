@@ -1393,6 +1393,30 @@ func TestEpisodeResolverInterruptsAndResumesTaskLines(t *testing.T) {
 	if !strings.Contains(prompts[2], "episode_id=session-stack state_version=1") {
 		t.Fatalf("resume prompt missing restored main state:\n%s", prompts[2])
 	}
+
+	sessions, err := router.QueryEpisodeSessions(plugin.EpisodeSessionFilter{SessionID: "session-stack"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeSessions returned error: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(sessions))
+	}
+	session := sessions[0]
+	if session.ActiveEpisodeID != "session-stack" {
+		t.Fatalf("active episode = %q, want session-stack", session.ActiveEpisodeID)
+	}
+	if got := strings.Join(session.EpisodeStack, ","); got != "session-stack" {
+		t.Fatalf("episode stack = %q, want session-stack", got)
+	}
+	if session.Version != 3 {
+		t.Fatalf("session version = %d, want 3 route resolutions", session.Version)
+	}
+	if session.LastOperation != episodeOperationResume {
+		t.Fatalf("last operation = %q, want resume", session.LastOperation)
+	}
+	if len(session.LastEvidence) != 1 || session.LastEvidence[0] != "detected_resume_language" {
+		t.Fatalf("last evidence = %#v, want detected resume evidence", session.LastEvidence)
+	}
 }
 
 func TestClearDecisionStateResetsMainEpisodeStack(t *testing.T) {
@@ -2005,6 +2029,79 @@ func TestQueryEpisodeStatesBackfillsPersistedEvents(t *testing.T) {
 	}
 	if got := states[0].State["test_passed_count"]; got != 1 {
 		t.Fatalf("test_passed_count = %#v, want 1", got)
+	}
+}
+
+func TestQueryEpisodeSessionsBackfillsPersistedTraceOperations(t *testing.T) {
+	router := newTestSmartRouter("")
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true}
+	router.SetStateBackfillSources([]plugin.TraceQueryer{fakeTraceQueryer{
+		traces: []plugin.TraceEntry{
+			{
+				TraceID:   "trace-session-main",
+				Timestamp: "2026-09-10T10:00:00Z",
+				Pool:      "openrouter",
+				SessionID: "session-backfill",
+				EpisodeID: "session-backfill",
+				EpisodeOp: episodeOperationContinue,
+				Status:    200,
+			},
+			{
+				TraceID:   "trace-session-decision",
+				Timestamp: "2026-09-10T10:00:30Z",
+				Pool:      "decision-model",
+				SessionID: "session-backfill",
+				EpisodeID: "session-backfill",
+				EpisodeOp: episodeOperationContinue,
+				StepName:  "router-decision",
+				Status:    200,
+			},
+			{
+				TraceID:   "trace-session-branch",
+				Timestamp: "2026-09-10T10:01:00Z",
+				Pool:      "openrouter",
+				SessionID: "session-backfill",
+				EpisodeID: "session-backfill#episode-1",
+				EpisodeOp: episodeOperationInterrupt,
+				Status:    200,
+			},
+			{
+				TraceID:   "trace-session-resume",
+				Timestamp: "2026-09-10T10:02:00Z",
+				Pool:      "openrouter",
+				SessionID: "session-backfill",
+				EpisodeID: "session-backfill",
+				EpisodeOp: episodeOperationResume,
+				Status:    200,
+			},
+		},
+	}}, nil)
+
+	sessions, err := router.QueryEpisodeSessions(plugin.EpisodeSessionFilter{SessionID: "session-backfill"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeSessions returned error: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(sessions))
+	}
+	session := sessions[0]
+	if session.ActiveEpisodeID != "session-backfill" {
+		t.Fatalf("active episode = %q, want session-backfill", session.ActiveEpisodeID)
+	}
+	if got := strings.Join(session.EpisodeStack, ","); got != "session-backfill" {
+		t.Fatalf("episode stack = %q, want resumed main stack", got)
+	}
+	if session.NextEpisode != 1 {
+		t.Fatalf("next episode = %d, want 1", session.NextEpisode)
+	}
+	if session.Version != 3 {
+		t.Fatalf("session version = %d, want 3 non-decision trace operations", session.Version)
+	}
+	if session.LastOperation != episodeOperationResume {
+		t.Fatalf("last operation = %q, want resume", session.LastOperation)
+	}
+	if len(session.LastEvidence) != 1 || session.LastEvidence[0] != "audit_trace_backfill" {
+		t.Fatalf("last evidence = %#v, want audit_trace_backfill", session.LastEvidence)
 	}
 }
 

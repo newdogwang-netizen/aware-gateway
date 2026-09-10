@@ -138,6 +138,11 @@ type EpisodeSession struct {
 	ActiveEpisodeID string
 	Stack           []string
 	NextEpisode     int
+	Version         int
+	LastOperation   string
+	LastConfidence  float64
+	LastEvidence    []string
+	UpdatedAt       time.Time
 }
 
 type EpisodeResolution struct {
@@ -257,12 +262,7 @@ func (s *SmartRouter) resolveSessionEpisode(sessionKey, operation string) Episod
 		session.NextEpisode++
 		session.ActiveEpisodeID = fmt.Sprintf("%s#episode-%d", sessionKey, session.NextEpisode)
 		session.Stack = append(session.Stack, session.ActiveEpisodeID)
-		return EpisodeResolution{
-			EpisodeID:  session.ActiveEpisodeID,
-			Operation:  episodeOperationInterrupt,
-			Confidence: 0.86,
-			Evidence:   []string{"detected_side_task_language"},
-		}
+		return updateSessionResolution(session, episodeOperationInterrupt, 0.86, []string{"detected_side_task_language"})
 	case episodeOperationResume:
 		if len(session.Stack) > 1 {
 			session.Stack = session.Stack[:len(session.Stack)-1]
@@ -271,33 +271,13 @@ func (s *SmartRouter) resolveSessionEpisode(sessionKey, operation string) Episod
 			session.ActiveEpisodeID = sessionKey
 			session.Stack = []string{sessionKey}
 		}
-		return EpisodeResolution{
-			EpisodeID:  session.ActiveEpisodeID,
-			Operation:  episodeOperationResume,
-			Confidence: 0.88,
-			Evidence:   []string{"detected_resume_language"},
-		}
+		return updateSessionResolution(session, episodeOperationResume, 0.88, []string{"detected_resume_language"})
 	case episodeOperationGlobal:
-		return EpisodeResolution{
-			EpisodeID:  session.ActiveEpisodeID,
-			Operation:  episodeOperationGlobal,
-			Confidence: 0.82,
-			Evidence:   []string{"detected_global_constraint_language"},
-		}
+		return updateSessionResolution(session, episodeOperationGlobal, 0.82, []string{"detected_global_constraint_language"})
 	case episodeOperationUnknown:
-		return EpisodeResolution{
-			EpisodeID:  session.ActiveEpisodeID,
-			Operation:  episodeOperationUnknown,
-			Confidence: 0.5,
-			Evidence:   []string{"unknown_episode_operation"},
-		}
+		return updateSessionResolution(session, episodeOperationUnknown, 0.5, []string{"unknown_episode_operation"})
 	default:
-		return EpisodeResolution{
-			EpisodeID:  session.ActiveEpisodeID,
-			Operation:  episodeOperationContinue,
-			Confidence: 0.8,
-			Evidence:   []string{"active_episode"},
-		}
+		return updateSessionResolution(session, episodeOperationContinue, 0.8, []string{"active_episode"})
 	}
 }
 
@@ -321,9 +301,39 @@ func (s *SmartRouter) rememberExplicitEpisode(sessionKey, episodeID, operation s
 	if operation == episodeOperationResume {
 		session.Stack = trimStackToEpisode(session.Stack, episodeID)
 	}
+	session.Stack = appendUniqueEpisode(session.Stack, episodeID)
 	session.ActiveEpisodeID = episodeID
 	if len(session.Stack) == 0 {
 		session.Stack = []string{episodeID}
+	}
+	if operation == "" {
+		operation = episodeOperationContinue
+	}
+	updateSessionResolution(session, operation, 1, []string{"explicit_episode_id"})
+}
+
+func updateSessionResolution(
+	session *EpisodeSession,
+	operation string,
+	confidence float64,
+	evidence []string,
+) EpisodeResolution {
+	if session == nil {
+		return EpisodeResolution{}
+	}
+	if operation == "" {
+		operation = episodeOperationContinue
+	}
+	session.Version++
+	session.LastOperation = operation
+	session.LastConfidence = confidence
+	session.LastEvidence = append([]string(nil), evidence...)
+	session.UpdatedAt = time.Now().UTC()
+	return EpisodeResolution{
+		EpisodeID:  session.ActiveEpisodeID,
+		Operation:  operation,
+		Confidence: confidence,
+		Evidence:   append([]string(nil), evidence...),
 	}
 }
 
@@ -1278,6 +1288,45 @@ func (s *SmartRouter) QueryEpisodeStates(filter plugin.EpisodeStateFilter) ([]pl
 	return out, nil
 }
 
+func (s *SmartRouter) QueryEpisodeSessions(filter plugin.EpisodeSessionFilter) ([]plugin.EpisodeSessionEntry, error) {
+	cfg := s.episodeConfig()
+	if !cfg.Enabled {
+		return nil, nil
+	}
+	if filter.SessionID != "" {
+		s.ensureEpisodeSessionLoaded(filter.SessionID)
+	}
+
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	if len(s.sessions) == 0 {
+		return nil, nil
+	}
+
+	if filter.SessionID != "" {
+		session := s.sessions[filter.SessionID]
+		if session == nil {
+			return nil, nil
+		}
+		return []plugin.EpisodeSessionEntry{episodeSessionEntry(session, s.Name())}, nil
+	}
+
+	keys := make([]string, 0, len(s.sessions))
+	for key := range s.sessions {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	limit := filter.Limit
+	if limit <= 0 || limit > len(keys) {
+		limit = len(keys)
+	}
+	out := make([]plugin.EpisodeSessionEntry, 0, limit)
+	for _, key := range keys[:limit] {
+		out = append(out, episodeSessionEntry(s.sessions[key], s.Name()))
+	}
+	return out, nil
+}
+
 func (s *SmartRouter) ensureEpisodeStateLoaded(key string, cfg EpisodeConfig) {
 	if key == "" || !cfg.Enabled {
 		return
@@ -1333,6 +1382,133 @@ func (s *SmartRouter) ensureEpisodeStateLoaded(key string, cfg EpisodeConfig) {
 	}
 }
 
+func (s *SmartRouter) ensureEpisodeSessionLoaded(sessionID string) {
+	if sessionID == "" || len(s.traceQueryers) == 0 {
+		return
+	}
+
+	s.sessionMu.Lock()
+	if _, exists := s.sessions[sessionID]; exists {
+		s.sessionMu.Unlock()
+		return
+	}
+	s.sessionMu.Unlock()
+
+	backfillKey := "session:" + sessionID
+	s.backfillMu.Lock()
+	if s.backfilled == nil {
+		s.backfilled = make(map[string]struct{})
+	}
+	if _, alreadyTried := s.backfilled[backfillKey]; alreadyTried {
+		s.backfillMu.Unlock()
+		return
+	}
+	s.backfilled[backfillKey] = struct{}{}
+	s.backfillMu.Unlock()
+
+	traces := s.loadPersistedSessionTraces(sessionID)
+	if len(traces) == 0 {
+		return
+	}
+	sort.SliceStable(traces, func(i, j int) bool {
+		return traces[i].Timestamp < traces[j].Timestamp
+	})
+
+	session := &EpisodeSession{Key: sessionID, ActiveEpisodeID: sessionID, Stack: []string{sessionID}}
+	for _, trace := range traces {
+		if trace.Pool == "decision-model" || strings.HasPrefix(trace.StepName, "router-decision") {
+			continue
+		}
+		episodeID := strings.TrimSpace(trace.EpisodeID)
+		if episodeID == "" {
+			episodeID = sessionID
+		}
+		operation := normalizeEpisodeOperation(trace.EpisodeOp)
+		if operation == "" {
+			operation = episodeOperationContinue
+		}
+		timestamp, _ := time.Parse(time.RFC3339Nano, trace.Timestamp)
+		applyPersistedSessionOperation(session, episodeID, operation, timestamp)
+	}
+	if session.Version == 0 {
+		return
+	}
+
+	s.sessionMu.Lock()
+	if s.sessions == nil {
+		s.sessions = make(map[string]*EpisodeSession)
+	}
+	if _, exists := s.sessions[sessionID]; !exists {
+		s.sessions[sessionID] = session
+	}
+	s.sessionMu.Unlock()
+}
+
+func (s *SmartRouter) loadPersistedSessionTraces(sessionID string) []plugin.TraceEntry {
+	var traces []plugin.TraceEntry
+	seen := map[string]struct{}{}
+	filters := []plugin.TraceFilter{
+		{SessionID: sessionID, Limit: 1000},
+		{TrialName: sessionID, Limit: 1000},
+		{EpisodeID: sessionID, Limit: 1000},
+	}
+	for _, queryer := range s.traceQueryers {
+		for _, filter := range filters {
+			rows, err := queryer.QueryTraces(filter)
+			if err != nil {
+				continue
+			}
+			for _, trace := range rows {
+				key := trace.TraceID
+				if key == "" {
+					key = fmt.Sprintf("%s/%s/%s/%s", trace.Timestamp, trace.SessionID, trace.EpisodeID, trace.StepName)
+				}
+				if _, exists := seen[key]; exists {
+					continue
+				}
+				seen[key] = struct{}{}
+				traces = append(traces, trace)
+			}
+		}
+	}
+	return traces
+}
+
+func applyPersistedSessionOperation(session *EpisodeSession, episodeID, operation string, timestamp time.Time) {
+	if session == nil || episodeID == "" {
+		return
+	}
+	if len(session.Stack) == 0 {
+		session.Stack = []string{episodeID}
+	}
+	switch operation {
+	case episodeOperationInterrupt:
+		session.Stack = appendUniqueEpisode(session.Stack, episodeID)
+		session.ActiveEpisodeID = episodeID
+	case episodeOperationResume:
+		session.Stack = trimStackToEpisode(session.Stack, episodeID)
+		session.ActiveEpisodeID = episodeID
+	case episodeOperationGlobal:
+		session.Stack = appendUniqueEpisode(session.Stack, episodeID)
+		session.ActiveEpisodeID = episodeID
+	default:
+		session.Stack = appendUniqueEpisode(session.Stack, episodeID)
+		session.ActiveEpisodeID = episodeID
+		operation = episodeOperationContinue
+	}
+	if episodeIndex := episodeIndexFromID(session.Key, episodeID); episodeIndex > session.NextEpisode {
+		session.NextEpisode = episodeIndex
+	}
+	session.Version++
+	session.LastOperation = operation
+	session.LastConfidence = 1
+	session.LastEvidence = []string{"audit_trace_backfill"}
+	if timestamp.IsZero() {
+		timestamp = time.Now().UTC()
+	}
+	session.UpdatedAt = timestamp.UTC()
+}
+
 func (s *SmartRouter) loadPersistedEpisodeEvents(key string) []EpisodeEvent {
 	var events []EpisodeEvent
 	seenTraceIDs := map[string]struct{}{}
@@ -1380,6 +1556,40 @@ func (s *SmartRouter) loadPersistedEpisodeEvents(key string) []EpisodeEvent {
 		}
 	}
 	return events
+}
+
+func episodeSessionEntry(session *EpisodeSession, source string) plugin.EpisodeSessionEntry {
+	if session == nil {
+		return plugin.EpisodeSessionEntry{Source: source}
+	}
+	stack := append([]string(nil), session.Stack...)
+	evidence := append([]string(nil), session.LastEvidence...)
+	updatedAt := ""
+	if !session.UpdatedAt.IsZero() {
+		updatedAt = session.UpdatedAt.Format(time.RFC3339Nano)
+	}
+	return plugin.EpisodeSessionEntry{
+		SessionID:       session.Key,
+		ActiveEpisodeID: session.ActiveEpisodeID,
+		EpisodeStack:    stack,
+		StackDepth:      len(stack),
+		NextEpisode:     session.NextEpisode,
+		Version:         session.Version,
+		LastOperation:   session.LastOperation,
+		LastConfidence:  session.LastConfidence,
+		LastEvidence:    evidence,
+		UpdatedAt:       updatedAt,
+		Source:          source,
+		State: map[string]any{
+			"session_id":        session.Key,
+			"active_episode_id": session.ActiveEpisodeID,
+			"episode_stack":     stack,
+			"stack_depth":       len(stack),
+			"next_episode":      session.NextEpisode,
+			"last_operation":    session.LastOperation,
+			"last_evidence":     evidence,
+		},
+	}
 }
 
 func episodeStateEntry(snapshot EpisodeSnapshot, source string) plugin.EpisodeStateEntry {
@@ -1449,6 +1659,18 @@ func trimStackToEpisode(stack []string, episodeID string) []string {
 		}
 	}
 	return append(stack, episodeID)
+}
+
+func episodeIndexFromID(sessionKey, episodeID string) int {
+	prefix := sessionKey + "#episode-"
+	if !strings.HasPrefix(episodeID, prefix) {
+		return 0
+	}
+	var index int
+	if _, err := fmt.Sscanf(strings.TrimPrefix(episodeID, prefix), "%d", &index); err != nil {
+		return 0
+	}
+	return index
 }
 
 func isDecisionModelRecord(record *plugin.AuditRecord) bool {

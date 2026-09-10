@@ -112,6 +112,7 @@ func BuildRouter(
 	r.Get("/v1/episode-events", episodeEventQueryHandler(reg))
 	r.Post("/v1/episode-events", episodeEventIngestHandler(reg, logger))
 	r.Get("/v1/episode-state", episodeStateQueryHandler(reg))
+	r.Get("/v1/episode-sessions", episodeSessionQueryHandler(reg))
 
 	// Plugin health reporters endpoint
 	r.Get("/v1/plugins", pluginsHandler(reg))
@@ -585,6 +586,55 @@ func episodeStateQueryHandler(reg *plugin.Registry) http.HandlerFunc {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"states": states,
 			"count":  len(states),
+		})
+	}
+}
+
+func episodeSessionQueryHandler(reg *plugin.Registry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var queryer plugin.EpisodeSessionQueryer
+		for _, p := range reg.AllPlugins() {
+			if q, ok := p.(plugin.EpisodeSessionQueryer); ok {
+				queryer = q
+				break
+			}
+		}
+		if queryer == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "no plugin supports episode session queries",
+			})
+			return
+		}
+
+		filter := plugin.EpisodeSessionFilter{
+			SessionID: r.URL.Query().Get("session_id"),
+		}
+		if l := r.URL.Query().Get("limit"); l != "" {
+			var n int
+			fmt.Sscanf(l, "%d", &n)
+			if n > 0 {
+				filter.Limit = n
+			}
+		}
+		if filter.Limit == 0 {
+			filter.Limit = 100
+		}
+
+		sessions, err := queryer.QueryEpisodeSessions(filter)
+		if err != nil {
+			slog.Error("episode session query failed", "error", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "internal"})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"sessions": sessions,
+			"count":    len(sessions),
 		})
 	}
 }

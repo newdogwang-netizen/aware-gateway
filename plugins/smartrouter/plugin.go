@@ -603,6 +603,7 @@ func (s *SmartRouter) clearDecisionStateByKey(key string) {
 			session.ActiveEpisodeID = sessionKey
 			session.Stack = []string{sessionKey}
 			session.NextEpisode = 0
+			updateSessionResolution(session, "reset", 1, []string{"completion_guardrail_reset"})
 			continue
 		}
 		stack := make([]string, 0, len(session.Stack))
@@ -618,6 +619,7 @@ func (s *SmartRouter) clearDecisionStateByKey(key string) {
 		if session.ActiveEpisodeID == key {
 			session.ActiveEpisodeID = stack[len(stack)-1]
 		}
+		updateSessionResolution(session, "reset", 1, []string{"episode_removed"})
 	}
 	s.sessionMu.Unlock()
 }

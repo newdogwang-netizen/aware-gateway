@@ -91,6 +91,17 @@ When smart-router memory has no entry for the requested episode, the runtime
 state path can backfill from persisted audit traces and explicit episode
 events exposed by installed query plugins.
 
+The session-to-episode stack is queryable separately:
+
+```bash
+curl -s 'http://localhost:12026/v1/episode-sessions?session_id=trial-abc__agent'
+```
+
+This tells the experiment runner which task line is active before it asks for
+the reduced episode state. The returned stack can also be rebuilt best-effort
+from persisted audit traces that include `session_id`, `episode_id`, and
+`episode_operation`.
+
 ## Deterministic Runtime Probe
 
 The local safe-control probe runs the compiled gateway against mock provider and
