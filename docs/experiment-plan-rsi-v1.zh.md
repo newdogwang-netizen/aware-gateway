@@ -595,6 +595,53 @@ Do not call it accepted yet.
 
 下一步进入小规模真实 pilot 前，只接受 P2 作为 candidate policy，不替换生产策略。
 
+#### 2026-09-10 online stop-gate canary checkpoint
+
+本轮从真实 `shadow-relay` canary 里发现两个问题：
+
+- V4 job 目录本身有 `result.json`，Harbor watcher 误把 job 当 trial，导致运行中 `trajectory.json` 没被扫描。
+- extractor 把任意 `python -m json.tool` 都当 validation，导致对 `/app/data` 的格式检查被误记为 `test_run passed`。
+
+修复后：
+
+- watcher 区分 job 汇总目录和真实 trial 目录；
+- incomplete trial 的离线抽取优先使用 trial 目录名做 `episode_id`，并拒绝混入无关 session traces；
+- `json.tool` 只有触达 `/app/output/` 时才算 output validation；
+- `agent_call_no_effective_progress` stop gate 改为看有效进展，而不是等待 `blocked` sticky state；
+- V4 canary 阈值调整为 `stop_cost_usd=3.0`、`stop_agent_call_threshold=25`。
+
+验证结果：
+
+| artifact | failure_kind | reward | total cost | agent calls | decision calls | progress |
+|----------|--------------|--------|------------|-------------|----------------|----------|
+| `/mnt/data2/aware-gateway-runs/aware-v4-20260910T093403Z` | `gateway_provider_incomplete_stop_gate` | 0 | `$0.9148` | 14 | 7 | provider incomplete |
+| `/mnt/data2/aware-gateway-runs/aware-v4-20260910T094305Z` | `wall_clock_cap` | 0 | `$3.6273` | 46 | 32 | 0 effective progress |
+| `/mnt/data2/aware-gateway-runs/aware-v4-20260910T100735Z` | `wall_clock_cap` | 0 | `$3.6335` | 34 | 8 | false validation removed offline |
+| `/mnt/data2/aware-gateway-runs/aware-v4-20260910T102653Z` | `wall_clock_cap` | 0 | `$3.6432` | 29 | 10 | 0 effective progress |
+| `/mnt/data2/aware-gateway-runs/aware-v4-20260910T104455Z` | `gateway_no_progress_stop_gate` | 0 | `$2.4724` | 29 | 15 | 0 effective progress |
+
+最终 canary 的关键证据：
+
+```text
+route_budget_actions = cheap_execute:3; cheap_probe:15; premium_reason:2; premium_recover:8; stop_trial:1
+safe_control_rule_ids = episode_agent_call_no_progress_stop_gate:1; episode_no_progress_recovery:6; file_read_search_cheap:2; fixed_format_output_cheap:1; premium_cooldown:4
+offline episode events = 78
+offline test_run_count = 0
+offline delivery_file_write_count = 0
+offline candidate_progress_event_count = 0
+replay cutoff violations = 0
+```
+
+当前结论：
+
+```text
+Runtime stop-gate plumbing accepted.
+Effective-progress classification accepted.
+Budget policy effectiveness still not accepted.
+```
+
+这一轮证明 gateway 已能把“无有效进展的长轨迹”截停并分类，但没有证明 smart-router 能更高质量地完成任务。下一步要做的不是继续降阈值，而是把 progress 再拆成 exploration progress、validation progress、delivery progress，并让策略在 long exploration 进入明确 replan 或 early abandon。
+
 ### Step 5: 小规模 Harbor pilot
 
 只跑通过公开 leaderboard 或本地已知可解的任务。
@@ -773,11 +820,11 @@ Implicit Pending Route Closure    done for pending route -> no_progress when nex
 Recent Route Outcome History      done for compact route -> outcome memory in state/prompt
 Next Minimum Capability Hint      done for state-derived router prompt guidance
 Capability Floor Enforcement      done for hard recovery and post-delivery validation assess floors, advisory otherwise
-Gateway Stop Gate                 done for provider_incomplete/cost/length_pressure/blocked_recovery local aborts
+Gateway Stop Gate                 done for provider_incomplete/cost/agent_call_no_progress/length_pressure/blocked_recovery local aborts
 Gateway Stop Marker               done for V4 runner interrupt + analyzer failure_kind
 Online Episode State Query        done for GET /v1/episode-state
 State Backfill                    done for persisted traces/events -> online projection
-Deterministic Runtime Probe       done for event ingest -> state query -> recovery route -> 4 local stop gates
+Deterministic Runtime Probe       done for event ingest -> state query -> recovery route -> 5 local stop gates
 ```
 
 RSI R1 完整结束后，aware-gateway 应达到：
@@ -795,7 +842,7 @@ Event-driven State Controller     partial for no-progress recovery
 Route-to-Outcome Feedback         partial for extractor/replay windows and compact online route history
 Next-step Capability Estimate     partial via deterministic state hint, not yet acceptance-tuned
 Capability Floor Control          partial; hard verifier/no-progress and post-delivery validation assess floors enforced, delivery floors now local
-Gateway Stop Gate                 partial; four local abort paths enforced, acceptance thresholds still need matched pilot tuning
+Gateway Stop Gate                 partial; five local abort paths enforced, latest canary stops no-effective-progress before wall-clock cap
 Online State Inspection           done for current in-memory projection
 Restart State Rebuild             partial for audit trace/event backfill
 Runtime Probe Acceptance          done for deterministic local gateway/mocks
