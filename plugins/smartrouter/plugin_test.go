@@ -2810,6 +2810,90 @@ func TestEpisodeBlockedPremiumRecoveryWithoutProgressStopsTrial(t *testing.T) {
 	}
 }
 
+func TestEpisodeAgentCallNoEffectiveProgressPredicate(t *testing.T) {
+	cfg := SafeControlConfig{StopAgentCallThreshold: 40}
+	noProgress := EpisodeSnapshot{CallCount: 41}
+	if !shouldStopAgentCallNoProgress(noProgress, cfg) {
+		t.Fatal("shouldStopAgentCallNoProgress returned false, want stop without effective progress")
+	}
+
+	withProgress := EpisodeSnapshot{CallCount: 41, CandidateProgressCount: 1}
+	if shouldStopAgentCallNoProgress(withProgress, cfg) {
+		t.Fatal("shouldStopAgentCallNoProgress returned true, want allow when candidate progress exists")
+	}
+
+	closeToVerifier := EpisodeSnapshot{
+		CallCount:           41,
+		CompletionReadiness: completionReadinessValidationPassed,
+	}
+	if shouldStopAgentCallNoProgress(closeToVerifier, cfg) {
+		t.Fatal("shouldStopAgentCallNoProgress returned true, want allow when episode is close to verifier")
+	}
+}
+
+func TestEpisodeAgentCallNoEffectiveProgressStopsTrial(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.SafeControl.StopAgentCallThreshold = 40
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	for i := 1; i <= 41; i++ {
+		if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+			EventID:   fmt.Sprintf("event-agent-call-stop-llm-%d", i),
+			EpisodeID: "episode-agent-call-stop",
+			Timestamp: time.Now(),
+			Kind:      "llm_call",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":       "response_completed",
+				"budget_action": budgetActionCheapProbe,
+				"model":         "z-ai/glm-5.3-flash",
+				"finish_reason": "stop",
+				"status":        200,
+				"total_tokens":  100,
+				"cost_usd":      0.01,
+			},
+		}); err != nil {
+			t.Fatalf("RecordEpisodeEvent %d returned error: %v", i, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-agent-call-stop")
+	req.Header.Set("X-Session-ID", "episode-agent-call-stop")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue the investigation."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local agent-call stop")
+	}
+	if decision == nil || !decision.Abort {
+		t.Fatalf("decision = %#v, want local abort", decision)
+	}
+	if decision.AbortKind != "gateway_no_progress_stop_gate" {
+		t.Fatalf("abort kind = %q, want gateway_no_progress_stop_gate", decision.AbortKind)
+	}
+	for _, want := range []string{
+		"rule_id=episode_agent_call_no_progress_stop_gate",
+		"call_count=41",
+		"stop_agent_call_threshold=40",
+		"candidate_progress=0",
+		"strong_progress=0",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+}
+
 func TestEpisodeProviderIncompleteStopsTrial(t *testing.T) {
 	decisionServerCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

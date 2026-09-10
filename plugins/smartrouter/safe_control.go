@@ -320,7 +320,7 @@ func shouldStopAgentCallNoProgress(snapshot EpisodeSnapshot, cfg SafeControlConf
 	if snapshot.CallCount <= threshold {
 		return false
 	}
-	if valueOrDefault(snapshot.NoProgressSeverity, "none") != "blocked" {
+	if snapshot.CandidateProgressCount > 0 || snapshot.StrongProgressCount > 0 {
 		return false
 	}
 	return !episodeCloseToVerifier(snapshot)
@@ -413,6 +413,8 @@ func episodeAgentCallStopEvidence(snapshot EpisodeSnapshot, cfg SafeControlConfi
 		fmt.Sprintf("call_count=%d", snapshot.CallCount),
 		fmt.Sprintf("stop_agent_call_threshold=%d", cfg.StopAgentCallThreshold),
 		"no_progress=" + valueOrDefault(snapshot.NoProgressSeverity, "none"),
+		fmt.Sprintf("candidate_progress=%d", snapshot.CandidateProgressCount),
+		fmt.Sprintf("strong_progress=%d", snapshot.StrongProgressCount),
 		fmt.Sprintf("llm_since_progress=%d", snapshot.LLMCallsSinceProgress),
 		fmt.Sprintf("events_since_progress=%d", snapshot.EventsSinceProgress),
 		fmt.Sprintf("length_since_progress=%d", snapshot.LengthPressureSinceProgress),

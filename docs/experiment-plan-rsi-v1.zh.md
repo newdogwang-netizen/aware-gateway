@@ -45,7 +45,7 @@ replay screening 和重复 pilot acceptance 后，才允许进入 canary。
 - 最小 Episode 投影
 - `finish_reason=length` 动态预算反馈
 - `stale/blocked` no-progress 状态触发本地 recovery 路由
-- provider incomplete、成本超线、length pressure 和 blocked recovery 的本地 stop gate
+- provider incomplete、成本超线、agent-call 无有效进展、length pressure 和 blocked recovery 的本地 stop gate
 
 A5 说明了新的主要矛盾：
 
@@ -660,17 +660,18 @@ Do not call it accepted yet.
 
 ```text
 成本 > $4.00 且未接近 verifier: stop
-agent 调用 > 50 且 no-progress 连续增加: stop
+agent 调用 > 40 且没有 delivery/test/verifier 级有效进展: stop
 连续 3 次 length boost 后没有 file/test 进展: stop
 length_pressure + no_progress: freeze budget expansion
 premium_recover + no_progress: stop or replan gate
 provider incomplete: stop and classify separately
 ```
 
-当前 online runtime 已实现 4 条可执行 stop gate：
+当前 online runtime 已实现 5 条可执行 stop gate：
 
 - `provider_incomplete`：上一轮 provider 返回 2xx 但缺少 finish/tokens 元数据，下一轮本地停止并分类为 `gateway_provider_incomplete_stop_gate`。
 - `cost_without_verifier`：episode 成本超过 `stop_cost_usd`，但还没有 validation/verifier 近端证据，下一轮本地停止并分类为 `gateway_cost_stop_gate`。
+- `agent_call_no_effective_progress`：agent 调用超过 `stop_agent_call_threshold`，但没有 delivery/test/verifier 级有效进展，下一轮本地停止并分类为 `gateway_no_progress_stop_gate`。
 - `length_pressure_without_progress`：连续 length pressure 超过阈值，但还没有 file/test 进展，下一轮本地停止并分类为 `gateway_length_pressure_stop_gate`。
 - `blocked_premium_recover_no_progress`：episode 已进入 `no_progress=blocked`，上一轮 route 是 `premium_recover`，且上一轮 route 仍处于 `pending` 或 `no_progress`，下一轮本地停止并分类为 `gateway_stop_gate`。
 

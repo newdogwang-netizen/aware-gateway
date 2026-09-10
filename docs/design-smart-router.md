@@ -150,7 +150,7 @@ plugins:
       premium_cooldown_turns: 1
       cheap_probe_burst_limit: 3
       stop_cost_usd: 4.0
-      stop_agent_call_threshold: 50
+      stop_agent_call_threshold: 40
       stop_length_pressure_threshold: 3
     budgeted_route:
       enabled: true
@@ -360,8 +360,8 @@ If a hard stop line has fired, the gateway returns a local HTTP 409 stop-gate
 response instead of proxying another model call. The route remains auditable as
 `pool=local` and `route_budget_action=stop_trial`; the `error_kind` identifies
 which stop fired, for example `gateway_stop_gate`,
-`gateway_cost_stop_gate`, `gateway_length_pressure_stop_gate`, or
-`gateway_provider_incomplete_stop_gate`.
+`gateway_cost_stop_gate`, `gateway_no_progress_stop_gate`,
+`gateway_length_pressure_stop_gate`, or `gateway_provider_incomplete_stop_gate`.
 It also watches failed test events: when the same normalized failure
 fingerprint repeats without the failure frontier shrinking, the router can make
 one local `episode_repeated_failure_recovery` decision and then hand later

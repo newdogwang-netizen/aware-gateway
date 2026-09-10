@@ -373,7 +373,7 @@ plugins:
       premium_cooldown_turns: 1
       cheap_probe_burst_limit: 3
       stop_cost_usd: 4.0
-      stop_agent_call_threshold: 50
+      stop_agent_call_threshold: 40
       stop_length_pressure_threshold: 3
     budgeted_route:
       enabled: true
@@ -517,6 +517,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     stop_gate_session = f"{trial}__stop_gate_agent"
     provider_incomplete_episode = f"{trial}__provider_incomplete_stop"
     provider_incomplete_session = f"{trial}__provider_incomplete_stop_agent"
+    agent_call_stop_episode = f"{trial}__agent_call_no_progress_stop"
+    agent_call_stop_session = f"{trial}__agent_call_no_progress_stop_agent"
     cost_stop_episode = f"{trial}__cost_stop"
     cost_stop_session = f"{trial}__cost_stop_agent"
     length_stop_episode = f"{trial}__length_pressure_stop"
@@ -1376,6 +1378,107 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
             check_contains("stop-gate-route-no-progress", stop_reason, "no_progress=blocked"),
             check_contains("stop-gate-route-last-budget", stop_reason, "last_budget=premium_recover"),
             check_contains("stop-gate-route-last-outcome", stop_reason, "last_route_outcome=pending"),
+        ]
+    )
+
+    agent_call_stop_events: list[dict[str, Any]] = []
+    for index in range(1, 42):
+        event_id = f"{agent_call_stop_episode}__llm-{index}"
+        agent_call_stop_events.append(
+            {
+                "event_id": event_id,
+                "episode_id": agent_call_stop_episode,
+                "episode_operation": "continue",
+                "sequence": index,
+                "kind": "llm_call",
+                "source": "safe-control-probe",
+                "observation": {
+                    "outcome": "response_completed",
+                    "model": CHEAP_MODEL,
+                    "routed_model": CHEAP_MODEL,
+                    "budget_action": "cheap_probe",
+                    "finish_reason": "stop",
+                    "status": 200,
+                    "total_tokens": 100,
+                    "cost_usd": 0.001,
+                    "latency_ms": 1000,
+                },
+                "evidence_refs": [f"probe:event:{event_id}"],
+                "session_id": agent_call_stop_session,
+                "trial_name": trial,
+                "step_name": f"episode-agent-call-stop-llm-{index:02d}",
+                "task_name": task,
+            }
+        )
+    agent_call_batch_response = post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {"events": agent_call_stop_events},
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": agent_call_stop_session,
+            "X-Episode-ID": agent_call_stop_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-agent-call-stop-injected-llm-batch",
+            "X-Task-Name": task,
+        },
+    )
+    checks.extend(
+        [
+            check_equal("agent-call-stop-batch-event-ingest-count", agent_call_batch_response.get("count"), 41),
+            check_equal("agent-call-stop-batch-event-ingest-sinks", agent_call_batch_response.get("sinks"), 2),
+        ]
+    )
+
+    agent_call_stop_state = fetch_episode_state(port, agent_call_stop_episode)
+    agent_call_stop_payload = agent_call_stop_state.get("state") or {}
+    checks.extend(
+        [
+            check_equal("agent-call-stop-state-version", agent_call_stop_state.get("state_version"), 41),
+            check_equal("agent-call-stop-call-count", agent_call_stop_payload.get("call_count"), 41),
+            check_equal("agent-call-stop-candidate-progress", agent_call_stop_payload.get("candidate_progress_count"), 0),
+            check_equal("agent-call-stop-strong-progress", agent_call_stop_payload.get("strong_progress_count"), 0),
+        ]
+    )
+
+    agent_call_stop_step = "episode-agent-call-no-progress-stop-route"
+    agent_call_stop_status, agent_call_stop_response = post_json_status(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Continue the investigation after many no-progress calls."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": agent_call_stop_session,
+            "X-Episode-ID": agent_call_stop_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": agent_call_stop_step,
+            "X-Task-Name": task,
+        },
+    )
+    agent_call_stop_trace = wait_for_agent_trace(port, agent_call_stop_session, agent_call_stop_step)
+    agent_call_stop_reason = str(agent_call_stop_trace.get("routing_reason") or "")
+    agent_call_stop_error = agent_call_stop_response.get("error") or {}
+    checks.extend(
+        [
+            check_equal("agent-call-stop-status", agent_call_stop_status, 409),
+            check_equal("agent-call-stop-response-type", agent_call_stop_error.get("type"), "gateway_no_progress_stop_gate"),
+            check_equal("agent-call-stop-error-kind", agent_call_stop_trace.get("error_kind"), "gateway_no_progress_stop_gate"),
+            check_equal("agent-call-stop-budget-action", agent_call_stop_trace.get("route_budget_action") or "", "stop_trial"),
+            check_contains(
+                "agent-call-stop-rule",
+                agent_call_stop_reason,
+                "rule_id=episode_agent_call_no_progress_stop_gate",
+            ),
+            check_contains("agent-call-stop-count", agent_call_stop_reason, "call_count=41"),
+            check_contains("agent-call-stop-threshold", agent_call_stop_reason, "stop_agent_call_threshold=40"),
+            check_contains("agent-call-stop-candidate-progress", agent_call_stop_reason, "candidate_progress=0"),
+            check_contains("agent-call-stop-strong-progress", agent_call_stop_reason, "strong_progress=0"),
         ]
     )
 

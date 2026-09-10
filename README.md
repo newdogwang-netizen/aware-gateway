@@ -315,7 +315,7 @@ plugins:
       premium_cooldown_turns: 1
       cheap_probe_burst_limit: 3
       stop_cost_usd: 4.0
-      stop_agent_call_threshold: 50
+      stop_agent_call_threshold: 40
       stop_length_pressure_threshold: 3
     budgeted_route:
       enabled: true
@@ -367,7 +367,8 @@ model; it inserts a short cheap cooldown after consecutive premium calls; and
 it returns to the prompt router after too many consecutive cheap probes. It can
 also stop locally before another upstream call when provider metadata is
 incomplete, cost has crossed the trial gate before verifier proximity, length
-pressure repeats without file/test progress, or a blocked episode has already
+pressure repeats without file/test progress, too many agent calls happen
+without delivery/test/verifier-grade progress, or a blocked episode has already
 spent a premium recovery turn without observable progress. These stops are
 audited with `route_budget_action=stop_trial` and a specific `error_kind`.
 Requests outside those rules continue through the prompt-based smart-router.
