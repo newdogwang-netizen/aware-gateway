@@ -2811,13 +2811,13 @@ func TestEpisodeBlockedPremiumRecoveryWithoutProgressStopsTrial(t *testing.T) {
 }
 
 func TestEpisodeAgentCallNoEffectiveProgressPredicate(t *testing.T) {
-	cfg := SafeControlConfig{StopAgentCallThreshold: 30}
-	noProgress := EpisodeSnapshot{CallCount: 31}
+	cfg := SafeControlConfig{StopAgentCallThreshold: 25}
+	noProgress := EpisodeSnapshot{CallCount: 26}
 	if !shouldStopAgentCallNoProgress(noProgress, cfg) {
 		t.Fatal("shouldStopAgentCallNoProgress returned false, want stop without effective progress")
 	}
 
-	withProgress := EpisodeSnapshot{CallCount: 31, CandidateProgressCount: 1}
+	withProgress := EpisodeSnapshot{CallCount: 26, CandidateProgressCount: 1}
 	if shouldStopAgentCallNoProgress(withProgress, cfg) {
 		t.Fatal("shouldStopAgentCallNoProgress returned true, want allow when candidate progress exists")
 	}
@@ -2841,9 +2841,9 @@ func TestEpisodeAgentCallNoEffectiveProgressStopsTrial(t *testing.T) {
 
 	router := newTestSmartRouter(server.URL)
 	enableSafeControl(router)
-	router.cfg.SafeControl.StopAgentCallThreshold = 30
+	router.cfg.SafeControl.StopAgentCallThreshold = 25
 	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
-	for i := 1; i <= 31; i++ {
+	for i := 1; i <= 26; i++ {
 		if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
 			EventID:   fmt.Sprintf("event-agent-call-stop-llm-%d", i),
 			EpisodeID: "episode-agent-call-stop",
@@ -2883,8 +2883,8 @@ func TestEpisodeAgentCallNoEffectiveProgressStopsTrial(t *testing.T) {
 	}
 	for _, want := range []string{
 		"rule_id=episode_agent_call_no_progress_stop_gate",
-		"call_count=31",
-		"stop_agent_call_threshold=30",
+		"call_count=26",
+		"stop_agent_call_threshold=25",
 		"candidate_progress=0",
 		"strong_progress=0",
 	} {
@@ -2965,7 +2965,7 @@ func TestEpisodeCostWithoutVerifierStopsTrial(t *testing.T) {
 		FinishReason: "stop",
 		BudgetAction: budgetActionPremiumReason,
 		TotalTokens:  1000,
-		Cost:         4.01,
+		Cost:         3.01,
 	}); err != nil {
 		t.Fatalf("Record returned error: %v", err)
 	}
@@ -2988,8 +2988,8 @@ func TestEpisodeCostWithoutVerifierStopsTrial(t *testing.T) {
 	}
 	for _, want := range []string{
 		"rule_id=episode_cost_without_verifier_stop_gate",
-		"total_cost=$4.0100",
-		"stop_cost_usd=$4.0000",
+		"total_cost=$3.0100",
+		"stop_cost_usd=$3.0000",
 		"completion_readiness=none",
 	} {
 		if !strings.Contains(decision.Reason, want) {

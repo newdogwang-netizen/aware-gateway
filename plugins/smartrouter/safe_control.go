@@ -14,7 +14,7 @@ const (
 	defaultPremiumCooldownAfter        = 2
 	defaultPremiumCooldownTurns        = 1
 	defaultCheapProbeBurstLimit        = 3
-	defaultStopCostUSD                 = 4.0
+	defaultStopCostUSD                 = 3.0
 	defaultStopAgentCallThreshold      = defaultEpisodeNoProgressAgentCallThreshold
 	defaultStopLengthPressureThreshold = 3
 )
