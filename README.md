@@ -338,10 +338,13 @@ With `budgeted_route.enabled`, the router also attaches a route action profile
 to each decision. The gateway rewrites `max_tokens`, shortens the upstream
 timeout when configured, and records the budget action in audit traces.
 With `episode_runtime.enabled`, finished agent calls are projected into a
-small per-session episode state. Recent outcomes, including repeated
+small online episode state keyed by `X-Episode-ID` when provided, then
+`X-Session-ID` or `X-Trial-Name`. Recent outcomes, including repeated
 `finish_reason=length` in either a streak or the recent event window, are fed
 into the next router prompt and can dynamically increase the next route budget
-within configured ceilings.
+within configured ceilings. Audit traces now carry the episode id, operation,
+state version before routing, compact state-before JSON, and state-after JSON
+after the request is projected.
 
 ## Project Structure
 

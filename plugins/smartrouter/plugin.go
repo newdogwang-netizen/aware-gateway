@@ -243,13 +243,13 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 
 	if isTaskCompletionConfirmation(parsed.LatestUserMsg) {
 		if strongest, ok := s.strongestConfiguredModel(); ok {
-			s.clearDecisionHistory(req)
 			decision := &plugin.RoutingDecision{
 				Pool:   strongest.Pool,
 				Model:  strongest.Name,
 				Reason: "smart-router guardrail: task completion confirmation requires exact agent-control output",
 			}
 			s.applyRouteBudget(req, decision, budgetActionCompletionGuardrail)
+			s.attachEpisodeMetadata(req, decision, "continue")
 			return decision, nil
 		}
 	}
@@ -301,6 +301,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 				Reason: "cached: " + cached.Reason,
 			}
 			s.applyRouteBudget(req, routing, s.inferBudgetAction(cached.Model, nil))
+			s.attachEpisodeMetadata(req, routing, "continue")
 			return routing, nil
 		}
 	}
@@ -395,6 +396,7 @@ func (s *SmartRouter) Route(req *http.Request, body []byte) (*plugin.RoutingDeci
 		Reason: fmt.Sprintf("smart-router: %s", routingReason),
 	}
 	s.applyRouteBudget(req, routing, budgetAction)
+	s.attachEpisodeMetadata(req, routing, "continue")
 	return routing, nil
 }
 
@@ -404,13 +406,10 @@ func (s *SmartRouter) warmStartDecision(req *http.Request, parsed *parsedRequest
 		return nil, false
 	}
 
-	key := req.Header.Get("X-Session-ID")
-	if key == "" {
-		key = req.Header.Get("X-Trial-Name")
-	}
+	key := episodeKeyFromRequest(req)
 	if key == "" {
 		if s.logger != nil {
-			s.logger.Warn("smart-router warm-start skipped: missing session/trial key")
+			s.logger.Warn("smart-router warm-start skipped: missing episode/session/trial key")
 		}
 		return nil, false
 	}
@@ -444,6 +443,7 @@ func (s *SmartRouter) warmStartDecision(req *http.Request, parsed *parsedRequest
 		Reason: fmt.Sprintf("smart-router warm-start: first %d calls use %s (call %d/%d)", cfg.Steps, cfg.Model, callIndex, cfg.Steps),
 	}
 	s.applyRouteBudget(req, decision, budgetActionPremiumReason)
+	s.attachEpisodeMetadata(req, decision, "continue")
 	return decision, true
 }
 
@@ -463,6 +463,9 @@ type DecisionHistory struct {
 func decisionHistoryKey(req *http.Request) string {
 	if req == nil {
 		return ""
+	}
+	if key := req.Header.Get("X-Episode-ID"); key != "" {
+		return key
 	}
 	if key := req.Header.Get("X-Session-ID"); key != "" {
 		return key
@@ -529,6 +532,13 @@ func (s *SmartRouter) appendDecisionHistory(req *http.Request, selectedModel str
 
 func (s *SmartRouter) clearDecisionHistory(req *http.Request) {
 	key := decisionHistoryKey(req)
+	if key == "" {
+		return
+	}
+	s.clearDecisionStateByKey(key)
+}
+
+func (s *SmartRouter) clearDecisionStateByKey(key string) {
 	if key == "" {
 		return
 	}
@@ -672,6 +682,7 @@ func (s *SmartRouter) fallbackDecision(req *http.Request, reason string) *plugin
 		Reason: fmt.Sprintf("smart-router fallback=%s", reason),
 	}
 	s.applyRouteBudget(req, decision, budgetActionPremiumRecover)
+	s.attachEpisodeMetadata(req, decision, "continue")
 	return decision
 }
 

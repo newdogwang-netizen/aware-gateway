@@ -27,6 +27,11 @@ func TestStoreRecordsAndQueriesRouteBudget(t *testing.T) {
 		BudgetAction:   "cheap_probe",
 		RouteMaxTokens: 1234,
 		RouteTimeoutMs: 45000,
+		EpisodeID:      "episode-1",
+		EpisodeOp:      "continue",
+		StateVersion:   3,
+		StateBefore:    `{"state_version":3}`,
+		StateAfter:     `{"state_version":4}`,
 		SessionID:      "trial-1__agent",
 	})
 	store.Flush()
@@ -46,5 +51,28 @@ func TestStoreRecordsAndQueriesRouteBudget(t *testing.T) {
 	}
 	if traces[0].RouteTimeoutMs != 45000 {
 		t.Fatalf("route timeout ms = %d, want 45000", traces[0].RouteTimeoutMs)
+	}
+	if traces[0].EpisodeID != "episode-1" {
+		t.Fatalf("episode id = %q, want episode-1", traces[0].EpisodeID)
+	}
+	if traces[0].EpisodeOp != "continue" {
+		t.Fatalf("episode operation = %q, want continue", traces[0].EpisodeOp)
+	}
+	if traces[0].StateVersion != 3 {
+		t.Fatalf("episode state version = %d, want 3", traces[0].StateVersion)
+	}
+	if traces[0].StateBefore != `{"state_version":3}` {
+		t.Fatalf("episode state before = %q", traces[0].StateBefore)
+	}
+	if traces[0].StateAfter != `{"state_version":4}` {
+		t.Fatalf("episode state after = %q", traces[0].StateAfter)
+	}
+
+	episodeTraces, err := store.QueryTraces(plugin.TraceFilter{EpisodeID: "episode-1"})
+	if err != nil {
+		t.Fatalf("QueryTraces by episode returned error: %v", err)
+	}
+	if len(episodeTraces) != 1 || episodeTraces[0].TraceID != "trace-1" {
+		t.Fatalf("episode traces = %#v, want trace-1", episodeTraces)
 	}
 }

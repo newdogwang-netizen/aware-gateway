@@ -283,12 +283,14 @@ The audit trace exposes these as `route_budget_action`, `route_max_tokens`, and
 
 `episode_runtime.enabled` makes smart-router also implement an audit sink. After
 each finished agent call, the audit record is projected into an in-memory
-episode keyed by `X-Session-ID` or `X-Trial-Name`. Decision-model audit records
-are ignored so the state describes agent work, not judge overhead.
+episode keyed by `X-Episode-ID` when provided, then `X-Session-ID` or
+`X-Trial-Name`. Decision-model audit records are ignored so the state describes
+agent work, not judge overhead.
 
 The first reducer tracks only stable control signals:
 
 - total agent calls, cost, and tokens in this episode
+- monotonic state version before and after each projected request
 - last model, last budget action, and last finish reason
 - normalized call outcome: `response_completed`, `length_truncated`,
   `provider_incomplete`, `error`, or `unknown`
@@ -305,10 +307,24 @@ increased by a multiplier and capped by `max_tokens_ceiling`/
 `episode_adjust=length_boost` with both the current streak and recent length
 count.
 
+The online trace now carries the episode metadata needed for replay and later
+state rebuilding:
+
+- `episode_id`
+- `episode_operation`
+- `episode_state_version`
+- `episode_state_before`
+- `episode_state_after`
+
+`route_budget_action` is recorded as route metadata even when budget rewriting
+is disabled. With the audit SQLite store enabled, `/v1/traces?episode_id=...`
+can fetch one task line directly.
+
 This is not the full Issue #1 runtime. It does not yet identify nested task
-lines, continue/resume boundaries, file modifications, test events, verifier
-results, or offline policy updates. It is the smallest control loop needed to
-turn A4's truncation failure into a measurable A5 experiment.
+lines automatically, infer continue/resume boundaries without explicit
+episode ids, project live tool/file/test events, project verifier results, or
+perform offline policy updates. It is the smallest online state chain needed to
+make route decisions auditable against the state they actually saw.
 
 A5 showed the boundary of this first loop: the episode feedback fired in a real
 Harbor run, but the trial was stopped before verification after cost and call

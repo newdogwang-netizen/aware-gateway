@@ -231,6 +231,7 @@ func (s *SmartRouter) safeControlRoute(req *http.Request, ruleID, action string,
 		Reason:          shortReason,
 	}
 	s.applyRouteBudget(req, routing, action)
+	s.attachEpisodeMetadata(req, routing, "continue")
 	return routing, history, true
 }
 

@@ -145,6 +145,11 @@ func (p *Plugin) Record(record *plugin.AuditRecord) error {
 				BudgetAction:   record.BudgetAction,
 				RouteMaxTokens: record.RouteMaxTokens,
 				RouteTimeoutMs: record.RouteTimeoutMs,
+				EpisodeID:      record.EpisodeID,
+				EpisodeOp:      record.EpisodeOp,
+				StateVersion:   record.StateVersion,
+				StateBefore:    record.StateBefore,
+				StateAfter:     record.StateAfter,
 				SessionID:      record.SessionID,
 				TrialName:      record.TrialName,
 				StepName:       record.StepName,
@@ -195,6 +200,11 @@ type Record struct {
 	BudgetAction   string    `json:"route_budget_action"`
 	RouteMaxTokens int       `json:"route_max_tokens"`
 	RouteTimeoutMs int       `json:"route_timeout_ms"`
+	EpisodeID      string    `json:"episode_id,omitempty"`
+	EpisodeOp      string    `json:"episode_operation,omitempty"`
+	StateVersion   int       `json:"episode_state_version,omitempty"`
+	StateBefore    string    `json:"episode_state_before,omitempty"`
+	StateAfter     string    `json:"episode_state_after,omitempty"`
 
 	// Task/step correlation
 	SessionID string `json:"session_id,omitempty"`
@@ -251,7 +261,12 @@ func Open(path string) (*Store, error) {
 		routing_reason TEXT DEFAULT '',
 		route_budget_action TEXT DEFAULT '',
 		route_max_tokens INTEGER DEFAULT 0,
-		route_timeout_ms INTEGER DEFAULT 0
+		route_timeout_ms INTEGER DEFAULT 0,
+		episode_id TEXT DEFAULT '',
+		episode_operation TEXT DEFAULT '',
+		episode_state_version INTEGER DEFAULT 0,
+		episode_state_before TEXT DEFAULT '',
+		episode_state_after TEXT DEFAULT ''
 	);
 	CREATE INDEX IF NOT EXISTS idx_audit_trace ON audit(trace_id);
 	CREATE INDEX IF NOT EXISTS idx_audit_time ON audit(timestamp);
@@ -260,6 +275,7 @@ func Open(path string) (*Store, error) {
 	CREATE INDEX IF NOT EXISTS idx_audit_trial ON audit(trial_name);
 	CREATE INDEX IF NOT EXISTS idx_audit_task ON audit(task_name);
 	CREATE INDEX IF NOT EXISTS idx_audit_session ON audit(session_id);
+	CREATE INDEX IF NOT EXISTS idx_audit_episode ON audit(episode_id);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -272,6 +288,11 @@ func Open(path string) (*Store, error) {
 		{name: "route_budget_action", definition: "TEXT DEFAULT ''"},
 		{name: "route_max_tokens", definition: "INTEGER DEFAULT 0"},
 		{name: "route_timeout_ms", definition: "INTEGER DEFAULT 0"},
+		{name: "episode_id", definition: "TEXT DEFAULT ''"},
+		{name: "episode_operation", definition: "TEXT DEFAULT ''"},
+		{name: "episode_state_version", definition: "INTEGER DEFAULT 0"},
+		{name: "episode_state_before", definition: "TEXT DEFAULT ''"},
+		{name: "episode_state_after", definition: "TEXT DEFAULT ''"},
 	} {
 		if err := ensureColumn(db, "audit", column.name, column.definition); err != nil {
 			db.Close()
@@ -355,8 +376,9 @@ func (s *Store) flush(records []Record) {
 		(trace_id, timestamp, method, path, endpoint, status, latency_ms, model, routed_model, pool,
 		 prompt_tokens, completion_tokens, total_tokens, retry_attempt, fallback, user_id, api_key, cost,
 		 session_id, trial_name, step_name, task_name, finish_reason, routing_reason,
-		 route_budget_action, route_max_tokens, route_timeout_ms)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		 route_budget_action, route_max_tokens, route_timeout_ms,
+		 episode_id, episode_operation, episode_state_version, episode_state_before, episode_state_after)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		slog.Error("audit: prepare failed", "error", err)
 		tx.Rollback()
@@ -373,6 +395,7 @@ func (s *Store) flush(records []Record) {
 			r.SessionID, r.TrialName, r.StepName, r.TaskName,
 			r.FinishReason, r.RoutingReason,
 			r.BudgetAction, r.RouteMaxTokens, r.RouteTimeoutMs,
+			r.EpisodeID, r.EpisodeOp, r.StateVersion, r.StateBefore, r.StateAfter,
 		)
 		if err != nil {
 			slog.Error("audit: insert failed", "error", err)
@@ -414,7 +437,8 @@ func (s *Store) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, err
 		step_name, task_name, trial_name, session_id,
 		prompt_tokens, completion_tokens, total_tokens, cost,
 		latency_ms, status, finish_reason, routing_reason,
-		route_budget_action, route_max_tokens, route_timeout_ms
+		route_budget_action, route_max_tokens, route_timeout_ms,
+		episode_id, episode_operation, episode_state_version, episode_state_before, episode_state_after
 		FROM audit WHERE 1=1`
 	args := []any{}
 
@@ -434,6 +458,10 @@ func (s *Store) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, err
 		query += " AND session_id = ?"
 		args = append(args, filter.SessionID)
 	}
+	if filter.EpisodeID != "" {
+		query += " AND episode_id = ?"
+		args = append(args, filter.EpisodeID)
+	}
 	query += " ORDER BY timestamp ASC"
 	if filter.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
@@ -450,12 +478,14 @@ func (s *Store) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, err
 		var e plugin.TraceEntry
 		var sessionID sql.NullString
 		var finishReason, routingReason sql.NullString
+		var episodeID, episodeOp, stateBefore, stateAfter sql.NullString
 		err := rows.Scan(
 			&e.TraceID, &e.Timestamp, &e.Model, &e.RoutedModel, &e.Pool, &e.Endpoint,
 			&e.StepName, &e.TaskName, &e.TrialName, &sessionID,
 			&e.PromptTokens, &e.CompTokens, &e.TotalTokens, &e.Cost,
 			&e.LatencyMs, &e.Status, &finishReason, &routingReason,
 			&e.BudgetAction, &e.RouteMaxTokens, &e.RouteTimeoutMs,
+			&episodeID, &episodeOp, &e.StateVersion, &stateBefore, &stateAfter,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan trace row: %w", err)
@@ -465,6 +495,10 @@ func (s *Store) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, err
 		}
 		e.FinishReason = finishReason.String
 		e.RoutingReason = routingReason.String
+		e.EpisodeID = episodeID.String
+		e.EpisodeOp = episodeOp.String
+		e.StateBefore = stateBefore.String
+		e.StateAfter = stateAfter.String
 		entries = append(entries, e)
 	}
 	return entries, nil

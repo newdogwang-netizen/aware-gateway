@@ -727,6 +727,9 @@ Fixture Test                      done
 Real-history Smoke                done on A4/A5 shadow-relay
 P1 Outcome-aware Replay           done, replay-only
 P2 Windowed-progress Replay       done, candidate for next small pilot
+Online Episode ID                 done for explicit X-Episode-ID fallback to session/trial
+Online State Version Audit        done for state-before/state-after trace fields
+Trace Query by Episode            done for /v1/traces?episode_id=...
 ```
 
 RSI R1 完整结束后，aware-gateway 应达到：
@@ -736,7 +739,7 @@ Prompt Router                     done
 Safe-control Rule Layer           done
 Budgeted Route Action             done
 Minimal Episode Runtime           done
-Outcome Event Projection          done for offline replay
+Outcome Event Projection          done for offline replay, partial online llm_call state
 Outcome-aware Replay              done
 Outcome-aware Screening Pilot     not started for P2
 Outcome-aware Acceptance          at least 3 runs per accepted task class

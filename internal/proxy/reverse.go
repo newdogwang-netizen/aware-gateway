@@ -48,6 +48,7 @@ func NewReverseProxy(ep *pool.Endpoint) *httputil.ReverseProxy {
 			req.Header.Del("X-Trial-Name")
 			req.Header.Del("X-Step-Name")
 			req.Header.Del("X-Task-Name")
+			req.Header.Del("X-Episode-ID")
 
 			// Keep upstream JSON responses parseable for usage/cost accounting.
 			// Some clients send Accept-Encoding:gzip; if we pass that through,

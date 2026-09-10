@@ -515,6 +515,106 @@ func TestRouteFeedsEpisodeStateIntoNextPrompt(t *testing.T) {
 	}
 }
 
+func TestRouteAnnotatesEpisodeStateBeforeAndAfter(t *testing.T) {
+	var prompt string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll request body: %v", err)
+		}
+		var payload struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Fatalf("decode decision request: %v", err)
+		}
+		if len(payload.Messages) == 0 {
+			t.Fatal("decision request had no messages")
+		}
+		prompt = payload.Messages[0].Content
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"message": {"content": "{\"model\":\"z-ai/glm-5.3-flash\",\"turn_type\":\"mechanical_probe\",\"hypothesis_state\":\"stable\",\"critical_path\":false,\"recoverability\":\"easy\",\"budget_action\":\"cheap_probe\",\"context_summary\":\"bounded check\",\"reason\":\"cheap probe\"}"}}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+		}`)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	router.cfg.CacheTTLSeconds = -1
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	initial := &plugin.AuditRecord{
+		Timestamp:    time.Now(),
+		SessionID:    "session-main",
+		EpisodeID:    "episode-main",
+		Pool:         "openrouter",
+		RoutedModel:  "anthropic/claude-opus-5",
+		Status:       200,
+		FinishReason: "length",
+		BudgetAction: budgetActionPremiumReason,
+		TotalTokens:  1000,
+		Cost:         0.25,
+	}
+	if err := router.Record(initial); err != nil {
+		t.Fatalf("initial Record returned error: %v", err)
+	}
+	if !strings.Contains(initial.StateAfter, `"state_version":1`) {
+		t.Fatalf("initial state after = %q, want state_version 1", initial.StateAfter)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "session-main")
+	req.Header.Set("X-Episode-ID", "episode-main")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Inspect the latest output and decide the next narrow check."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decision == nil || decision.Skip {
+		t.Fatal("Route skipped; want routed decision")
+	}
+	if decision.EpisodeID != "episode-main" {
+		t.Fatalf("episode id = %q, want episode-main", decision.EpisodeID)
+	}
+	if decision.EpisodeOperation != "continue" {
+		t.Fatalf("episode operation = %q, want continue", decision.EpisodeOperation)
+	}
+	if decision.EpisodeStateVersion != 1 {
+		t.Fatalf("episode state version = %d, want 1", decision.EpisodeStateVersion)
+	}
+	if !strings.Contains(decision.EpisodeStateBefore, `"episode_id":"episode-main"`) ||
+		!strings.Contains(decision.EpisodeStateBefore, `"state_version":1`) {
+		t.Fatalf("episode state before = %q", decision.EpisodeStateBefore)
+	}
+	if !strings.Contains(prompt, "episode_id=episode-main state_version=1") {
+		t.Fatalf("decision prompt missing episode state version:\n%s", prompt)
+	}
+
+	finished := &plugin.AuditRecord{
+		Timestamp:    time.Now(),
+		SessionID:    "session-main",
+		EpisodeID:    decision.EpisodeID,
+		EpisodeOp:    decision.EpisodeOperation,
+		StateVersion: decision.EpisodeStateVersion,
+		StateBefore:  decision.EpisodeStateBefore,
+		Pool:         "openrouter",
+		RoutedModel:  decision.Model,
+		Status:       200,
+		FinishReason: "stop",
+		BudgetAction: decision.BudgetAction,
+		TotalTokens:  400,
+		Cost:         0.01,
+	}
+	if err := router.Record(finished); err != nil {
+		t.Fatalf("finished Record returned error: %v", err)
+	}
+	if !strings.Contains(finished.StateAfter, `"state_version":2`) {
+		t.Fatalf("finished state after = %q, want state_version 2", finished.StateAfter)
+	}
+}
+
 func TestEpisodeOutcomeDoesNotTreatStopAsTaskCompletion(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -1140,10 +1240,24 @@ func TestTaskCompletionConfirmationClearsSafeControlState(t *testing.T) {
 			{"role": "user", "content": "Are you sure you want to mark the task as complete? Include \"task_complete\": true."}
 		]
 	}`)
+	var completionDecision *plugin.RoutingDecision
 	if decision, err := router.Route(req, completionBody); err != nil {
 		t.Fatalf("completion Route returned error: %v", err)
 	} else if decision == nil || decision.Model != "anthropic/claude-opus-5" {
 		t.Fatalf("completion Route = %#v, want Opus", decision)
+	} else {
+		completionDecision = decision
+	}
+	if err := router.Record(&plugin.AuditRecord{
+		Timestamp:    time.Now(),
+		SessionID:    "safe-completion-reset",
+		Pool:         "openrouter",
+		RoutedModel:  completionDecision.Model,
+		Status:       200,
+		FinishReason: "stop",
+		BudgetAction: completionDecision.BudgetAction,
+	}); err != nil {
+		t.Fatalf("completion Record returned error: %v", err)
 	}
 
 	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue with the next bounded step."}]}`)

@@ -33,6 +33,9 @@ func (s *SmartRouter) applyRouteBudget(req *http.Request, decision *plugin.Routi
 	if decision == nil || decision.Skip {
 		return
 	}
+	if action != "" {
+		decision.BudgetAction = action
+	}
 	cfg := s.budgetedRouteConfig()
 	if !cfg.Enabled || action == "" {
 		return
@@ -43,7 +46,6 @@ func (s *SmartRouter) applyRouteBudget(req *http.Request, decision *plugin.Routi
 	}
 	profile, adjustment := s.adjustBudgetForEpisode(req, action, profile)
 
-	decision.BudgetAction = action
 	decision.MaxTokens = profile.MaxTokens
 	decision.TimeoutMs = profile.TimeoutMs
 	budgetReason := fmt.Sprintf(

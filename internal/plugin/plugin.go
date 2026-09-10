@@ -51,14 +51,18 @@ type RequestRouter interface {
 
 // RoutingDecision is the output of a RequestRouter.
 type RoutingDecision struct {
-	Pool         string // target pool name
-	Model        string // model name override (rewrites request body "model" field)
-	Endpoint     string // specific endpoint (empty = use pool load balancer)
-	Reason       string // human-readable explanation for observability
-	BudgetAction string // optional route action profile, e.g. cheap_probe
-	MaxTokens    int    // optional request max_tokens override
-	TimeoutMs    int    // optional per-attempt upstream timeout override
-	Skip         bool   // true = this router declines, try next
+	Pool                string // target pool name
+	Model               string // model name override (rewrites request body "model" field)
+	Endpoint            string // specific endpoint (empty = use pool load balancer)
+	Reason              string // human-readable explanation for observability
+	BudgetAction        string // optional route action profile, e.g. cheap_probe
+	MaxTokens           int    // optional request max_tokens override
+	TimeoutMs           int    // optional per-attempt upstream timeout override
+	EpisodeID           string // task episode used for stateful routing
+	EpisodeOperation    string // continue / interrupt / resume / global / unknown
+	EpisodeStateVersion int    // episode state version observed before routing
+	EpisodeStateBefore  string // compact JSON state observed before routing
+	Skip                bool   // true = this router declines, try next
 }
 
 // RequestTransformer modifies the request body before proxying.
@@ -127,6 +131,7 @@ type TraceFilter struct {
 	TaskName  string
 	StepName  string
 	SessionID string
+	EpisodeID string
 	Limit     int
 }
 
@@ -154,6 +159,11 @@ type TraceEntry struct {
 	BudgetAction   string  `json:"route_budget_action,omitempty"`
 	RouteMaxTokens int     `json:"route_max_tokens,omitempty"`
 	RouteTimeoutMs int     `json:"route_timeout_ms,omitempty"`
+	EpisodeID      string  `json:"episode_id,omitempty"`
+	EpisodeOp      string  `json:"episode_operation,omitempty"`
+	StateVersion   int     `json:"episode_state_version,omitempty"`
+	StateBefore    string  `json:"episode_state_before,omitempty"`
+	StateAfter     string  `json:"episode_state_after,omitempty"`
 }
 
 // TraceQueryer is an optional interface that AuditSink plugins can implement

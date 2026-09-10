@@ -49,6 +49,7 @@ type TaskContext struct {
 	TrialName string // X-Trial-Name (e.g. "trial-abc123")
 	StepName  string // X-Step-Name (e.g. "fix-bug")
 	TaskName  string // X-Task-Name (e.g. "data-anonymization")
+	EpisodeID string // X-Episode-ID (explicit task episode, when available)
 }
 
 // PoolProvider abstracts pool lookup for hot-reload support.
@@ -147,6 +148,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"trial_name", taskCtx.TrialName,
 		"step_name", taskCtx.StepName,
 		"task_name", taskCtx.TaskName,
+		"episode_id", taskCtx.EpisodeID,
 	)
 
 	// --- 2. Authenticators ---
@@ -181,6 +183,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	routeBudgetAction := ""
 	routeMaxTokens := 0
 	routeTimeoutMs := 0
+	routeEpisodeID := ""
+	routeEpisodeOp := ""
+	routeStateVersion := 0
+	routeStateBefore := ""
 
 	routers := h.registry.Routers()
 	if len(routers) > 0 && len(bodyBytes) > 0 && len(bodyBytes) <= maxBodySize {
@@ -201,6 +207,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				routeBudgetAction = decision.BudgetAction
 				routeMaxTokens = decision.MaxTokens
 				routeTimeoutMs = decision.TimeoutMs
+				routeEpisodeID = decision.EpisodeID
+				routeEpisodeOp = decision.EpisodeOperation
+				routeStateVersion = decision.EpisodeStateVersion
+				routeStateBefore = decision.EpisodeStateBefore
 				slog.Info("routing decision",
 					"router", router.Name(),
 					"pool", routedPool,
@@ -210,6 +220,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					"budget_action", routeBudgetAction,
 					"max_tokens", routeMaxTokens,
 					"timeout_ms", routeTimeoutMs,
+					"episode_id", routeEpisodeID,
+					"episode_operation", routeEpisodeOp,
+					"episode_state_version", routeStateVersion,
 				)
 				metrics.RoutingDecisionTotal.WithLabelValues(
 					router.Name(), routedPool, routedModel, routingReason,
@@ -308,6 +321,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// --- 9. Audit ---
 	h.recordAudit(
 		traceID, start, r, dw, meta, targetPool, originalModel, finalModel, routingReason, routeBudgetAction, routeMaxTokens, routeTimeoutMs, taskCtx,
+		routeEpisodeID, routeEpisodeOp, routeStateVersion, routeStateBefore,
 	)
 }
 
@@ -510,6 +524,10 @@ func (h *Handler) recordAudit(
 	routeMaxTokens int,
 	routeTimeoutMs int,
 	taskCtx TaskContext,
+	routeEpisodeID string,
+	routeEpisodeOp string,
+	routeStateVersion int,
+	routeStateBefore string,
 ) {
 	endpoint, retryAttempt, isFallback := routing.GetRoutingMeta(r)
 	if meta != nil && meta.Endpoint != "" {
@@ -571,6 +589,10 @@ func (h *Handler) recordAudit(
 	}
 
 	// Build audit record
+	episodeID := routeEpisodeID
+	if episodeID == "" {
+		episodeID = taskCtx.EpisodeID
+	}
 	record := &plugin.AuditRecord{
 		TraceID:        traceID,
 		Timestamp:      start,
@@ -595,6 +617,10 @@ func (h *Handler) recordAudit(
 		FinishReason:   finishReason,
 		RoutingReason:  routingReason,
 		ErrorKind:      classifyError(dw.code),
+		EpisodeID:      episodeID,
+		EpisodeOp:      routeEpisodeOp,
+		StateVersion:   routeStateVersion,
+		StateBefore:    routeStateBefore,
 		SessionID:      taskCtx.SessionID,
 		TrialName:      taskCtx.TrialName,
 		StepName:       taskCtx.StepName,
@@ -644,11 +670,17 @@ func extractTaskContext(r *http.Request, body []byte) TaskContext {
 		TrialName: r.Header.Get("X-Trial-Name"),
 		StepName:  r.Header.Get("X-Step-Name"),
 		TaskName:  r.Header.Get("X-Task-Name"),
+		EpisodeID: r.Header.Get("X-Episode-ID"),
 	}
 
 	if taskCtx.SessionID == "" {
 		if sid := sessionIDFromBody(body); sid != "" {
 			taskCtx.SessionID = sid
+		}
+	}
+	if taskCtx.EpisodeID == "" {
+		if eid := episodeIDFromBody(body); eid != "" {
+			taskCtx.EpisodeID = eid
 		}
 	}
 	if taskCtx.TrialName == "" && taskCtx.SessionID != "" {
@@ -658,6 +690,14 @@ func extractTaskContext(r *http.Request, body []byte) TaskContext {
 }
 
 func sessionIDFromBody(body []byte) string {
+	return stringFieldFromBody(body, "session_id")
+}
+
+func episodeIDFromBody(body []byte) string {
+	return stringFieldFromBody(body, "episode_id")
+}
+
+func stringFieldFromBody(body []byte, key string) string {
 	if len(body) == 0 {
 		return ""
 	}
@@ -665,12 +705,12 @@ func sessionIDFromBody(body []byte) string {
 	if json.Unmarshal(body, &req) != nil {
 		return ""
 	}
-	if sid, ok := req["session_id"].(string); ok {
-		return sid
+	if value, ok := req[key].(string); ok {
+		return value
 	}
 	if extraBody, ok := req["extra_body"].(map[string]any); ok {
-		if sid, ok := extraBody["session_id"].(string); ok {
-			return sid
+		if value, ok := extraBody[key].(string); ok {
+			return value
 		}
 	}
 	return ""
@@ -703,6 +743,9 @@ func normalizeTaskHeaders(r *http.Request, taskCtx TaskContext) {
 	if taskCtx.TaskName != "" {
 		r.Header.Set("X-Task-Name", taskCtx.TaskName)
 	}
+	if taskCtx.EpisodeID != "" {
+		r.Header.Set("X-Episode-ID", taskCtx.EpisodeID)
+	}
 }
 
 func stripInternalRequestFields(body []byte) []byte {
@@ -719,9 +762,17 @@ func stripInternalRequestFields(body []byte) []byte {
 		delete(req, "session_id")
 		changed = true
 	}
+	if _, ok := req["episode_id"]; ok {
+		delete(req, "episode_id")
+		changed = true
+	}
 	if extraBody, ok := req["extra_body"].(map[string]any); ok {
 		if _, ok := extraBody["session_id"]; ok {
 			delete(extraBody, "session_id")
+			changed = true
+		}
+		if _, ok := extraBody["episode_id"]; ok {
+			delete(extraBody, "episode_id")
 			changed = true
 		}
 		if len(extraBody) == 0 {

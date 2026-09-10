@@ -1,6 +1,7 @@
 package smartrouter
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -47,6 +48,7 @@ type EpisodeEvent struct {
 
 type EpisodeState struct {
 	ID                        string
+	Version                   int
 	CallCount                 int
 	TotalCost                 float64
 	TotalTokens               int
@@ -61,6 +63,7 @@ type EpisodeState struct {
 
 type EpisodeSnapshot struct {
 	ID                        string
+	Version                   int
 	CallCount                 int
 	TotalCost                 float64
 	TotalTokens               int
@@ -109,12 +112,19 @@ func (s *SmartRouter) Record(record *plugin.AuditRecord) error {
 	if record == nil || !s.cfg.Enabled {
 		return nil
 	}
-	cfg := s.episodeConfig()
-	if !cfg.Enabled || isDecisionModelRecord(record) {
-		return nil
-	}
 	key := episodeKeyFromRecord(record)
 	if key == "" {
+		return nil
+	}
+	completionGuardrail := record.BudgetAction == budgetActionCompletionGuardrail
+	if isDecisionModelRecord(record) {
+		return nil
+	}
+	cfg := s.episodeConfig()
+	if !cfg.Enabled {
+		if completionGuardrail {
+			s.clearDecisionStateByKey(key)
+		}
 		return nil
 	}
 
@@ -135,7 +145,6 @@ func (s *SmartRouter) Record(record *plugin.AuditRecord) error {
 	}
 
 	s.episodeMu.Lock()
-	defer s.episodeMu.Unlock()
 	if s.episodes == nil {
 		s.episodes = make(map[string]*EpisodeState)
 	}
@@ -145,10 +154,23 @@ func (s *SmartRouter) Record(record *plugin.AuditRecord) error {
 		s.episodes[key] = state
 	}
 	projectEpisodeEvent(state, event, cfg)
+	if record.EpisodeID == "" {
+		record.EpisodeID = key
+	}
+	if record.EpisodeOp == "" {
+		record.EpisodeOp = "continue"
+	}
+	record.StateAfter = renderEpisodeStateJSON(snapshotFromEpisodeState(state))
+	s.episodeMu.Unlock()
+
+	if completionGuardrail {
+		s.clearDecisionStateByKey(key)
+	}
 	return nil
 }
 
 func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeConfig) {
+	state.Version++
 	state.CallCount++
 	state.TotalCost += event.Cost
 	state.TotalTokens += event.TotalTokens
@@ -180,7 +202,7 @@ func (s *SmartRouter) episodeSnapshot(req *http.Request) EpisodeSnapshot {
 	if !cfg.Enabled {
 		return EpisodeSnapshot{}
 	}
-	key := decisionHistoryKey(req)
+	key := episodeKeyFromRequest(req)
 	if key == "" {
 		return EpisodeSnapshot{}
 	}
@@ -189,12 +211,20 @@ func (s *SmartRouter) episodeSnapshot(req *http.Request) EpisodeSnapshot {
 	defer s.episodeMu.Unlock()
 	state := s.episodes[key]
 	if state == nil {
+		return EpisodeSnapshot{ID: key}
+	}
+	return snapshotFromEpisodeState(state)
+}
+
+func snapshotFromEpisodeState(state *EpisodeState) EpisodeSnapshot {
+	if state == nil {
 		return EpisodeSnapshot{}
 	}
 	recent := make([]EpisodeEvent, len(state.RecentEvents))
 	copy(recent, state.RecentEvents)
 	return EpisodeSnapshot{
 		ID:                        state.ID,
+		Version:                   state.Version,
 		CallCount:                 state.CallCount,
 		TotalCost:                 state.TotalCost,
 		TotalTokens:               state.TotalTokens,
@@ -214,7 +244,9 @@ func (s *SmartRouter) renderEpisodeSnapshot(snapshot EpisodeSnapshot) string {
 	}
 	lines := []string{
 		fmt.Sprintf(
-			"calls=%d total_cost=$%.4f total_tokens=%d length_streak=%d recent_length=%d error_streak=%d last_model=%s last_budget=%s last_finish=%s",
+			"episode_id=%s state_version=%d calls=%d total_cost=$%.4f total_tokens=%d length_streak=%d recent_length=%d error_streak=%d last_model=%s last_budget=%s last_finish=%s",
+			snapshot.ID,
+			snapshot.Version,
 			snapshot.CallCount,
 			snapshot.TotalCost,
 			snapshot.TotalTokens,
@@ -247,7 +279,81 @@ func (s *SmartRouter) renderEpisodeSnapshot(snapshot EpisodeSnapshot) string {
 	return strings.Join(lines, "\n")
 }
 
+func (s *SmartRouter) attachEpisodeMetadata(req *http.Request, decision *plugin.RoutingDecision, operation string) {
+	if decision == nil || decision.Skip {
+		return
+	}
+	if operation == "" {
+		operation = "continue"
+	}
+	snapshot := s.episodeSnapshot(req)
+	if snapshot.ID == "" {
+		return
+	}
+	decision.EpisodeID = snapshot.ID
+	decision.EpisodeOperation = operation
+	decision.EpisodeStateVersion = snapshot.Version
+	decision.EpisodeStateBefore = renderEpisodeStateJSON(snapshot)
+}
+
+func renderEpisodeStateJSON(snapshot EpisodeSnapshot) string {
+	if snapshot.ID == "" {
+		return ""
+	}
+	payload := map[string]any{
+		"episode_id":                  snapshot.ID,
+		"state_version":               snapshot.Version,
+		"call_count":                  snapshot.CallCount,
+		"total_cost":                  snapshot.TotalCost,
+		"total_tokens":                snapshot.TotalTokens,
+		"last_model":                  snapshot.LastModel,
+		"last_budget_action":          snapshot.LastBudgetAction,
+		"last_finish_reason":          snapshot.LastFinishReason,
+		"consecutive_length_finishes": snapshot.ConsecutiveLengthFinishes,
+		"recent_length_finishes":      snapshot.RecentLengthFinishes,
+		"consecutive_errors":          snapshot.ConsecutiveErrors,
+	}
+	if len(snapshot.RecentEvents) > 0 {
+		recent := make([]map[string]any, 0, len(snapshot.RecentEvents))
+		for _, event := range snapshot.RecentEvents {
+			recent = append(recent, map[string]any{
+				"kind":          event.Kind,
+				"outcome":       event.Outcome,
+				"model":         event.Model,
+				"budget_action": event.BudgetAction,
+				"finish_reason": event.FinishReason,
+				"status":        event.Status,
+				"total_tokens":  event.TotalTokens,
+				"cost":          event.Cost,
+				"latency_ms":    event.LatencyMs,
+			})
+		}
+		payload["recent_events"] = recent
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func episodeKeyFromRequest(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	if key := strings.TrimSpace(req.Header.Get("X-Episode-ID")); key != "" {
+		return key
+	}
+	if key := strings.TrimSpace(req.Header.Get("X-Session-ID")); key != "" {
+		return key
+	}
+	return strings.TrimSpace(req.Header.Get("X-Trial-Name"))
+}
+
 func episodeKeyFromRecord(record *plugin.AuditRecord) string {
+	if record.EpisodeID != "" {
+		return record.EpisodeID
+	}
 	if record.SessionID != "" {
 		return record.SessionID
 	}

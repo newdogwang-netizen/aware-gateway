@@ -87,9 +87,14 @@ type AuditRecord struct {
 	Streaming      bool      `json:"streaming,omitempty"`
 	FinishReason   string    `json:"finish_reason,omitempty"`
 	ErrorKind      string    `json:"error_kind,omitempty"`
+	EpisodeID      string    `json:"episode_id,omitempty"`
+	EpisodeOp      string    `json:"episode_operation,omitempty"`
+	StateVersion   int       `json:"episode_state_version,omitempty"`
+	StateBefore    string    `json:"episode_state_before,omitempty"`
+	StateAfter     string    `json:"episode_state_after,omitempty"`
 
 	// --- Task/Step correlation ---
-	// Populated from request headers (X-Trial-Name, X-Step-Name, X-Session-ID)
+	// Populated from request headers (X-Trial-Name, X-Step-Name, X-Session-ID, X-Episode-ID)
 	// or gateway-normalized LiteLLM body metadata.
 	// Allows grouping multiple LLM calls into a single task run / step.
 	// Harbor agents pass these via LiteLLM extra_headers or extra_body.

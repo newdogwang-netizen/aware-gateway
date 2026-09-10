@@ -216,9 +216,9 @@ func healthHandler(pp PoolProvider, reg *plugin.Registry) http.HandlerFunc {
 		}
 
 		resp := struct {
-			Status  string                   `json:"status"`
+			Status  string                     `json:"status"`
 			Pools   map[string]pool.PoolStatus `json:"pools"`
-			Plugins map[string]interface{}   `json:"plugins,omitempty"`
+			Plugins map[string]interface{}     `json:"plugins,omitempty"`
 		}{
 			Status:  status,
 			Pools:   poolStatuses,
@@ -270,6 +270,7 @@ func traceQueryHandler(reg *plugin.Registry) http.HandlerFunc {
 			TaskName:  r.URL.Query().Get("task"),
 			StepName:  r.URL.Query().Get("step"),
 			SessionID: r.URL.Query().Get("session_id"),
+			EpisodeID: r.URL.Query().Get("episode_id"),
 		}
 		// Also try chi URL param for /v1/traces/{trial}
 		if filter.TrialName == "" {
@@ -414,10 +415,10 @@ func traceSummaryHandler(reg *plugin.Registry) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"trial":              trialName,
-			"total_calls":        len(entries),
-			"successful_calls":   successCount,
-			"failed_calls":       failCount,
+			"trial":                   trialName,
+			"total_calls":             len(entries),
+			"successful_calls":        successCount,
+			"failed_calls":            failCount,
 			"total_prompt_tokens":     totalPrompt,
 			"total_completion_tokens": totalCompletion,
 			"total_tokens":            totalTokens,
