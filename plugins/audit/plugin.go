@@ -169,6 +169,7 @@ func (p *Plugin) Record(record *plugin.AuditRecord) error {
 				UserID:         record.UserID,
 				APIKey:         record.APIKey,
 				Cost:           record.Cost,
+				ErrorKind:      record.ErrorKind,
 				BudgetAction:   record.BudgetAction,
 				RouteMaxTokens: record.RouteMaxTokens,
 				RouteTimeoutMs: record.RouteTimeoutMs,
@@ -224,6 +225,7 @@ type Record struct {
 	UserID         string    `json:"user_id"`
 	APIKey         string    `json:"api_key"`
 	Cost           float64   `json:"cost"`
+	ErrorKind      string    `json:"error_kind,omitempty"`
 	BudgetAction   string    `json:"route_budget_action"`
 	RouteMaxTokens int       `json:"route_max_tokens"`
 	RouteTimeoutMs int       `json:"route_timeout_ms"`
@@ -280,6 +282,7 @@ func Open(path string) (*Store, error) {
 		user_id TEXT,
 		api_key TEXT,
 		cost REAL DEFAULT 0,
+		error_kind TEXT DEFAULT '',
 		session_id TEXT DEFAULT '',
 		trial_name TEXT DEFAULT '',
 		step_name TEXT DEFAULT '',
@@ -335,6 +338,7 @@ func Open(path string) (*Store, error) {
 		name       string
 		definition string
 	}{
+		{name: "error_kind", definition: "TEXT DEFAULT ''"},
 		{name: "route_budget_action", definition: "TEXT DEFAULT ''"},
 		{name: "route_max_tokens", definition: "INTEGER DEFAULT 0"},
 		{name: "route_timeout_ms", definition: "INTEGER DEFAULT 0"},
@@ -476,10 +480,10 @@ func (s *Store) flush(records []Record) {
 	stmt, err := tx.Prepare(`INSERT INTO audit
 		(trace_id, timestamp, method, path, endpoint, status, latency_ms, model, routed_model, pool,
 		 prompt_tokens, completion_tokens, total_tokens, retry_attempt, fallback, user_id, api_key, cost,
-		 session_id, trial_name, step_name, task_name, finish_reason, routing_reason,
+		 error_kind, session_id, trial_name, step_name, task_name, finish_reason, routing_reason,
 		 route_budget_action, route_max_tokens, route_timeout_ms,
 		 episode_id, episode_operation, episode_state_version, episode_state_before, episode_state_after)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		slog.Error("audit: prepare failed", "error", err)
 		tx.Rollback()
@@ -493,6 +497,7 @@ func (s *Store) flush(records []Record) {
 			r.Status, r.LatencyMs, r.Model, r.RoutedModel, r.Pool,
 			r.PromptTokens, r.CompTokens, r.TotalTokens, r.RetryAttempt, r.Fallback,
 			r.UserID, r.APIKey, r.Cost,
+			r.ErrorKind,
 			r.SessionID, r.TrialName, r.StepName, r.TaskName,
 			r.FinishReason, r.RoutingReason,
 			r.BudgetAction, r.RouteMaxTokens, r.RouteTimeoutMs,
@@ -631,7 +636,7 @@ func (s *Store) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, err
 	query := `SELECT trace_id, timestamp, model, routed_model, pool, endpoint,
 		step_name, task_name, trial_name, session_id,
 		prompt_tokens, completion_tokens, total_tokens, cost,
-		latency_ms, status, finish_reason, routing_reason,
+		latency_ms, status, error_kind, finish_reason, routing_reason,
 		route_budget_action, route_max_tokens, route_timeout_ms,
 		episode_id, episode_operation, episode_state_version, episode_state_before, episode_state_after
 		FROM audit WHERE 1=1`
@@ -672,13 +677,13 @@ func (s *Store) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, err
 	for rows.Next() {
 		var e plugin.TraceEntry
 		var sessionID sql.NullString
-		var finishReason, routingReason sql.NullString
+		var errorKind, finishReason, routingReason sql.NullString
 		var episodeID, episodeOp, stateBefore, stateAfter sql.NullString
 		err := rows.Scan(
 			&e.TraceID, &e.Timestamp, &e.Model, &e.RoutedModel, &e.Pool, &e.Endpoint,
 			&e.StepName, &e.TaskName, &e.TrialName, &sessionID,
 			&e.PromptTokens, &e.CompTokens, &e.TotalTokens, &e.Cost,
-			&e.LatencyMs, &e.Status, &finishReason, &routingReason,
+			&e.LatencyMs, &e.Status, &errorKind, &finishReason, &routingReason,
 			&e.BudgetAction, &e.RouteMaxTokens, &e.RouteTimeoutMs,
 			&episodeID, &episodeOp, &e.StateVersion, &stateBefore, &stateAfter,
 		)
@@ -688,6 +693,7 @@ func (s *Store) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, err
 		if sessionID.Valid {
 			e.SessionID = sessionID.String
 		}
+		e.ErrorKind = errorKind.String
 		e.FinishReason = finishReason.String
 		e.RoutingReason = routingReason.String
 		e.EpisodeID = episodeID.String

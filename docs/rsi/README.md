@@ -100,7 +100,10 @@ next posted delivery, test, verifier, or no-progress event window.
 State-derived capability floors can change routing after the semantic judge
 returns: verifier/no-progress recovery floors force `premium_recover`, while
 post-delivery validation or post-verifier assessment floors force
-`premium_reason`.
+`premium_reason`. A blocked episode whose previous `premium_recover` route did
+not produce observable progress is stopped locally before another upstream
+agent call. That trace is recorded with `pool=local`,
+`route_budget_action=stop_trial`, and `error_kind=gateway_stop_gate`.
 
 The session-to-episode stack is queryable separately:
 
@@ -146,6 +149,9 @@ the online route-outcome window links that event to the previous LLM route.
 The same state now exposes a deterministic next minimum capability hint used by
 the next router prompt, and hard recovery floors can override an underpowered
 semantic decision when the verifier has already failed the current delivery.
+It also covers the first hard stop line: a blocked episode after premium
+recovery with no route outcome is rejected locally with HTTP 409 and audited as
+`gateway_stop_gate`.
 
 For local runners, `scripts/run_episode_command.py` wraps a command and posts
 the detected events automatically:
@@ -192,6 +198,9 @@ Online smart-router state uses the same distinction. `watch` is prompt context
 only. `stale` and `blocked` are strong enough for the local safe-control layer
 to skip the semantic judge and select `premium_recover`; the routing reason
 records the episode state version and pressure evidence that triggered it.
+If the state is already `blocked` after a `premium_recover` route and the last
+route outcome is still `pending` or `no_progress`, the controller stops the
+trial locally instead of buying another turn.
 
 Route-outcome windows are closed when the next LLM call starts. If no file,
 tool, test, verifier, or explicit progress event was observed between the two

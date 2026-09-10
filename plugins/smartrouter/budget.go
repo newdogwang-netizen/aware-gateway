@@ -15,6 +15,7 @@ const (
 	budgetActionPremiumReason       = "premium_reason"
 	budgetActionPremiumRecover      = "premium_recover"
 	budgetActionCompletionGuardrail = "completion_guardrail"
+	budgetActionStopTrial           = "stop_trial"
 )
 
 // BudgetedRouteConfig lets a routing decision carry execution budget, not only

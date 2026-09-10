@@ -254,6 +254,8 @@ prompt and handles only narrow cases:
 - Upgrade repeated identical task errors and contradicted core hypotheses to
   the strongest configured model.
 - Apply a short cheap-model cooldown after consecutive premium calls.
+- Stop locally when an episode is already blocked and the previous premium
+  recovery route produced no observable progress.
 - Send control back to the semantic router after too many consecutive cheap
   probes, so local rules cannot delay early direction-setting work forever.
 - Force task-completion confirmation through the strongest configured model.
@@ -272,12 +274,14 @@ The first Issue #1 follow-up turns routing output into an execution action, not
 only a model label. A `RoutingDecision` can now carry:
 
 - `budget_action`, such as `cheap_probe`, `cheap_execute`, `premium_reason`,
-  `premium_recover`, or `completion_guardrail`
+  `premium_recover`, `completion_guardrail`, or the local-only `stop_trial`
 - `max_tokens`, which rewrites the upstream chat request
 - `timeout_ms`, which can shorten the endpoint timeout for that routed call
 
 The audit trace exposes these as `route_budget_action`, `route_max_tokens`, and
-`route_timeout_ms`.
+`route_timeout_ms`. `stop_trial` does not rewrite an upstream request; it
+causes the gateway to return a local error before proxying, with
+`error_kind=gateway_stop_gate` in audit/trace.
 
 ### Minimal Episode Runtime
 
@@ -347,6 +351,11 @@ episode reaches `no_progress=stale` or `no_progress=blocked`, it bypasses the
 semantic judge and routes the next ambiguous or otherwise cheap-looking turn to
 `premium_recover` with evidence such as state version, length pressure,
 LLM calls since progress, and last progress kind in the routing reason.
+If that recovery has already happened and the next route sees the episode still
+blocked with the previous route outcome `pending` or `no_progress`, the gateway
+returns a local HTTP 409 stop-gate response instead of proxying another model
+call. The route remains auditable as `pool=local`,
+`route_budget_action=stop_trial`, and `error_kind=gateway_stop_gate`.
 It also watches failed test events: when the same normalized failure
 fingerprint repeats without the failure frontier shrinking, the router can make
 one local `episode_repeated_failure_recovery` decision and then hand later

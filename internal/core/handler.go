@@ -189,6 +189,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	routeEpisodeOp := ""
 	routeStateVersion := 0
 	routeStateBefore := ""
+	routeAbort := false
+	routeAbortStatus := 0
+	routeAbortKind := ""
+	routeAbortMessage := ""
 
 	routers := h.registry.Routers()
 	if len(routers) > 0 && len(bodyBytes) > 0 && len(bodyBytes) <= maxBodySize {
@@ -213,6 +217,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				routeEpisodeOp = decision.EpisodeOperation
 				routeStateVersion = decision.EpisodeStateVersion
 				routeStateBefore = decision.EpisodeStateBefore
+				routeAbort = decision.Abort
+				routeAbortStatus = decision.AbortStatus
+				routeAbortKind = decision.AbortKind
+				routeAbortMessage = decision.AbortMessage
 				slog.Info("routing decision",
 					"router", router.Name(),
 					"pool", routedPool,
@@ -225,6 +233,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					"episode_id", routeEpisodeID,
 					"episode_operation", routeEpisodeOp,
 					"episode_state_version", routeStateVersion,
+					"abort", routeAbort,
 				)
 				metrics.RoutingDecisionTotal.WithLabelValues(
 					router.Name(), routedPool, routedModel, routingReason,
@@ -232,6 +241,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
+	}
+
+	if routeAbort {
+		finalModel := originalModel
+		if routedModel != "" {
+			finalModel = routedModel
+		}
+		h.abortRoutedRequest(
+			w, traceID, start, r, originalModel, finalModel, routingReason,
+			routeBudgetAction, routeMaxTokens, routeTimeoutMs, taskCtx,
+			routeEpisodeID, routeEpisodeOp, routeStateVersion, routeStateBefore,
+			routeAbortStatus, routeAbortKind, routeAbortMessage,
+		)
+		return
 	}
 
 	// --- 5. Apply request transformers ---
@@ -323,7 +346,68 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// --- 9. Audit ---
 	h.recordAudit(
 		traceID, start, r, dw, meta, targetPool, originalModel, finalModel, routingReason, routeBudgetAction, routeMaxTokens, routeTimeoutMs, taskCtx,
-		routeEpisodeID, routeEpisodeOp, routeStateVersion, routeStateBefore,
+		routeEpisodeID, routeEpisodeOp, routeStateVersion, routeStateBefore, "",
+	)
+}
+
+func (h *Handler) abortRoutedRequest(
+	w http.ResponseWriter,
+	traceID string,
+	start time.Time,
+	r *http.Request,
+	originalModel string,
+	finalModel string,
+	routingReason string,
+	routeBudgetAction string,
+	routeMaxTokens int,
+	routeTimeoutMs int,
+	taskCtx TaskContext,
+	routeEpisodeID string,
+	routeEpisodeOp string,
+	routeStateVersion int,
+	routeStateBefore string,
+	abortStatus int,
+	abortKind string,
+	abortMessage string,
+) {
+	if abortStatus < 400 {
+		abortStatus = http.StatusConflict
+	}
+	abortKind = strings.TrimSpace(abortKind)
+	if abortKind == "" {
+		abortKind = "gateway_route_abort"
+	}
+	abortMessage = strings.TrimSpace(abortMessage)
+	if abortMessage == "" {
+		abortMessage = "aware-gateway stopped this request before an upstream model call"
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"type":           abortKind,
+			"message":        abortMessage,
+			"routing_reason": routingReason,
+		},
+	})
+	if err != nil {
+		payload = []byte(`{"error":{"type":"gateway_route_abort","message":"aware-gateway stopped this request before an upstream model call"}}`)
+	}
+	payload = append(payload, '\n')
+
+	dw := &decisionWriter{
+		real:      w,
+		retryable: h.retryable,
+		header:    make(http.Header),
+		code:      abortStatus,
+		body:      payload,
+	}
+	dw.header.Set("Content-Type", "application/json")
+	dw.commit()
+
+	h.recordAudit(
+		traceID, start, r, dw, nil, "local", originalModel, finalModel, routingReason,
+		routeBudgetAction, routeMaxTokens, routeTimeoutMs, taskCtx,
+		routeEpisodeID, routeEpisodeOp, routeStateVersion, routeStateBefore, abortKind,
 	)
 }
 
@@ -530,6 +614,7 @@ func (h *Handler) recordAudit(
 	routeEpisodeOp string,
 	routeStateVersion int,
 	routeStateBefore string,
+	routeErrorKind string,
 ) {
 	endpoint, retryAttempt, isFallback := routing.GetRoutingMeta(r)
 	if meta != nil && meta.Endpoint != "" {
@@ -605,6 +690,10 @@ func (h *Handler) recordAudit(
 	if episodeOp == "" {
 		episodeOp = taskCtx.EpisodeOp
 	}
+	errorKind := classifyError(dw.code)
+	if routeErrorKind != "" {
+		errorKind = routeErrorKind
+	}
 	record := &plugin.AuditRecord{
 		TraceID:        traceID,
 		Timestamp:      start,
@@ -628,7 +717,7 @@ func (h *Handler) recordAudit(
 		Streaming:      dw.streaming,
 		FinishReason:   finishReason,
 		RoutingReason:  routingReason,
-		ErrorKind:      classifyError(dw.code),
+		ErrorKind:      errorKind,
 		EpisodeID:      episodeID,
 		EpisodeOp:      episodeOp,
 		StateVersion:   routeStateVersion,

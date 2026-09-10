@@ -56,6 +56,10 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 	obs := s.observeSafeControlState(req, parsed)
 	message := normalizeForRules(parsed.LatestUserMsg)
 
+	if decision, history, ok := s.episodeStopGateDecision(req); ok {
+		return decision, history, true
+	}
+
 	if obs.ErrorFingerprint != "" &&
 		obs.State.SameFailureCount >= cfg.RepeatedErrorThreshold &&
 		obs.State.LastEscalatedFingerprint != obs.ErrorFingerprint {
@@ -168,6 +172,74 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 	}
 
 	return nil, nil, false
+}
+
+func (s *SmartRouter) episodeStopGateDecision(req *http.Request) (*plugin.RoutingDecision, *DecisionResponse, bool) {
+	episodeCfg := s.episodeConfig()
+	if !episodeCfg.Enabled {
+		return nil, nil, false
+	}
+	snapshot := s.episodeSnapshot(req)
+	if !shouldStopBlockedPremiumNoProgress(snapshot) {
+		return nil, nil, false
+	}
+
+	criticalPath := true
+	reason := fmt.Sprintf(
+		"smart-router safe-control: decision_source=rule rule_id=episode_blocked_stop_gate action=%s confidence=0.97 evidence=%s",
+		budgetActionStopTrial,
+		strings.Join(episodeStopGateEvidence(snapshot), "; "),
+	)
+	routing := &plugin.RoutingDecision{
+		Pool:         "local",
+		Reason:       reason,
+		BudgetAction: budgetActionStopTrial,
+		Abort:        true,
+		AbortStatus:  http.StatusConflict,
+		AbortKind:    "gateway_stop_gate",
+		AbortMessage: "aware-gateway stop gate: blocked episode after premium recovery without observable progress",
+	}
+	history := &DecisionResponse{
+		TurnType:        "stop_gate",
+		HypothesisState: "blocked",
+		CriticalPath:    &criticalPath,
+		Recoverability:  "hard",
+		BudgetAction:    budgetActionStopTrial,
+		ContextSummary:  "blocked episode after premium recovery without observable progress",
+		Reason:          "stop trial before spending another upstream call",
+	}
+	s.attachEpisodeMetadata(req, routing, "continue")
+	return routing, history, true
+}
+
+func shouldStopBlockedPremiumNoProgress(snapshot EpisodeSnapshot) bool {
+	if snapshot.ID == "" {
+		return false
+	}
+	if valueOrDefault(snapshot.NoProgressSeverity, "none") != "blocked" {
+		return false
+	}
+	if snapshot.LastBudgetAction != budgetActionPremiumRecover {
+		return false
+	}
+	label := routeOutcomeLabelForSnapshot(snapshot)
+	return label == routeOutcomePending || label == routeOutcomeNoProgress
+}
+
+func episodeStopGateEvidence(snapshot EpisodeSnapshot) []string {
+	return []string{
+		fmt.Sprintf("episode_id=%s", snapshot.ID),
+		fmt.Sprintf("state_version=%d", snapshot.Version),
+		"no_progress=" + valueOrDefault(snapshot.NoProgressSeverity, "none"),
+		fmt.Sprintf("llm_since_progress=%d", snapshot.LLMCallsSinceProgress),
+		fmt.Sprintf("events_since_progress=%d", snapshot.EventsSinceProgress),
+		fmt.Sprintf("length_since_progress=%d", snapshot.LengthPressureSinceProgress),
+		"last_budget=" + valueOrUnknown(snapshot.LastBudgetAction),
+		"last_route_trace=" + valueOrUnknown(snapshot.LastRouteTraceID),
+		"last_route_outcome=" + routeOutcomeLabelForSnapshot(snapshot),
+		fmt.Sprintf("last_route_outcome_events=%d", snapshot.LastRouteOutcomeEventCount),
+		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
+	}
 }
 
 func (s *SmartRouter) episodeDeliveryStateControlDecision(req *http.Request) (*plugin.RoutingDecision, *DecisionResponse, bool) {

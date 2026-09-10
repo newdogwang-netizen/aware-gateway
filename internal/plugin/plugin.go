@@ -63,6 +63,10 @@ type RoutingDecision struct {
 	EpisodeOperation    string // continue / interrupt / resume / global / unknown
 	EpisodeStateVersion int    // episode state version observed before routing
 	EpisodeStateBefore  string // compact JSON state observed before routing
+	Abort               bool   // true = stop locally before proxying upstream
+	AbortStatus         int    // optional HTTP status for local abort, default 409
+	AbortKind           string // optional error_kind/audit type for local abort
+	AbortMessage        string // optional response message for local abort
 	Skip                bool   // true = this router declines, try next
 }
 
@@ -162,6 +166,7 @@ type TraceEntry struct {
 	Cost           float64 `json:"cost"`
 	LatencyMs      int64   `json:"latency_ms"`
 	Status         int     `json:"status"`
+	ErrorKind      string  `json:"error_kind,omitempty"`
 	Streaming      bool    `json:"streaming"`
 	FinishReason   string  `json:"finish_reason,omitempty"`
 	RoutingReason  string  `json:"routing_reason,omitempty"`

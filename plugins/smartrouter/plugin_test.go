@@ -2722,6 +2722,94 @@ func TestEpisodeNoProgressStateRoutesPremiumRecoveryWithoutDecisionModel(t *test
 	}
 }
 
+func TestEpisodeBlockedPremiumRecoveryWithoutProgressStopsTrial(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	for i := 1; i <= defaultEpisodeNoProgressAgentCallThreshold; i++ {
+		action := budgetActionCheapExecute
+		if i == defaultEpisodeNoProgressAgentCallThreshold {
+			action = budgetActionPremiumRecover
+		}
+		if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+			EventID:   fmt.Sprintf("event-blocked-stop-llm-%d", i),
+			EpisodeID: "episode-blocked-stop",
+			Timestamp: time.Now(),
+			Kind:      "llm_call",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":       "response_completed",
+				"budget_action": action,
+				"model":         "anthropic/claude-opus-5",
+				"status":        200,
+				"total_tokens":  100,
+			},
+		}); err != nil {
+			t.Fatalf("RecordEpisodeEvent %d returned error: %v", i, err)
+		}
+	}
+
+	states, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: "episode-blocked-stop"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates returned error: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	if got := states[0].State["no_progress_severity"]; got != "blocked" {
+		t.Fatalf("no progress severity = %#v, want blocked", got)
+	}
+	if got := states[0].State["last_budget_action"]; got != budgetActionPremiumRecover {
+		t.Fatalf("last budget action = %#v, want premium_recover", got)
+	}
+	if got := states[0].State["last_route_outcome_label"]; got != routeOutcomePending {
+		t.Fatalf("last route outcome = %#v, want pending before next route", got)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-blocked-stop")
+	req.Header.Set("X-Session-ID", "episode-blocked-stop")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue after the blocked recovery attempt."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local stop gate")
+	}
+	if decision == nil || !decision.Abort {
+		t.Fatalf("decision = %#v, want local abort", decision)
+	}
+	if decision.AbortStatus != http.StatusConflict {
+		t.Fatalf("abort status = %d, want %d", decision.AbortStatus, http.StatusConflict)
+	}
+	if decision.AbortKind != "gateway_stop_gate" {
+		t.Fatalf("abort kind = %q, want gateway_stop_gate", decision.AbortKind)
+	}
+	if decision.BudgetAction != budgetActionStopTrial {
+		t.Fatalf("budget action = %q, want stop_trial", decision.BudgetAction)
+	}
+	for _, want := range []string{
+		"rule_id=episode_blocked_stop_gate",
+		"action=stop_trial",
+		"no_progress=blocked",
+		"last_budget=premium_recover",
+		"last_route_outcome=pending",
+		"llm_since_progress=50",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+}
+
 func TestEpisodeNoProgressRecoveryHonorsPremiumCooldown(t *testing.T) {
 	decisionServerCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

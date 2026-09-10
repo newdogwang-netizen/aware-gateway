@@ -24,6 +24,7 @@ func TestStoreRecordsAndQueriesRouteBudget(t *testing.T) {
 		Model:          "auto",
 		RoutedModel:    "z-ai/glm-5.3-flash",
 		Pool:           "openrouter",
+		ErrorKind:      "gateway_stop_gate",
 		BudgetAction:   "cheap_probe",
 		RouteMaxTokens: 1234,
 		RouteTimeoutMs: 45000,
@@ -45,6 +46,9 @@ func TestStoreRecordsAndQueriesRouteBudget(t *testing.T) {
 	}
 	if traces[0].BudgetAction != "cheap_probe" {
 		t.Fatalf("budget action = %q, want cheap_probe", traces[0].BudgetAction)
+	}
+	if traces[0].ErrorKind != "gateway_stop_gate" {
+		t.Fatalf("error kind = %q, want gateway_stop_gate", traces[0].ErrorKind)
 	}
 	if traces[0].RouteMaxTokens != 1234 {
 		t.Fatalf("route max tokens = %d, want 1234", traces[0].RouteMaxTokens)

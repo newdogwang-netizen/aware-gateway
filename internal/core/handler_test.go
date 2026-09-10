@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -242,6 +243,98 @@ func TestHandlerAppliesRouteBudgetToBodyAndAudit(t *testing.T) {
 	}
 	if audit.records[0].StateBefore != `{"episode_id":"episode-budget","state_version":7}` {
 		t.Fatalf("audit state before = %q", audit.records[0].StateBefore)
+	}
+}
+
+func TestHandlerAbortsRouterDecisionBeforeUpstreamAndAudits(t *testing.T) {
+	upstreamCalled := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalled = true
+		http.Error(w, "upstream should not be called", http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		Retry: config.RetryConfig{MaxRetries: 1},
+		Routes: []config.RouteConfig{
+			{Pattern: "/v1/chat/completions", Pool: "openrouter"},
+		},
+	}
+	openrouterPool, err := pool.NewPool("openrouter", config.PoolConfig{
+		Strategy: "round_robin",
+		Endpoints: []config.EndpointConfig{
+			{Name: "upstream", URL: upstream.URL, Weight: 1, Timeout: time.Second},
+		},
+	}, config.CircuitBreakerConfig{})
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	router := &capturingRouter{
+		budgetAction: "stop_trial",
+		episodeID:    "episode-stop",
+		episodeOp:    "continue",
+		stateVersion: 9,
+		stateBefore:  `{"episode_id":"episode-stop","state_version":9}`,
+		abort:        true,
+		abortStatus:  http.StatusConflict,
+		abortKind:    "gateway_stop_gate",
+		abortMessage: "blocked episode after premium recovery",
+	}
+	audit := &capturingAuditSink{}
+	reg := plugin.NewRegistry(logger)
+	for _, p := range []plugin.Plugin{router, audit} {
+		if err := reg.Register(p); err != nil {
+			t.Fatalf("register plugin %s: %v", p.Name(), err)
+		}
+	}
+	if err := reg.Init(&plugin.Context{Config: cfg, Logger: logger}); err != nil {
+		t.Fatalf("init registry: %v", err)
+	}
+
+	handler := NewHandler(cfg, MapPoolProvider{"openrouter": openrouterPool}, reg, logger)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/chat/completions",
+		bytes.NewBufferString(`{
+			"model": "auto",
+			"messages": [{"role": "user", "content": "continue"}]
+		}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Session-ID", "episode-stop")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if upstreamCalled {
+		t.Fatal("upstream was called; want local abort before proxy")
+	}
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d; body = %q", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"type":"gateway_stop_gate"`) {
+		t.Fatalf("body = %q, want gateway_stop_gate error", rec.Body.String())
+	}
+	if len(audit.records) != 1 {
+		t.Fatalf("audit records = %d, want 1", len(audit.records))
+	}
+	record := audit.records[0]
+	if record.Status != http.StatusConflict {
+		t.Fatalf("audit status = %d, want %d", record.Status, http.StatusConflict)
+	}
+	if record.ErrorKind != "gateway_stop_gate" {
+		t.Fatalf("audit error kind = %q, want gateway_stop_gate", record.ErrorKind)
+	}
+	if record.Pool != "local" {
+		t.Fatalf("audit pool = %q, want local", record.Pool)
+	}
+	if record.BudgetAction != "stop_trial" {
+		t.Fatalf("audit budget action = %q, want stop_trial", record.BudgetAction)
+	}
+	if record.EpisodeID != "episode-stop" || record.StateVersion != 9 {
+		t.Fatalf("audit episode/state = %q/%d, want episode-stop/9", record.EpisodeID, record.StateVersion)
 	}
 }
 
@@ -1021,6 +1114,10 @@ type capturingRouter struct {
 	seenEpisodeOp string
 	stateVersion  int
 	stateBefore   string
+	abort         bool
+	abortStatus   int
+	abortKind     string
+	abortMessage  string
 }
 
 func (r *capturingRouter) Name() string { return "capturing-router" }
@@ -1053,6 +1150,10 @@ func (r *capturingRouter) Route(req *http.Request, body []byte) (*plugin.Routing
 		EpisodeOperation:    r.episodeOp,
 		EpisodeStateVersion: r.stateVersion,
 		EpisodeStateBefore:  r.stateBefore,
+		Abort:               r.abort,
+		AbortStatus:         r.abortStatus,
+		AbortKind:           r.abortKind,
+		AbortMessage:        r.abortMessage,
 	}, nil
 }
 

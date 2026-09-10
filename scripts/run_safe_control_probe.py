@@ -510,6 +510,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     completion_regress_session = f"{trial}__completion_regress_agent"
     capability_floor_episode = f"{trial}__capability_floor"
     capability_floor_session = f"{trial}__capability_floor_agent"
+    stop_gate_episode = f"{trial}__stop_gate"
+    stop_gate_session = f"{trial}__stop_gate_agent"
     task = "phase2-safe-control-probe"
     checks: list[dict[str, Any]] = []
 
@@ -1267,6 +1269,107 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         ]
     )
 
+    stop_gate_events: list[dict[str, Any]] = []
+    for index in range(1, 51):
+        event_id = f"{stop_gate_episode}__llm-{index}"
+        action = "premium_recover" if index == 50 else "cheap_execute"
+        stop_gate_events.append(
+            {
+                "event_id": event_id,
+                "episode_id": stop_gate_episode,
+                "episode_operation": "continue",
+                "sequence": index,
+                "kind": "llm_call",
+                "source": "safe-control-probe",
+                "observation": {
+                    "outcome": "response_completed",
+                    "model": PREMIUM_MODEL if action == "premium_recover" else CHEAP_MODEL,
+                    "routed_model": PREMIUM_MODEL if action == "premium_recover" else CHEAP_MODEL,
+                    "budget_action": action,
+                    "finish_reason": "stop",
+                    "status": 200,
+                    "total_tokens": 100,
+                    "cost_usd": 0.001,
+                    "latency_ms": 1000,
+                },
+                "evidence_refs": [f"probe:event:{event_id}"],
+                "session_id": stop_gate_session,
+                "trial_name": trial,
+                "step_name": f"episode-stop-gate-llm-{index:02d}",
+                "task_name": task,
+            }
+        )
+    stop_batch_response = post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {"events": stop_gate_events},
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": stop_gate_session,
+            "X-Episode-ID": stop_gate_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-stop-gate-injected-llm-batch",
+            "X-Task-Name": task,
+        },
+    )
+    checks.extend(
+        [
+            check_equal("stop-gate-batch-event-ingest-count", stop_batch_response.get("count"), 50),
+            check_equal("stop-gate-batch-event-ingest-sinks", stop_batch_response.get("sinks"), 2),
+        ]
+    )
+
+    stop_gate_state = fetch_episode_state(port, stop_gate_episode)
+    stop_gate_payload = stop_gate_state.get("state") or {}
+    checks.extend(
+        [
+            check_equal("stop-gate-state-version", stop_gate_state.get("state_version"), 50),
+            check_equal("stop-gate-no-progress-severity", stop_gate_payload.get("no_progress_severity"), "blocked"),
+            check_equal("stop-gate-llm-since-progress", stop_gate_payload.get("llm_calls_since_progress"), 50),
+            check_equal("stop-gate-last-budget", stop_gate_payload.get("last_budget_action"), "premium_recover"),
+            check_equal("stop-gate-last-route-outcome", stop_gate_payload.get("last_route_outcome_label"), "pending"),
+        ]
+    )
+
+    stop_step = "episode-stop-gate-route"
+    stop_status, stop_response = post_json_status(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Continue after the blocked premium recovery attempt."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": stop_gate_session,
+            "X-Episode-ID": stop_gate_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": stop_step,
+            "X-Task-Name": task,
+        },
+    )
+    stop_trace = wait_for_agent_trace(port, stop_gate_session, stop_step)
+    stop_reason = str(stop_trace.get("routing_reason") or "")
+    stop_error = stop_response.get("error") or {}
+    checks.extend(
+        [
+            check_equal("stop-gate-response-status", stop_status, 409),
+            check_equal("stop-gate-response-type", stop_error.get("type"), "gateway_stop_gate"),
+            check_equal("stop-gate-trace-status", stop_trace.get("status"), 409),
+            check_equal("stop-gate-trace-pool", stop_trace.get("pool"), "local"),
+            check_equal("stop-gate-trace-error-kind", stop_trace.get("error_kind"), "gateway_stop_gate"),
+            check_equal("stop-gate-route-source", classify_source(stop_reason), "safe-control"),
+            check_equal("stop-gate-budget-action", stop_trace.get("route_budget_action") or "", "stop_trial"),
+            check_contains("stop-gate-route-rule", stop_reason, "rule_id=episode_blocked_stop_gate"),
+            check_contains("stop-gate-route-no-progress", stop_reason, "no_progress=blocked"),
+            check_contains("stop-gate-route-last-budget", stop_reason, "last_budget=premium_recover"),
+            check_contains("stop-gate-route-last-outcome", stop_reason, "last_route_outcome=pending"),
+        ]
+    )
+
     return {
         "name": "episode-runtime-state-controller",
         "episode_id": episode,
@@ -1279,6 +1382,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         "completion_regress_session_id": completion_regress_session,
         "capability_floor_episode_id": capability_floor_episode,
         "capability_floor_session_id": capability_floor_session,
+        "stop_gate_episode_id": stop_gate_episode,
+        "stop_gate_session_id": stop_gate_session,
         "checks": checks,
         "state_before_route": state_before,
         "state_after_duplicate": state_after_duplicate,
@@ -1295,6 +1400,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         "completion_regress_route_trace": completion_regress_trace,
         "capability_floor_state": capability_floor_state,
         "capability_floor_route_trace": capability_floor_trace,
+        "stop_gate_state": stop_gate_state,
+        "stop_gate_route_trace": stop_trace,
     }
 
 
@@ -1501,7 +1608,7 @@ def check_not_contains(name: str, actual: str, forbidden_fragment: str) -> dict[
     }
 
 
-def post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+def post_json_status(url: str, payload: dict[str, Any], headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
     raw = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=raw, method="POST")
     req.add_header("Content-Type", "application/json")
@@ -1509,10 +1616,21 @@ def post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dic
         req.add_header(key, value)
     try:
         with urllib.request.urlopen(req, timeout=15) as response:
-            return json.loads(response.read())
+            return response.status, json.loads(response.read())
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"POST {url} failed with {exc.code}: {body}") from exc
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError:
+            parsed = {"error": {"message": body}}
+        return exc.code, parsed
+
+
+def post_json(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+    status, body = post_json_status(url, payload, headers)
+    if status >= 400:
+        raise RuntimeError(f"POST {url} failed with {status}: {json.dumps(body)}")
+    return body
 
 
 def fetch_json(url: str) -> dict[str, Any]:

@@ -45,6 +45,7 @@ replay screening 和重复 pilot acceptance 后，才允许进入 canary。
 - 最小 Episode 投影
 - `finish_reason=length` 动态预算反馈
 - `stale/blocked` no-progress 状态触发本地 recovery 路由
+- blocked episode 在 premium recovery 后仍无可观察进展时触发本地 stop gate
 
 A5 说明了新的主要矛盾：
 
@@ -230,7 +231,7 @@ RSI R1 使用三类基线，避免候选策略只比一个弱版本好：
 - 连续 no-progress 后禁止继续同类 budget 放大；
 - 文件没有变化但多次测试失败时，强制 premium recovery；
 - 测试通过后进入 `completion_readiness`，再由 premium assess 判断证据是否足够；
-- premium recovery 后若仍无进展，下一轮交还 semantic judge 并带上失败摘要。
+- premium recovery 后若仍无进展，触发本地 stop gate，避免继续花上游调用把同一条坏轨迹跑长。
 
 作用：验证事件驱动控制是否比纯 prompt 更稳。
 
@@ -666,6 +667,12 @@ premium_recover + no_progress: stop or replan gate
 provider incomplete: stop and classify separately
 ```
 
+当前 online runtime 已实现第一条可执行的 stop gate：当 episode 已进入
+`no_progress=blocked`，且上一轮 route 是 `premium_recover`，并且上一轮 route
+仍处于 `pending` 或 `no_progress`，网关直接返回本地 `409`，不会再请求上游模型。
+对应 trace 记录 `pool=local`、`route_budget_action=stop_trial`、
+`error_kind=gateway_stop_gate` 和完整 episode evidence。
+
 这些 gate 不是为了省时间，而是为了避免把坏策略误跑成“长尾样本”。
 
 Completion 也必须拆成两个状态，避免“测试通过一次就提交”：
@@ -757,9 +764,10 @@ Implicit Pending Route Closure    done for pending route -> no_progress when nex
 Recent Route Outcome History      done for compact route -> outcome memory in state/prompt
 Next Minimum Capability Hint      done for state-derived router prompt guidance
 Capability Floor Enforcement      done for hard recovery and post-delivery validation assess floors, advisory otherwise
+Gateway Stop Gate                 done for blocked premium_recover without observable progress
 Online Episode State Query        done for GET /v1/episode-state
 State Backfill                    done for persisted traces/events -> online projection
-Deterministic Runtime Probe       done for event ingest -> state query -> recovery route
+Deterministic Runtime Probe       done for event ingest -> state query -> recovery route -> local stop gate
 ```
 
 RSI R1 完整结束后，aware-gateway 应达到：
@@ -777,6 +785,7 @@ Event-driven State Controller     partial for no-progress recovery
 Route-to-Outcome Feedback         partial for extractor/replay windows and compact online route history
 Next-step Capability Estimate     partial via deterministic state hint, not yet acceptance-tuned
 Capability Floor Control          partial; hard verifier/no-progress and post-delivery validation assess floors enforced, delivery floors now local
+Gateway Stop Gate                 partial; blocked premium_recover no-progress path enforced, broader cost/verifier stop lines still pending
 Online State Inspection           done for current in-memory projection
 Restart State Rebuild             partial for audit trace/event backfill
 Runtime Probe Acceptance          done for deterministic local gateway/mocks
