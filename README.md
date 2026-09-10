@@ -373,6 +373,21 @@ replay or visualization. Posted progress events update the online episode state
 immediately, so the next router prompt can see file/test/verifier progress
 rather than only the last LLM finish reason.
 
+For a first live integration, wrap local validation commands:
+
+```bash
+python3 scripts/run_episode_command.py \
+  --gateway http://localhost:12026 \
+  --episode-id trial-abc__agent \
+  --session-id trial-abc__agent \
+  --step-name validation \
+  -- go test ./...
+```
+
+The wrapper exits with the wrapped command status, preserves stdout/stderr, and
+posts `tool_call`, `file_written`, `test_run`, and `run_exception` events when
+they apply.
+
 ## Project Structure
 
 ```

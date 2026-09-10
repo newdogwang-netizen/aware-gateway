@@ -734,6 +734,7 @@ Trace Query by Episode            done for /v1/traces?episode_id=...
 Online Episode Event API          done for POST/GET /v1/episode-events
 Online Event Store                done for audit SQLite episode_events table
 Online Progress Projection        done for posted file/test/verifier/no_progress events
+Online Command Runner Adapter     done for wrapped command/test/file-write events
 ```
 
 RSI R1 完整结束后，aware-gateway 应达到：
@@ -750,6 +751,7 @@ Outcome-aware Screening Pilot     not started for P2
 Outcome-aware Acceptance          at least 3 runs per accepted task class
 Budget Policy Effectiveness       accepted or explicitly rejected
 Automatic Tool Event Capture      not started; needs runner/Harbor adapter
+Command-level Event Adapter       done for local command wrapping
 Delivery Feedback                 not started; needs verifier/outcome adapter in real runs
 Issue #1                          remains open until automatic live events close the loop
 ```

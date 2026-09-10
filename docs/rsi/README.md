@@ -70,6 +70,25 @@ writes these events to `episode_events`, queryable with
 events into its online episode state, so later decisions can distinguish
 activity from progress before a full offline extraction pass.
 
+For local runners, `scripts/run_episode_command.py` wraps a command and posts
+the detected events automatically:
+
+```bash
+python3 scripts/run_episode_command.py \
+  --gateway http://localhost:12026 \
+  --episode-id trial-abc__agent \
+  --session-id trial-abc__agent \
+  --step-name validation \
+  -- go test ./...
+```
+
+The wrapper preserves the command stdout/stderr and exits with the wrapped
+command's status. It emits a `tool_call` event for every wrapped command,
+adds `file_written` when shell/Python writes are detected, adds `test_run` for
+test or validation commands, and adds `run_exception` on timeout or local
+execution errors. `--dry-run --events-jsonl /tmp/events.jsonl` runs the same
+classification without posting to the gateway.
+
 The reducer keeps two no-progress views. `no_progress_event_count` is historical
 background. `no_progress_window.severity` is the current state used by P2 replay:
 `none`, `watch`, `stale`, or `blocked`.

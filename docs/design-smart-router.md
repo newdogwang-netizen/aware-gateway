@@ -342,6 +342,19 @@ The gateway fills missing `schema_version`, `event_id`, `timestamp`,
 these rows in `episode_events`; `GET /v1/episode-events?episode_id=...` returns
 them for replay and visualization.
 
+The first online adapter is command-based:
+
+```bash
+python3 scripts/run_episode_command.py \
+  --episode-id trial-abc__agent \
+  --session-id trial-abc__agent \
+  -- go test ./...
+```
+
+It wraps a local command, preserves stdout/stderr, exits with the wrapped
+command's status, and posts `tool_call`, `file_written`, `test_run`, and
+`run_exception` events when the command/output supports those classifications.
+
 The online trace now carries the episode metadata needed for replay and later
 state rebuilding:
 
@@ -358,8 +371,9 @@ can fetch one task line directly.
 This is not the full Issue #1 runtime. It does not yet identify nested task
 lines with a semantic resolver or automatically capture every shell/tool call.
 Live tool/file/test/verifier events must still be posted by a runner or adapter.
-It also does not perform offline policy updates. It is the smallest online
-state chain needed to
+The generic command adapter covers local commands, but Harbor-native tool and
+verifier hooks are still separate integration work. It also does not perform
+offline policy updates. It is the smallest online state chain needed to
 make route decisions auditable against the state they actually saw.
 
 A5 showed the boundary of this first loop: the episode feedback fired in a real
