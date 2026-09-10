@@ -724,6 +724,12 @@ def build_replay_cutoff_check(
     samples: list[dict[str, Any]] = []
     violations: list[dict[str, Any]] = []
     paired_agent_indices: set[int] = set()
+    route_outcomes = build_route_outcomes(events, agent_traces)
+    route_outcomes_by_trace_id = {
+        route["route_trace_id"]: route
+        for route in route_outcomes
+        if route.get("route_trace_id")
+    }
     for index, decision in enumerate(sorted(decisions, key=lambda trace: trace.get("timestamp") or ""), start=1):
         decision_timestamp = normalize_timestamp(str(decision.get("timestamp") or ""))
         cutoff = parse_dt(decision_timestamp)
@@ -764,6 +770,10 @@ def build_replay_cutoff_check(
                     "selected_reason": paired_agent.get("routing_reason") or "",
                     "routing_reason": decision.get("routing_reason") or "",
                 },
+                "post_decision_outcome": route_outcomes_by_trace_id.get(
+                    str(paired_agent.get("trace_id") or ""),
+                    empty_route_outcome(),
+                ),
                 "candidate_decision": None,
                 "future_evidence_leakage": len(leaked),
             }
@@ -775,7 +785,174 @@ def build_replay_cutoff_check(
         "decision_count": len(samples),
         "future_evidence_leakage": sum(sample["future_evidence_leakage"] for sample in samples),
         "violations": violations,
+        "route_outcomes": route_outcomes,
         "samples": samples,
+    }
+
+
+def build_route_outcomes(
+    events: list[dict[str, Any]],
+    agent_traces: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    ordered_events = sorted_events(events)
+    ordered_traces = sorted(agent_traces, key=lambda trace: trace.get("timestamp") or "")
+    route_outcomes: list[dict[str, Any]] = []
+    for index, trace in enumerate(ordered_traces):
+        route_timestamp = normalize_timestamp(str(trace.get("timestamp") or ""))
+        next_timestamp = ""
+        if index + 1 < len(ordered_traces):
+            next_timestamp = normalize_timestamp(str(ordered_traces[index + 1].get("timestamp") or ""))
+        window_events = events_in_window(ordered_events, route_timestamp, next_timestamp)
+        outcome = summarize_outcome_window(window_events)
+        outcome.update(
+            {
+                "schema_version": "route-outcome-link-v1",
+                "route_trace_id": str(trace.get("trace_id") or f"agent:index:{index}"),
+                "route_timestamp": route_timestamp,
+                "window_start": route_timestamp,
+                "window_end": next_timestamp,
+                "selected_model": str(trace.get("routed_model") or trace.get("model") or ""),
+                "selected_budget_action": str(trace.get("route_budget_action") or ""),
+                "selected_reason": str(trace.get("routing_reason") or ""),
+            }
+        )
+        route_outcomes.append(outcome)
+    return route_outcomes
+
+
+def events_in_window(
+    events: list[dict[str, Any]],
+    start_timestamp: str,
+    end_timestamp: str,
+) -> list[dict[str, Any]]:
+    start = parse_dt(start_timestamp)
+    end = parse_dt(end_timestamp) if end_timestamp else None
+    window = []
+    for event in events:
+        event_time = parse_dt(event["timestamp"])
+        if event_time < start:
+            continue
+        if end and event_time >= end:
+            continue
+        window.append(event)
+    return window
+
+
+def summarize_outcome_window(events: list[dict[str, Any]]) -> dict[str, Any]:
+    by_kind = Counter(event.get("kind") or "unknown" for event in events)
+    llm_events = [event for event in events if event.get("kind") == "llm_call"]
+    test_runs = [event for event in events if event.get("kind") == "test_run"]
+    changed_paths = changed_paths_from_events(events)
+    verifier_rewards = [
+        as_float((event.get("observation") or {}).get("reward"))
+        for event in events
+        if event.get("kind") == "verifier_result"
+    ]
+    progress_count = sum(1 for event in events if is_progress_event(event))
+    candidate_progress_count = sum(1 for event in events if is_candidate_progress_event(event))
+    llm_outcomes = Counter((event.get("observation") or {}).get("outcome") or "unknown" for event in llm_events)
+    return {
+        "event_count": len(events),
+        "event_ids": [str(event.get("event_id") or "") for event in events],
+        "kind_counts": dict(sorted(by_kind.items())),
+        "llm_outcomes": dict(sorted(llm_outcomes.items())),
+        "length_truncated_count": llm_outcomes.get("length_truncated", 0),
+        "error_count": llm_outcomes.get("error", 0),
+        "cost_usd": round(
+            sum(as_float((event.get("observation") or {}).get("cost_usd")) for event in llm_events),
+            8,
+        ),
+        "candidate_progress_event_count": candidate_progress_count,
+        "progress_event_count": progress_count,
+        "no_progress_event_count": by_kind.get("no_progress", 0),
+        "test_run_outcomes": dict(
+            sorted(Counter((event.get("observation") or {}).get("outcome") or "unknown" for event in test_runs).items())
+        ),
+        "delivery_file_write_count": delivery_file_write_count(events),
+        "changed_paths_summary": changed_paths[:12],
+        "verifier_reward": verifier_rewards[-1] if verifier_rewards else None,
+        "outcome_label": route_outcome_label(events, candidate_progress_count, progress_count, verifier_rewards),
+    }
+
+
+def changed_paths_from_events(events: list[dict[str, Any]]) -> list[str]:
+    paths: list[str] = []
+    for event in events:
+        observation = event.get("observation") or {}
+        for key in ("paths", "target_paths", "target_paths_summary", "changed_paths_summary"):
+            for path in observation.get(key) or []:
+                path = str(path)
+                if path and path not in paths:
+                    paths.append(path)
+    return paths
+
+
+def delivery_file_write_count(events: list[dict[str, Any]]) -> int:
+    count = 0
+    for event in events:
+        observation = event.get("observation") or {}
+        if event.get("kind") in ("file_written", "file_modified") and observation.get("delivery_target"):
+            count += 1
+    return count
+
+
+def route_outcome_label(
+    events: list[dict[str, Any]],
+    candidate_progress_count: int,
+    progress_count: int,
+    verifier_rewards: list[float | None],
+) -> str:
+    llm_outcomes = {
+        (event.get("observation") or {}).get("outcome")
+        for event in events
+        if event.get("kind") == "llm_call"
+    }
+    if any(reward and reward > 0 for reward in verifier_rewards):
+        return "verifier_passed"
+    if progress_count:
+        return "strong_progress"
+    if candidate_progress_count:
+        return "candidate_progress"
+    if any(event.get("kind") == "no_progress" for event in events):
+        return "no_progress"
+    if any((event.get("observation") or {}).get("outcome") == "failed" for event in events):
+        return "test_failed"
+    if "error" in llm_outcomes:
+        return "llm_error"
+    if "provider_incomplete" in llm_outcomes:
+        return "provider_incomplete"
+    if any(is_length_pressure_event(event) for event in events):
+        return "length_pressure"
+    if events:
+        return "observed"
+    return "no_events"
+
+
+def empty_route_outcome() -> dict[str, Any]:
+    return {
+        "schema_version": "route-outcome-link-v1",
+        "route_trace_id": "",
+        "route_timestamp": "",
+        "window_start": "",
+        "window_end": "",
+        "selected_model": "",
+        "selected_budget_action": "",
+        "selected_reason": "",
+        "event_count": 0,
+        "event_ids": [],
+        "kind_counts": {},
+        "llm_outcomes": {},
+        "length_truncated_count": 0,
+        "error_count": 0,
+        "cost_usd": 0,
+        "candidate_progress_event_count": 0,
+        "progress_event_count": 0,
+        "no_progress_event_count": 0,
+        "test_run_outcomes": {},
+        "delivery_file_write_count": 0,
+        "changed_paths_summary": [],
+        "verifier_reward": None,
+        "outcome_label": "unpaired",
     }
 
 
@@ -928,6 +1105,7 @@ def build_summary(
     total_cost = sum(as_float((event.get("observation") or {}).get("cost_usd")) for event in llm_events)
     agent_call_count = len(llm_events)
     length_count = outcomes.get("length_truncated", 0)
+    route_outcomes = cutoff_check.get("route_outcomes") or []
     return {
         "schema_version": "episode-summary-v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -970,6 +1148,16 @@ def build_summary(
         "progress_event_count": sum(1 for event in events if is_progress_event(event)),
         "candidate_progress_event_count": sum(1 for event in events if is_candidate_progress_event(event)),
         "no_progress_turn_count": by_kind.get("no_progress", 0),
+        "route_outcome_count": len(route_outcomes),
+        "route_outcome_labels": dict(
+            sorted(Counter(route.get("outcome_label") or "unknown" for route in route_outcomes).items())
+        ),
+        "route_outcome_with_progress_count": sum(
+            1
+            for route in route_outcomes
+            if as_int(route.get("candidate_progress_event_count")) > 0
+            or as_int(route.get("progress_event_count")) > 0
+        ),
         "provider_incomplete_count": outcomes.get("provider_incomplete", 0),
         "reward": reward,
         "future_evidence_leakage": cutoff_check["future_evidence_leakage"],

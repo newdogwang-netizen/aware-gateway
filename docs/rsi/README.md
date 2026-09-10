@@ -31,6 +31,13 @@ The command writes:
 - `episode-summary.json`
 - `replay-cutoff-check.json`
 
+`replay-cutoff-check.json` contains two related views. `samples` is strict
+replay input and only includes evidence before each semantic decision.
+`route_outcomes` is analysis-only: it links every routed agent call to events
+observed before the next agent call, including file writes, tests, no-progress
+events, and verifier results when they fall in that window. Replay prompts do
+not receive `route_outcomes`.
+
 `--strict` fails if required event fields are missing or if replay state includes evidence at or after the decision timestamp.
 
 When gateway traces are unavailable, the extractor can fall back to Harbor

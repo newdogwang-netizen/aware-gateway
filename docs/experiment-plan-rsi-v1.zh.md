@@ -738,6 +738,7 @@ Online Progress Projection        done for posted file/test/verifier/no_progress
 Online Command Runner Adapter     done for wrapped command/test/file-write events
 Harbor Artifact Watcher           done for trajectory/patch/ctrf/result sidecar
 Stateful No-progress Recovery     done for stale/blocked -> local premium_recover
+Route Outcome Linkage             done for route -> event/test/verifier windows
 ```
 
 RSI R1 完整结束后，aware-gateway 应达到：
@@ -751,6 +752,7 @@ Session Episode Stack             done for deterministic continue/interrupt/resu
 Outcome Event Projection          done for offline replay, online when events are posted
 Outcome-aware Replay              done
 Event-driven State Controller     partial for no-progress recovery
+Route-to-Outcome Feedback         partial for extractor/replay analysis windows
 Outcome-aware Screening Pilot     not started for P2
 Outcome-aware Acceptance          at least 3 runs per accepted task class
 Budget Policy Effectiveness       accepted or explicitly rejected

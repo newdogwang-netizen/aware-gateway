@@ -89,6 +89,11 @@ class ExtractEpisodeOutcomesTest(unittest.TestCase):
         self.assertEqual(summary["delivery_file_write_count"], 1)
         self.assertEqual(summary["test_run_outcomes"], {"failed": 1, "passed": 1})
         self.assertEqual(summary["candidate_progress_event_count"], 3)
+        self.assertEqual(summary["route_outcome_count"], 6)
+        self.assertEqual(summary["route_outcome_labels"]["provider_incomplete"], 1)
+        self.assertEqual(summary["route_outcome_labels"]["test_failed"], 1)
+        self.assertEqual(summary["route_outcome_labels"]["verifier_passed"], 1)
+        self.assertEqual(summary["route_outcome_with_progress_count"], 1)
         self.assertEqual(summary["reward"], 1.0)
 
         for event in events:
@@ -112,10 +117,18 @@ class ExtractEpisodeOutcomesTest(unittest.TestCase):
         self.assertEqual(cutoff["future_evidence_leakage"], 0)
         self.assertEqual(cutoff["decision_count"], 3)
         self.assertFalse(cutoff["violations"])
+        route_outcomes = {route["route_trace_id"]: route for route in cutoff["route_outcomes"]}
+        self.assertEqual(route_outcomes["agent-2"]["outcome_label"], "test_failed")
+        self.assertEqual(route_outcomes["agent-2"]["test_run_outcomes"], {"failed": 1})
+        self.assertEqual(route_outcomes["agent-5"]["outcome_label"], "verifier_passed")
+        self.assertEqual(route_outcomes["agent-5"]["verifier_reward"], 1.0)
+        self.assertEqual(route_outcomes["agent-5"]["delivery_file_write_count"], 1)
 
         first = cutoff["samples"][0]
         self.assertEqual(first["state_before"]["llm_call_count"], 2)
         self.assertEqual(first["state_before"]["outcomes"]["provider_incomplete"], 1)
+        self.assertEqual(first["post_decision_outcome"]["route_trace_id"], "agent-2")
+        self.assertEqual(first["post_decision_outcome"]["outcome_label"], "test_failed")
 
         for sample in cutoff["samples"]:
             refs = "\n".join(sample["allowed_evidence_refs"])
@@ -138,6 +151,7 @@ class ExtractEpisodeOutcomesTest(unittest.TestCase):
             last["original_decision"]["selected_model"],
             "",
         )
+        self.assertEqual(last["post_decision_outcome"]["outcome_label"], "unpaired")
 
     def test_can_project_basic_llm_events_from_trajectory_without_traces(self) -> None:
         events, summary, cutoff = self.run_extractor_without_traces()

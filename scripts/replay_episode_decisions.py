@@ -378,6 +378,7 @@ def row_base(sample: dict[str, Any]) -> dict[str, Any]:
     original = sample.get("original_decision") or {}
     summary = sample.get("episode_summary") or {}
     state = sample.get("state_before") or {}
+    post_outcome = sample.get("post_decision_outcome") or {}
     return {
         "episode_id": sample.get("episode_id"),
         "episode_dir": sample.get("episode_dir"),
@@ -392,6 +393,13 @@ def row_base(sample: dict[str, Any]) -> dict[str, Any]:
         "original_selected_budget_action": original.get("selected_budget_action") or "",
         "original_selected_reason": original.get("selected_reason") or "",
         "original_selected_trace_id": original.get("selected_trace_id") or "",
+        "original_post_outcome_label": post_outcome.get("outcome_label") or "",
+        "original_post_event_count": post_outcome.get("event_count", 0),
+        "original_post_candidate_progress_event_count": post_outcome.get("candidate_progress_event_count", 0),
+        "original_post_progress_event_count": post_outcome.get("progress_event_count", 0),
+        "original_post_no_progress_event_count": post_outcome.get("no_progress_event_count", 0),
+        "original_post_test_run_outcomes": post_outcome.get("test_run_outcomes") or {},
+        "original_post_verifier_reward": post_outcome.get("verifier_reward"),
         "state_event_count": state.get("event_count", 0),
         "state_llm_call_count": state.get("llm_call_count", 0),
         "state_tool_call_count": state.get("tool_call_count", 0),
@@ -501,6 +509,15 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "candidate_model_mix": dict(Counter(row.get("candidate_model") or "(empty)" for row in rows)),
         "candidate_budget_action_mix": dict(Counter(row.get("candidate_budget_action") or "(empty)" for row in rows)),
         "candidate_progress_state_mix": dict(Counter(row.get("candidate_progress_state") or "(empty)" for row in rows)),
+        "original_post_outcome_label_mix": dict(
+            Counter(row.get("original_post_outcome_label") or "(empty)" for row in rows)
+        ),
+        "original_post_outcome_with_progress_count": sum(
+            1
+            for row in rows
+            if as_int(row.get("original_post_candidate_progress_event_count")) > 0
+            or as_int(row.get("original_post_progress_event_count")) > 0
+        ),
         "state_no_progress_window_severity_mix": dict(
             Counter(row.get("state_no_progress_window_severity") or "unknown" for row in rows)
         ),

@@ -394,10 +394,13 @@ pressure signal, but it is not a progress signal.
 RSI R1 starts the next reducer offline. `scripts/extract_episode_outcomes.py`
 projects historical traces, patches, CTRF test output, and verifier results
 into `episode-events.jsonl`, `episode-summary.json`, and
-`replay-cutoff-check.json`. The contract lives in `docs/rsi/`: `finish_reason=stop`
-is normalized to `response_completed`, observed activity is kept separate from
-progress, and every replay decision is checked against a strict event-time
-cutoff before outcome state can influence a candidate policy.
+`replay-cutoff-check.json`. The cutoff file keeps replay samples separate from
+analysis-only `route_outcomes` windows that connect each routed agent call to
+later file, test, no-progress, and verifier events before the next agent call.
+The contract lives in `docs/rsi/`: `finish_reason=stop` is normalized to
+`response_completed`, observed activity is kept separate from progress, and
+every replay decision is checked against a strict event-time cutoff before
+outcome state can influence a candidate policy.
 
 ### Latency Budget
 

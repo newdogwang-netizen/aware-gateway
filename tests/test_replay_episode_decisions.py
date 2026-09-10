@@ -64,10 +64,18 @@ class ReplayEpisodeDecisionsTest(unittest.TestCase):
             self.assertEqual(summary["future_evidence_leakage"], 0)
             self.assertEqual(summary["reason_evidence_coverage"], 1.0)
             self.assertEqual(summary["candidate_model_mix"]["z-ai/glm-5.3-flash"], 3)
+            self.assertEqual(
+                summary["original_post_outcome_label_mix"],
+                {"observed": 1, "test_failed": 1, "unpaired": 1},
+            )
+            self.assertEqual(summary["original_post_outcome_with_progress_count"], 0)
             self.assertEqual(summary["state_no_progress_window_severity_mix"], {"none": 1, "watch": 2})
             self.assertEqual(rows[0]["original_selected_model"], "anthropic/claude-opus-5")
+            self.assertEqual(rows[0]["original_post_outcome_label"], "test_failed")
+            self.assertEqual(rows[0]["original_post_test_run_outcomes"], {"failed": 1})
             self.assertEqual(rows[-1]["state_no_progress_event_count"], 1)
             self.assertEqual(rows[-1]["state_no_progress_window_severity"], "watch")
+            self.assertEqual(rows[-1]["original_post_outcome_label"], "unpaired")
             self.assertEqual(rows[-1]["state_candidate_progress_event_count"], 3)
             self.assertEqual(rows[-1]["state_file_write_count"], 1)
             self.assertEqual(rows[-1]["state_test_run_count"], 2)
