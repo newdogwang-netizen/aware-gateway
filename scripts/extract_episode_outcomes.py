@@ -159,6 +159,8 @@ def load_traces(paths: list[Path]) -> list[dict[str, Any]]:
 def infer_episode_id(trial_dir: Path, result: dict[str, Any], traces: list[dict[str, Any]]) -> str:
     if result.get("trial_name"):
         return str(result["trial_name"])
+    if trial_dir.name:
+        return trial_dir.name
     for trace in traces:
         if trace.get("trial_name"):
             return str(trace["trial_name"])
@@ -176,7 +178,10 @@ def filter_episode_traces(traces: list[dict[str, Any]], episode_id: str, session
         for trace in traces
         if trace.get("session_id") == session_id or trace.get("trial_name") == episode_id
     ]
-    return filtered or traces
+    if filtered:
+        return filtered
+    has_trace_identity = any(trace.get("session_id") or trace.get("trial_name") for trace in traces)
+    return [] if has_trace_identity else traces
 
 
 def extract_base_events(

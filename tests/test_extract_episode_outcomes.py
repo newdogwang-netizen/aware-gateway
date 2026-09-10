@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -167,6 +168,65 @@ class ExtractEpisodeOutcomesTest(unittest.TestCase):
         self.assertEqual({event["source"] for event in llm_events}, {"harbor_trajectory"})
         self.assertEqual({event["observation"]["outcome"] for event in llm_events}, {"unknown"})
         self.assertTrue(all(event["evidence_refs"][0].startswith("trajectory:") for event in llm_events))
+
+    def test_incomplete_trial_ignores_unmatched_session_traces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            trial_dir = tmp_path / "shadow-relay__unfinished"
+            shutil.copytree(self.fixture / "sample-trial", trial_dir)
+            (trial_dir / "result.json").unlink()
+            traces_path = tmp_path / "unmatched-traces.json"
+            traces_path.write_text(
+                json.dumps(
+                    {
+                        "traces": [
+                            {
+                                "trace_id": "direct-canary",
+                                "timestamp": "2026-09-08T09:00:00Z",
+                                "pool": "openrouter",
+                                "trial_name": "aware-v4-direct-canary",
+                                "session_id": "aware-v4-direct-canary__agent",
+                                "status": 200,
+                                "total_tokens": 1,
+                            }
+                        ]
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output_dir = tmp_path / "out"
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(self.repo / "scripts" / "extract_episode_outcomes.py"),
+                    "--trial-dir",
+                    str(trial_dir),
+                    "--traces-json",
+                    str(traces_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--strict",
+                ],
+                cwd=self.repo,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+
+            events = [
+                json.loads(line)
+                for line in (output_dir / "episode-events.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            summary = json.loads((output_dir / "episode-summary.json").read_text(encoding="utf-8"))
+            llm_events = [event for event in events if event["kind"] == "llm_call"]
+
+            self.assertEqual(summary["episode_id"], "shadow-relay__unfinished")
+            self.assertEqual(summary["decision_call_count"], 0)
+            self.assertEqual(summary["agent_call_count"], 3)
+            self.assertEqual({event["source"] for event in llm_events}, {"harbor_trajectory"})
 
 
 if __name__ == "__main__":
