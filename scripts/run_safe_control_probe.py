@@ -906,6 +906,46 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         ]
     )
 
+    assessment_step = "episode-completion-assessment-route"
+    assessment_response = post_json(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Judge whether this delivery is ready for hidden grader submission."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": completion_session,
+            "X-Episode-ID": completion_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": assessment_step,
+            "X-Task-Name": task,
+        },
+    )
+    assessment_trace = wait_for_agent_trace(port, completion_session, assessment_step)
+    assessment_reason = str(assessment_trace.get("routing_reason") or "")
+    checks.extend(
+        [
+            check_equal("assessment-route-source", classify_source(assessment_reason), "decision-model"),
+            check_equal(
+                "assessment-route-model",
+                assessment_trace.get("routed_model") or assessment_response.get("model") or "",
+                PREMIUM_MODEL,
+            ),
+            check_equal("assessment-route-budget-action", assessment_trace.get("route_budget_action") or "", "premium_reason"),
+            check_contains("assessment-route-floor", assessment_reason, "capability_floor status=forced"),
+            check_contains("assessment-route-expected", assessment_reason, "expected=premium_assess"),
+            check_contains("assessment-route-observed", assessment_reason, "observed=cheap_execute"),
+            check_contains("assessment-route-reason", assessment_reason, "reason=verifier_passed_current_delivery"),
+            check_contains("assessment-route-forced-budget", assessment_reason, "forced_budget_action=premium_reason"),
+        ]
+    )
+
     completion_step = "episode-completion-guardrail-route"
     completion_response = post_json(
         f"http://127.0.0.1:{port}/v1/chat/completions",
@@ -1217,6 +1257,7 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         "first_failure_route_trace": first_failure_trace,
         "second_failure_route_trace": second_failure_trace,
         "completion_state": completion_state,
+        "assessment_route_trace": assessment_trace,
         "completion_route_trace": completion_trace,
         "completion_regress_state": completion_regress_state,
         "completion_regress_route_trace": completion_regress_trace,

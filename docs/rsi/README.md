@@ -93,6 +93,10 @@ state path can backfill from persisted audit traces and explicit episode
 events exposed by installed query plugins. The state includes a compact
 `recent_route_outcomes` history, linking recent model/budget choices to the
 next posted delivery, test, verifier, or no-progress event window.
+State-derived capability floors can change routing after the semantic judge
+returns: verifier/no-progress recovery floors force `premium_recover`, while
+post-delivery validation or post-verifier assessment floors force
+`premium_reason`.
 
 The session-to-episode stack is queryable separately:
 

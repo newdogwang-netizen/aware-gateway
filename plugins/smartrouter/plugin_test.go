@@ -1243,7 +1243,7 @@ func TestCapabilityFloorForcesPremiumRecoverAfterVerifierFailure(t *testing.T) {
 	}
 }
 
-func TestCapabilityFloorAuditsPremiumAssessWithoutForcing(t *testing.T) {
+func TestCapabilityFloorForcesPremiumAssessAfterDeliveryValidationPass(t *testing.T) {
 	decisionServerCalls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		decisionServerCalls++
@@ -1261,8 +1261,21 @@ func TestCapabilityFloorAuditsPremiumAssessWithoutForcing(t *testing.T) {
 	router.cfg.BudgetedRoute = BudgetedRouteConfig{
 		Enabled: true,
 		Profiles: map[string]RouteBudgetProfile{
-			budgetActionCheapExecute: {MaxTokens: 1536, TimeoutMs: 60000},
+			budgetActionPremiumReason: {MaxTokens: 4096, TimeoutMs: 180000},
 		},
+	}
+	if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+		EventID:   "event-delivery-write-floor",
+		EpisodeID: "episode-premium-assess-advisory",
+		Timestamp: time.Now(),
+		Kind:      "file_written",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"delivery_target": true,
+			"path_count":      1,
+		},
+	}); err != nil {
+		t.Fatalf("RecordEpisodeEvent delivery write returned error: %v", err)
 	}
 	if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
 		EventID:   "event-validation-passed-floor",
@@ -1289,25 +1302,24 @@ func TestCapabilityFloorAuditsPremiumAssessWithoutForcing(t *testing.T) {
 	if decisionServerCalls != 1 {
 		t.Fatalf("decision server calls = %d, want 1", decisionServerCalls)
 	}
-	if decision.Model != "z-ai/glm-5.3-flash" {
-		t.Fatalf("model = %q, want advisory to keep cheap model", decision.Model)
+	if decision.Model != "anthropic/claude-opus-5" {
+		t.Fatalf("model = %q, want forced Opus", decision.Model)
 	}
-	if decision.BudgetAction != budgetActionCheapExecute {
-		t.Fatalf("budget action = %q, want cheap_execute", decision.BudgetAction)
+	if decision.BudgetAction != budgetActionPremiumReason {
+		t.Fatalf("budget action = %q, want premium_reason", decision.BudgetAction)
 	}
 	for _, want := range []string{
-		"capability_floor status=advisory",
+		"capability_floor status=forced",
 		"expected=premium_assess",
 		"observed=cheap_execute",
 		"reason=validation_passed_assess_hidden_gap",
-		"route_max_tokens=1536",
+		"forced_model=anthropic/claude-opus-5",
+		"forced_budget_action=premium_reason",
+		"route_max_tokens=4096",
 	} {
 		if !strings.Contains(decision.Reason, want) {
 			t.Fatalf("reason = %q, want %q", decision.Reason, want)
 		}
-	}
-	if strings.Contains(decision.Reason, "forced_model=") {
-		t.Fatalf("reason = %q, want no forced capability floor", decision.Reason)
 	}
 }
 

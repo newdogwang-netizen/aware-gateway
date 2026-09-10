@@ -751,7 +751,7 @@ Route Outcome Linkage             done for route -> event/test/verifier windows
 Online Route Outcome Projection   done for posted events after each LLM route
 Recent Route Outcome History      done for compact route -> outcome memory in state/prompt
 Next Minimum Capability Hint      done for state-derived router prompt guidance
-Capability Floor Enforcement      done for hard recovery floors, advisory otherwise
+Capability Floor Enforcement      done for hard recovery and post-delivery validation assess floors, advisory otherwise
 Online Episode State Query        done for GET /v1/episode-state
 State Backfill                    done for persisted traces/events -> online projection
 Deterministic Runtime Probe       done for event ingest -> state query -> recovery route
@@ -771,7 +771,7 @@ Outcome-aware Replay              done
 Event-driven State Controller     partial for no-progress recovery
 Route-to-Outcome Feedback         partial for extractor/replay windows and compact online route history
 Next-step Capability Estimate     partial via deterministic state hint, not yet acceptance-tuned
-Capability Floor Control          partial; hard verifier/no-progress floors enforced, assess floors audited only
+Capability Floor Control          partial; hard verifier/no-progress and post-delivery validation assess floors enforced
 Online State Inspection           done for current in-memory projection
 Restart State Rebuild             partial for audit trace/event backfill
 Runtime Probe Acceptance          done for deterministic local gateway/mocks

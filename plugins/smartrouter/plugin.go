@@ -766,11 +766,11 @@ func (s *SmartRouter) applyCapabilityFloor(snapshot EpisodeSnapshot, pool, selec
 	}
 
 	status := "advisory"
-	if expected == nextMinCapabilityPremiumRecover && shouldForceCapabilityFloor(snapshot.NextCapabilityReason) {
+	if shouldForceCapabilityFloor(snapshot) {
 		if strongest, ok := s.strongestConfiguredModel(); ok {
 			pool = strongest.Pool
 			selectedModel = strongest.Name
-			budgetAction = budgetActionPremiumRecover
+			budgetAction = budgetActionForCapabilityFloor(expected)
 			status = "forced"
 		} else {
 			status = "unmet"
@@ -840,11 +840,39 @@ func capabilityRank(capability string) int {
 	}
 }
 
-func shouldForceCapabilityFloor(reason string) bool {
-	reason = strings.ToLower(strings.TrimSpace(reason))
-	return strings.HasPrefix(reason, "episode_no_progress_") ||
-		reason == "verifier_failed_current_delivery" ||
-		reason == "last_route_outcome_negative"
+func budgetActionForCapabilityFloor(capability string) string {
+	switch capability {
+	case nextMinCapabilityPremiumRecover:
+		return budgetActionPremiumRecover
+	case nextMinCapabilityPremiumAssess, nextMinCapabilityPremiumReason:
+		return budgetActionPremiumReason
+	case nextMinCapabilityCheapExecute:
+		return budgetActionCheapExecute
+	case nextMinCapabilityCheapProbe:
+		return budgetActionCheapProbe
+	default:
+		return ""
+	}
+}
+
+func shouldForceCapabilityFloor(snapshot EpisodeSnapshot) bool {
+	expected := valueOrDefault(snapshot.NextMinCapability, nextMinCapabilityUnknown)
+	reason := strings.ToLower(strings.TrimSpace(snapshot.NextCapabilityReason))
+	switch expected {
+	case nextMinCapabilityPremiumRecover:
+		return strings.HasPrefix(reason, "episode_no_progress_") ||
+			reason == "verifier_failed_current_delivery" ||
+			reason == "last_route_outcome_negative"
+	case nextMinCapabilityPremiumAssess, nextMinCapabilityPremiumReason:
+		if reason == "verifier_passed_current_delivery" || reason == "last_route_verifier_passed" {
+			return true
+		}
+		hasDeliveryEvidence := snapshot.DeliveryFileWriteCount > 0 || snapshot.LastDeliveryEventID != ""
+		return hasDeliveryEvidence &&
+			(reason == "validation_passed_assess_hidden_gap" || reason == "last_route_validation_passed")
+	default:
+		return false
+	}
 }
 
 // discoverFromPools builds the model menu from pool endpoints.
