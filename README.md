@@ -388,6 +388,21 @@ The wrapper exits with the wrapped command status, preserves stdout/stderr, and
 posts `tool_call`, `file_written`, `test_run`, and `run_exception` events when
 they apply.
 
+For Harbor jobs, a sidecar watcher can stream already-written artifacts:
+
+```bash
+python3 scripts/watch_harbor_episode_events.py \
+  --job-dir /path/to/harbor/jobs/job-name \
+  --gateway http://localhost:12026
+```
+
+It watches trajectory files plus final patch, CTRF, reward, and result artifacts,
+posting each deterministic event id once. V4 experiments can enable it with:
+
+```bash
+AWARE_V4_EPISODE_WATCHER=1 scripts/run_v4_matrix.sh pilot
+```
+
 ## Project Structure
 
 ```

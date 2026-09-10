@@ -89,6 +89,24 @@ test or validation commands, and adds `run_exception` on timeout or local
 execution errors. `--dry-run --events-jsonl /tmp/events.jsonl` runs the same
 classification without posting to the gateway.
 
+For Harbor runs where commands are executed inside the benchmark agent,
+`scripts/watch_harbor_episode_events.py` acts as a sidecar:
+
+```bash
+python3 scripts/watch_harbor_episode_events.py \
+  --job-dir /path/to/harbor/jobs/job-name \
+  --gateway http://localhost:12026 \
+  --state-file /path/to/harbor/jobs/job-name/.episode-watcher-state.json
+```
+
+It polls `trajectory*.json`, `artifacts/tmp/agent.patch`, `verifier/ctrf.json`,
+`verifier/reward.txt`, and `result.json`, posting each deterministic event id
+once while the job is running. In the V4 runner this is opt-in:
+
+```bash
+AWARE_V4_EPISODE_WATCHER=1 scripts/run_v4_matrix.sh pilot
+```
+
 The reducer keeps two no-progress views. `no_progress_event_count` is historical
 background. `no_progress_window.severity` is the current state used by P2 replay:
 `none`, `watch`, `stale`, or `blocked`.

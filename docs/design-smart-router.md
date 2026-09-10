@@ -354,6 +354,10 @@ python3 scripts/run_episode_command.py \
 It wraps a local command, preserves stdout/stderr, exits with the wrapped
 command's status, and posts `tool_call`, `file_written`, `test_run`, and
 `run_exception` events when the command/output supports those classifications.
+For Harbor benchmark runs, `scripts/watch_harbor_episode_events.py` watches the
+job artifact directory and posts deterministic events from `trajectory*.json`,
+`agent.patch`, `ctrf.json`, `reward.txt`, and `result.json`. The V4 runner can
+start that sidecar with `AWARE_V4_EPISODE_WATCHER=1`.
 
 The online trace now carries the episode metadata needed for replay and later
 state rebuilding:
@@ -370,9 +374,9 @@ can fetch one task line directly.
 
 This is not the full Issue #1 runtime. It does not yet identify nested task
 lines with a semantic resolver or automatically capture every shell/tool call.
-Live tool/file/test/verifier events must still be posted by a runner or adapter.
-The generic command adapter covers local commands, but Harbor-native tool and
-verifier hooks are still separate integration work. It also does not perform
+Live tool/file/test/verifier events must still be posted by a runner, command
+wrapper, or artifact watcher. A true Harbor-native hook that emits before files
+land on disk is still separate integration work. It also does not perform
 offline policy updates. It is the smallest online state chain needed to
 make route decisions auditable against the state they actually saw.
 

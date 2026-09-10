@@ -735,6 +735,7 @@ Online Episode Event API          done for POST/GET /v1/episode-events
 Online Event Store                done for audit SQLite episode_events table
 Online Progress Projection        done for posted file/test/verifier/no_progress events
 Online Command Runner Adapter     done for wrapped command/test/file-write events
+Harbor Artifact Watcher           done for trajectory/patch/ctrf/result sidecar
 ```
 
 RSI R1 完整结束后，aware-gateway 应达到：
@@ -750,10 +751,10 @@ Outcome-aware Replay              done
 Outcome-aware Screening Pilot     not started for P2
 Outcome-aware Acceptance          at least 3 runs per accepted task class
 Budget Policy Effectiveness       accepted or explicitly rejected
-Automatic Tool Event Capture      not started; needs runner/Harbor adapter
+Automatic Tool Event Capture      partial via Harbor artifact watcher; native hook not started
 Command-level Event Adapter       done for local command wrapping
-Delivery Feedback                 not started; needs verifier/outcome adapter in real runs
-Issue #1                          remains open until automatic live events close the loop
+Delivery Feedback                 partial via posted verifier_result/result artifacts
+Issue #1                          remains open until native live events and acceptance gates close the loop
 ```
 
 这轮的重点不是证明 aware-gateway 已经“智能完成”，而是建立一条能持续打磨的工程路径：

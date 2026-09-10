@@ -27,6 +27,9 @@ RUN_MIN_GB="${AWARE_V4_RUN_MIN_GB:-20}"
 AGENT_LLM_CALL_KWARGS_JSON="${AWARE_V4_LLM_CALL_KWARGS_JSON:-{\"max_tokens\":32768,\"timeout\":900,\"num_retries\":0}}"
 AGENT_MODEL_INFO_JSON="${AWARE_V4_MODEL_INFO_JSON:-{\"max_input_tokens\":1000000,\"max_output_tokens\":32768,\"input_cost_per_token\":0,\"output_cost_per_token\":0}}"
 FAIL_ON_OUTPUT_TRUNCATION="${AWARE_V4_FAIL_ON_OUTPUT_TRUNCATION:-1}"
+EPISODE_WATCHER="${AWARE_V4_EPISODE_WATCHER:-0}"
+EPISODE_WATCHER_GATEWAY="${AWARE_V4_EPISODE_WATCHER_GATEWAY:-http://localhost:12026}"
+EPISODE_WATCHER_POLL_SECONDS="${AWARE_V4_EPISODE_WATCHER_POLL_SECONDS:-2}"
 DEFAULT_TASKS_CSV="shadow-relay,vpp-loss-divergence"
 AWARE_V4_TASKS="${AWARE_V4_TASKS:-$DEFAULT_TASKS_CSV}"
 export AWARE_V4_TASKS
@@ -55,6 +58,8 @@ Environment:
   AWARE_V4_PILOT_STRATEGY     smart-router, smart-router-warmstart, or all-premium
                               (default: smart-router)
   AWARE_V4_PILOT_ATTEMPT      pilot attempt label (default: 1)
+  AWARE_V4_EPISODE_WATCHER    set 1 to stream Harbor trajectory/verifier events
+                              into /v1/episode-events during each job
 EOF
 }
 
@@ -410,6 +415,45 @@ write_wall_clock_cap_marker() {
     }' > "$marker"
 }
 
+start_episode_watcher() {
+  local job="$1"
+  if [ "$EPISODE_WATCHER" != "1" ]; then
+    return 0
+  fi
+  mkdir -p "$ARTIFACT_DIR/logs"
+  python3 scripts/watch_harbor_episode_events.py \
+    --job-dir "$ARTIFACT_DIR/jobs/$job" \
+    --gateway "$EPISODE_WATCHER_GATEWAY" \
+    --poll-seconds "$EPISODE_WATCHER_POLL_SECONDS" \
+    --state-file "$ARTIFACT_DIR/.episode-watcher-${job}.state.json" \
+    --events-jsonl "$ARTIFACT_DIR/episode-events-${job}.jsonl" \
+    > "$ARTIFACT_DIR/logs/${job}.episode-watcher.log" 2>&1 &
+  echo "$!"
+}
+
+stop_episode_watcher() {
+  local watcher_pid="${1:-}"
+  if [ -z "$watcher_pid" ]; then
+    return 0
+  fi
+  kill -TERM "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+}
+
+flush_episode_watcher_once() {
+  local job="$1"
+  if [ "$EPISODE_WATCHER" != "1" ]; then
+    return 0
+  fi
+  python3 scripts/watch_harbor_episode_events.py \
+    --job-dir "$ARTIFACT_DIR/jobs/$job" \
+    --gateway "$EPISODE_WATCHER_GATEWAY" \
+    --once \
+    --state-file "$ARTIFACT_DIR/.episode-watcher-${job}.state.json" \
+    --events-jsonl "$ARTIFACT_DIR/episode-events-${job}.jsonl" \
+    >> "$ARTIFACT_DIR/logs/${job}.episode-watcher.log" 2>&1 || true
+}
+
 check_runtime_disk() {
   local docker_root
   docker_root="$(docker_root_dir)"
@@ -435,6 +479,8 @@ run_harbor_job() {
   : > "$log_path"
   local job_started_at
   job_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  local watcher_pid
+  watcher_pid="$(start_episode_watcher "$job" || true)"
 
   AWARE_HARBOR_LLM_ATTEMPTS="$HARBOR_LLM_ATTEMPTS" harbor run \
     --job-name "$job" \
@@ -542,6 +588,8 @@ run_harbor_job() {
   elif [ "$harbor_rc" -ne 0 ]; then
     log "harbor exited rc=$harbor_rc for $job; attempting strict aggregation"
   fi
+  stop_episode_watcher "$watcher_pid"
+  flush_episode_watcher_once "$job"
 
   if [ "$FAIL_ON_OUTPUT_TRUNCATION" = "1" ] &&
     grep -Eq 'Output length exceeded|hit max_tokens limit' "$log_path"; then

@@ -119,6 +119,7 @@ test-short:
 
 test-scripts:
 	python3 -m py_compile scripts/*.py
+	bash -n scripts/*.sh
 	python3 -m unittest discover -s tests -p 'test_*.py'
 
 vet:
