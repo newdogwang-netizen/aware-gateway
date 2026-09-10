@@ -629,10 +629,12 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
             check_equal("recovery-route-source", classify_source(reason), "safe-control"),
             check_equal("recovery-route-model", route_trace.get("routed_model") or response.get("model") or "", PREMIUM_MODEL),
             check_equal("recovery-route-budget-action", route_trace.get("route_budget_action") or "", "premium_recover"),
+            check_equal("recovery-route-max-tokens", route_trace.get("route_max_tokens") or 0, 4096),
+            check_equal("recovery-route-timeout-ms", route_trace.get("route_timeout_ms") or 0, 180000),
             check_contains("recovery-route-rule", reason, "rule_id=episode_no_progress_recovery"),
             check_contains("recovery-route-state-version", reason, "state_version=2"),
             check_contains("recovery-route-length-pressure", reason, "recent_length=2"),
-            check_contains("recovery-route-budget-adjust", reason, "episode_adjust=length_boost"),
+            check_contains("recovery-route-budget-adjust", reason, "episode_adjust=no_progress_freeze"),
         ]
     )
 

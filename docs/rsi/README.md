@@ -109,7 +109,8 @@ the fixed safe-control matrix, it posts two explicit `llm_call` events with
 `finish_reason=length`, checks `/v1/episode-state` for the reduced stale
 no-progress state, retries a duplicate event id to prove projection
 idempotency, and verifies that the next routed request locally selects
-`premium_recover` with `rule_id=episode_no_progress_recovery`.
+`premium_recover` with `rule_id=episode_no_progress_recovery` while freezing
+the base recovery budget instead of compounding another length-based boost.
 
 For local runners, `scripts/run_episode_command.py` wraps a command and posts
 the detected events automatically:

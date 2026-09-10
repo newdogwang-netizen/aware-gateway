@@ -313,14 +313,15 @@ The first reducer tracks only stable control signals:
 - the latest N projected events
 
 The next prompt receives this compact episode state. The budget layer also uses
-it directly: after a configured streak of `finish_reason=length`, or repeated
-length finishes inside the recent event window, the next route budget is
-increased by a multiplier and capped by `max_tokens_ceiling`/
-`timeout_ms_ceiling`. The routing reason records this as
+it directly: after an early configured streak of `finish_reason=length`, the
+next route budget can be increased by a multiplier and capped by
+`max_tokens_ceiling`/`timeout_ms_ceiling`. The routing reason records this as
 `episode_adjust=length_boost` with both the current streak and recent length
-count. If an explicit `no_progress` event is present, the budget layer does not
-keep expanding because of length pressure; it records
-`episode_adjust=no_progress_freeze` so the router can change strategy instead.
+count. Once the projected no-progress state reaches `stale` or `blocked`,
+the budget layer stops compounding length-based expansion and records
+`episode_adjust=no_progress_freeze` so the router changes strategy instead of
+buying the same loop more tokens. Explicit `no_progress` events trigger the
+same freeze.
 The local safe-control layer now consumes the same projected state: when the
 episode reaches `no_progress=stale` or `no_progress=blocked`, it bypasses the
 semantic judge and routes the next ambiguous or otherwise cheap-looking turn to

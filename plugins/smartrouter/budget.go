@@ -176,12 +176,15 @@ func (s *SmartRouter) adjustBudgetForEpisode(req *http.Request, action string, p
 		return profile, ""
 	}
 
-	if snapshot.ActiveNoProgress {
+	severity := valueOrDefault(snapshot.NoProgressSeverity, "none")
+	if snapshot.ActiveNoProgress || severity == "stale" || severity == "blocked" {
 		return profile, fmt.Sprintf(
-			"episode_adjust=no_progress_freeze episode_calls=%d episode_no_progress=%s episode_events_since_progress=%d",
+			"episode_adjust=no_progress_freeze episode_calls=%d episode_no_progress=%s episode_events_since_progress=%d episode_length_streak=%d episode_recent_length=%d",
 			snapshot.CallCount,
-			snapshot.NoProgressSeverity,
+			severity,
 			snapshot.EventsSinceProgress,
+			snapshot.ConsecutiveLengthFinishes,
+			snapshot.RecentLengthFinishes,
 		)
 	}
 

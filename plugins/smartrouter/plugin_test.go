@@ -1416,13 +1416,19 @@ func TestEpisodeNoProgressStateRoutesPremiumRecoveryWithoutDecisionModel(t *test
 	if decision.BudgetAction != budgetActionPremiumRecover {
 		t.Fatalf("budget action = %q, want %s", decision.BudgetAction, budgetActionPremiumRecover)
 	}
+	if decision.MaxTokens != 1000 {
+		t.Fatalf("max tokens = %d, want frozen base budget", decision.MaxTokens)
+	}
+	if decision.TimeoutMs != 10000 {
+		t.Fatalf("timeout ms = %d, want frozen base timeout", decision.TimeoutMs)
+	}
 	for _, want := range []string{
 		"rule_id=episode_no_progress_recovery",
 		"no_progress=stale",
 		"state_version=2",
 		"recent_length=2",
 		"llm_since_progress=2",
-		"episode_adjust=length_boost",
+		"episode_adjust=no_progress_freeze",
 	} {
 		if !strings.Contains(decision.Reason, want) {
 			t.Fatalf("reason = %q, want %q", decision.Reason, want)
@@ -1488,7 +1494,7 @@ func TestEpisodeNoProgressRecoveryHonorsPremiumCooldown(t *testing.T) {
 	}
 }
 
-func TestEpisodeRecentLengthPressureBoostsBudget(t *testing.T) {
+func TestEpisodeRecentLengthPressureFreezesBudgetWhenStale(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
 	}))
@@ -1542,13 +1548,13 @@ func TestEpisodeRecentLengthPressureBoostsBudget(t *testing.T) {
 	if decision.BudgetAction != budgetActionPremiumRecover {
 		t.Fatalf("budget action = %q, want %s", decision.BudgetAction, budgetActionPremiumRecover)
 	}
-	if decision.MaxTokens != 2500 {
-		t.Fatalf("max tokens = %d, want 2500 after recent length boost", decision.MaxTokens)
+	if decision.MaxTokens != 1000 {
+		t.Fatalf("max tokens = %d, want frozen base budget", decision.MaxTokens)
 	}
-	if decision.TimeoutMs != 15000 {
-		t.Fatalf("timeout ms = %d, want 15000 after capped recent length boost", decision.TimeoutMs)
+	if decision.TimeoutMs != 10000 {
+		t.Fatalf("timeout ms = %d, want frozen base timeout", decision.TimeoutMs)
 	}
-	for _, want := range []string{"episode_adjust=length_boost", "episode_calls=3", "episode_length_streak=1", "episode_recent_length=2"} {
+	for _, want := range []string{"episode_adjust=no_progress_freeze", "episode_no_progress=stale", "episode_calls=3", "episode_length_streak=1", "episode_recent_length=2"} {
 		if !strings.Contains(decision.Reason, want) {
 			t.Fatalf("reason = %q, want %q", decision.Reason, want)
 		}
