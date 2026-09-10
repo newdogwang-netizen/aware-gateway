@@ -413,6 +413,43 @@ after one local recovery or a passing validation check with no delivery
 candidate, remain advisory and write the mismatch into `routing_reason`. This
 keeps stateful correction narrow and visible in trace instead of broadening the
 local keyword rule layer.
+There is also a pre-delivery floor for long-running candidates. When the
+episode has enough implementation progress, but still has no delivery-target
+write, validation, or test evidence after several more calls or length-pressure
+events, the reducer emits `delivery_candidate_needs_delivery`. Safe-control
+handles that locally as `cheap_execute` and injects a short route instruction:
+deliver the current candidate if the facts are sufficient, otherwise run one
+direct check that closes the delivery/validation gap. This prevents the
+controller from buying repeated premium recovery turns simply because a
+candidate has not yet been packaged for the verifier.
+If that floor is tried repeatedly without a new delivery or validation event,
+the state moves to `delivery_candidate_floor_exhausted` and the local
+controller escalates once to `premium_recover`, keeping the action bounded and
+auditable.
+
+The reducer now treats `analysis_progress` as a real, but still inferred,
+progress tier. Verified task facts, decoded artifacts, and candidate answers
+set `next_capability_reason=analysis_progress_needs_application`; the local
+controller routes a `cheap_execute` turn with an instruction to apply the
+facts through a command, validation, or delivery. After three application
+attempts without a new progress event, the state changes to
+`analysis_progress_application_exhausted` and routes one `premium_recover`.
+That recovery does not repeat indefinitely; if it produces no event, the next
+state falls back to an observation window.
+
+Execution stalls are projected separately from model failures. Heredoc residue,
+interrupted commands, and terminal prompts that indicate a stuck execution path
+produce `execution_stall` events. Repeated stalls since the last real progress
+set `next_capability_reason=execution_stall_needs_recovery`, which asks a
+premium turn to restore a short, noninteractive command or direct delivery
+attempt.
+
+Bounded replan also has an application path. A concrete hypothesis captured
+after `freeze_or_replan` sets the next action to `hypothesis_apply`, not just
+generic `cheap_execute`. If that application turn is truncated, the next state
+routes one concise premium recovery under
+`episode_hypothesis_apply_length_recovery` so the same hypothesis can be
+completed or abandoned without restarting broad exploration.
 
 Online runners can post the same event shape used by RSI replay:
 
@@ -524,6 +561,23 @@ The contract lives in `docs/rsi/`: `finish_reason=stop` is normalized to
 `response_completed`, observed activity is kept separate from progress, and
 every replay decision is checked against a strict event-time cutoff before
 outcome state can influence a candidate policy.
+
+The reducer also projects `replan_hypothesis` after a bounded replan. It parses
+the next router context summary, records the strategy that emerged from the
+replan window, and tracks whether that hypothesis is still open, stale, or
+later progressed by implementation, validation, delivery, or verifier evidence.
+An open replan hypothesis sets the next minimum capability to `cheap_execute`,
+so the next useful turn should validate, implement, or explicitly abandon the
+hypothesis instead of drifting back into broad exploration. Premium routing is
+still reserved for changing the hypothesis or recovering from negative evidence.
+If the post-replan stop threshold is reached exactly when a fresh open
+hypothesis appears, the stop gate allows one validation turn; a later
+no-progress call closes the window.
+The same projection now marks `delivery_candidate_needs_delivery` after an
+implementation-heavy trajectory keeps consuming calls without delivery or
+validation evidence. Replay exports this as `next_min_capability=cheap_execute`
+and `next_capability_reason=delivery_candidate_needs_delivery`, so prompt-only
+experiments can be compared against the online controller's intended action.
 
 ### Latency Budget
 

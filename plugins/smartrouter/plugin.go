@@ -767,10 +767,14 @@ func (s *SmartRouter) applyCapabilityFloor(snapshot EpisodeSnapshot, pool, selec
 
 	status := "advisory"
 	if shouldForceCapabilityFloor(snapshot) {
-		if strongest, ok := s.strongestConfiguredModel(); ok {
-			pool = strongest.Pool
-			selectedModel = strongest.Name
-			budgetAction = budgetActionForCapabilityFloor(expected)
+		if model, ok := s.modelForCapabilityFloor(expected); ok {
+			pool = model.Pool
+			selectedModel = model.Name
+			if action, ok := normalizeBudgetAction(snapshot.NextBudgetActionHint); ok {
+				budgetAction = action
+			} else if action := budgetActionForCapabilityFloor(expected); action != "" {
+				budgetAction = action
+			}
 			status = "forced"
 		} else {
 			status = "unmet"
@@ -799,6 +803,15 @@ func (s *SmartRouter) applyCapabilityFloor(snapshot EpisodeSnapshot, pool, selec
 	return pool, selectedModel, budgetAction, reason
 }
 
+func (s *SmartRouter) modelForCapabilityFloor(capability string) (ModelEntry, bool) {
+	switch capability {
+	case nextMinCapabilityCheapProbe, nextMinCapabilityCheapExecute:
+		return s.cheapestConfiguredModel()
+	default:
+		return s.strongestConfiguredModel()
+	}
+}
+
 func (s *SmartRouter) routeCapability(selectedModel, budgetAction string) string {
 	action, ok := normalizeBudgetAction(budgetAction)
 	if ok {
@@ -807,7 +820,7 @@ func (s *SmartRouter) routeCapability(selectedModel, budgetAction string) string
 			return nextMinCapabilityPremiumRecover
 		case budgetActionPremiumReason, budgetActionCompletionGuardrail:
 			return nextMinCapabilityPremiumAssess
-		case budgetActionCheapExecute:
+		case budgetActionCheapExecute, budgetActionHypothesisApply:
 			if s.isStrongestConfiguredModel(selectedModel) {
 				return nextMinCapabilityPremiumAssess
 			}
@@ -870,6 +883,9 @@ func shouldForceCapabilityFloor(snapshot EpisodeSnapshot) bool {
 		hasDeliveryEvidence := snapshot.DeliveryFileWriteCount > 0 || snapshot.LastDeliveryEventID != ""
 		return hasDeliveryEvidence &&
 			(reason == "validation_passed_assess_hidden_gap" || reason == "last_route_validation_passed")
+	case nextMinCapabilityCheapExecute:
+		return reason == "replan_hypothesis_needs_validation" ||
+			reason == "delivery_candidate_needs_delivery"
 	default:
 		return false
 	}
@@ -1251,11 +1267,12 @@ func min(a, b int) int {
 // --- Request parsing ---
 
 type parsedRequest struct {
-	Model           string
-	MessageCount    int
-	LatestUserMsg   string
-	SystemMsg       string
-	EstimatedTokens int
+	Model              string
+	MessageCount       int
+	LatestUserMsg      string
+	SystemMsg          string
+	EstimatedTokens    int
+	HasToolObservation bool
 }
 
 func parseRequest(body []byte) *parsedRequest {
@@ -1282,11 +1299,29 @@ func parseRequest(body []byte) *parsedRequest {
 		if msg.Role == "user" {
 			p.LatestUserMsg = msg.Content
 		}
+		if looksLikeToolObservationContent(msg.Content) {
+			p.HasToolObservation = true
+		}
 		// Rough token estimate: ~4 chars per token
 		p.EstimatedTokens += len(msg.Content) / 4
 	}
 
 	return p
+}
+
+func looksLikeToolObservationContent(message string) bool {
+	lower := strings.ToLower(message)
+	return containsAny(lower, []string{
+		"new terminal output:",
+		"terminal output:",
+		"exit code",
+		"stdout",
+		"stderr",
+		"traceback (most recent call last)",
+		"tool result",
+		"bash_command",
+		"sending keys:",
+	})
 }
 
 func isTaskCompletionConfirmation(message string) bool {
@@ -1362,11 +1397,12 @@ func (s *SmartRouter) buildPrompt(p *parsedRequest, historyText string, episodeT
 	sb.WriteString("4. Read recent router memory for this same trial. Use it to detect repeated bottlenecks, stable hypotheses, prior premium spending, and whether the next turn should continue or change strategy.\n")
 	sb.WriteString("5. If the same bottleneck has already consumed multiple strongest-model turns, do not buy more blind probing. Use the strongest model only to change the search strategy; use the cheapest model for bounded sweeps and mechanical validation.\n")
 	sb.WriteString("6. Prefer the strongest model for early critical-path modeling, but prefer the cheapest model for late execution once the problem model is stable.\n")
-	sb.WriteString("7. Choose a budget_action from: cheap_probe, cheap_execute, premium_reason, premium_recover, freeze_or_replan, completion_guardrail.\n\n")
+	sb.WriteString("7. Choose a budget_action from: cheap_probe, cheap_execute, hypothesis_apply, premium_reason, premium_recover, freeze_or_replan, completion_guardrail.\n\n")
 
 	sb.WriteString("Budget actions:\n")
 	sb.WriteString("- cheap_probe: bounded observation, file reads, search, command-output summary, or narrow fact gathering.\n")
 	sb.WriteString("- cheap_execute: bounded execution under a stable hypothesis, simple code/test edits, known test commands, formatting, or mechanical validation.\n")
+	sb.WriteString("- hypothesis_apply: after a bounded replan produced a concrete hypothesis, apply or validate that hypothesis directly with enough room for one compact command batch.\n")
 	sb.WriteString("- premium_reason: path-setting reasoning, early task model formation, protocol/schema/algorithm inference, first solver architecture, or high-leverage synthesis.\n")
 	sb.WriteString("- premium_recover: contradicted hypothesis, repeated failure, ambiguous test failure, failed hidden-generalization reasoning, or strategy change after wasted work.\n")
 	sb.WriteString("- freeze_or_replan: stop expanding budget after long exploration; produce a concise new plan or abandon criteria before more execution.\n")
@@ -1405,6 +1441,13 @@ func (s *SmartRouter) buildPrompt(p *parsedRequest, historyText string, episodeT
 		sb.WriteString(episodeText)
 		sb.WriteString("\n\n")
 		sb.WriteString("Use episode state as outcome evidence. If recent calls ended with finish_reason=length, the next response probably needs a larger budget or a different strategy. If cost is rising without useful progress, prefer bounded cheap probes or a premium recovery turn that changes direction.\n\n")
+		sb.WriteString("If replan_hypothesis is open, prefer hypothesis_apply for the next useful turn: validate, implement, or explicitly abandon that hypothesis; avoid broad exploration that does not test it.\n\n")
+		sb.WriteString("If next_capability reason is hypothesis_apply_length_truncated, route premium_recover for one concise recovery turn: keep the same hypothesis, restore a valid command or deliverable, and avoid starting a new broad search.\n\n")
+		sb.WriteString("If next_capability reason is execution_stall_needs_recovery, route premium_recover for one execution recovery turn: restore a clean tool prompt, avoid heredocs or long dumps, and make exactly one noninteractive command or delivery attempt.\n\n")
+		sb.WriteString("If next_capability reason is analysis_progress_needs_application, route cheap_execute for a direct application, validation, or delivery attempt using the latest verified facts.\n\n")
+		sb.WriteString("If next_capability reason is analysis_progress_application_exhausted, route premium_recover once: convert the verified facts into a concrete delivery or verifier-facing action instead of repeating cheap application turns.\n\n")
+		sb.WriteString("If next_capability reason is delivery_candidate_needs_delivery, route the next turn as cheap_execute unless the context shows a hard blocker; the agent should convert current work into the required deliverable or run one direct validation check, not continue broad analysis.\n\n")
+		sb.WriteString("If next_capability reason is delivery_candidate_floor_exhausted, stop cheap-looping on the same delivery reminder; use premium_recover to resolve the missing delivery or validation gap.\n\n")
 	}
 
 	// Request preview — give enough context to judge complexity.
@@ -1444,7 +1487,7 @@ func (s *SmartRouter) buildPrompt(p *parsedRequest, historyText string, episodeT
 
 	sb.WriteString("Return JSON only with keys: model, turn_type, hypothesis_state, critical_path, recoverability, budget_action, context_summary, reason. ")
 	sb.WriteString("critical_path must be a JSON boolean. recoverability must be easy, medium, or hard. ")
-	sb.WriteString("budget_action must be one of cheap_probe, cheap_execute, premium_reason, premium_recover, freeze_or_replan, completion_guardrail. ")
+	sb.WriteString("budget_action must be one of cheap_probe, cheap_execute, hypothesis_apply, premium_reason, premium_recover, freeze_or_replan, completion_guardrail. ")
 	sb.WriteString("Keep context_summary under 14 words and reason under 12 words. Do not include any text outside the JSON.")
 
 	return sb.String()

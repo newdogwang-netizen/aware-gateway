@@ -51,6 +51,8 @@ Projected event kinds now include:
 - `tool_call`: visible Harbor tool invocation.
 - `file_written`: explicit shell or Python file write detected from the tool command.
 - `test_run`: local test or output validation command with `passed`, `failed`, or `unknown` outcome.
+- `analysis_progress`: inferred but auditable analysis milestones, such as verified task facts, decoded artifacts, or candidate answers.
+- `execution_stall`: execution-layer stalls, such as heredoc residue, interrupted commands, or tool prompts that are no longer making noninteractive progress.
 - `file_modified`, `test_passed` / `test_failed`, `verifier_result`: final Harbor artifacts.
 - `no_progress`: derived pressure signal.
 
@@ -162,6 +164,10 @@ outcome are rejected locally with HTTP 409 and audited with specific
 `error_kind` values. `freeze_or_replan` also carries a short route instruction
 that is injected into the upstream chat messages, so the agent is told to stop
 broad exploration and produce a concrete pivot or abandon condition.
+The current probe also covers state floors for replan hypothesis application,
+truncated hypothesis recovery, delivery-candidate delivery and recovery floors,
+analysis-progress application/recovery, exact safe-control rule-id matching,
+and execution-stall recovery.
 
 For local runners, `scripts/run_episode_command.py` wraps a command and posts
 the detected events automatically:
@@ -222,6 +228,39 @@ for provider incomplete traces, cost-threshold overflow before verifier
 proximity, repeated length pressure without implementation, validation,
 delivery, or strong progress, agent-call overflow without effective progress,
 and a post-replan no-progress window.
+
+After a bounded replan, the reducer also keeps `replan_hypothesis`: the next
+router context summary that names the strategy emerging from that replan. It is
+tracked as `pending`, `open`, `stale`, or `progressed`. While the hypothesis is
+open, the next minimum capability becomes `cheap_execute`, pushing the run
+toward a narrow validation or implementation pivot instead of more broad
+probing. A fresh open hypothesis gets one validation turn even when the
+post-replan stop threshold has just been reached; continued no-progress still
+closes the run.
+The reducer also detects an unsubmitted implementation candidate. If a trajectory
+has accumulated enough implementation progress but still has no delivery-target
+write, validation, or test evidence after several more idle calls or length
+pressure events, state exposes `next_capability_reason=delivery_candidate_needs_delivery`.
+The online safe-control layer handles that locally as `cheap_execute` and
+injects a short instruction that asks the agent to deliver the candidate or run
+one direct delivery/validation check.
+If that delivery reminder is tried repeatedly without a new delivery or
+validation event, the next state changes to
+`delivery_candidate_floor_exhausted` and safe-control escalates once to
+`premium_recover` instead of looping cheap reminders.
+
+Analysis progress is treated as a separate state input. A new verified fact or
+decoded artifact sets `next_capability_reason=analysis_progress_needs_application`;
+safe-control routes a cheap execution/application turn that should turn that
+fact into a command, validation, or delivery. After three such application
+attempts with no new progress, `analysis_progress_application_exhausted` routes
+one premium recovery. If no new event follows that recovery, the state falls
+back to a cheap observation window instead of repeating the same recovery.
+
+Execution stalls are negative progress events. Repeated stalls since the last
+real progress set `next_capability_reason=execution_stall_needs_recovery`; the
+recovery instruction asks for a short, noninteractive command or direct
+delivery attempt rather than another long heredoc or dump.
 
 Route-outcome windows are closed when the next LLM call starts. If no file,
 tool, test, verifier, or explicit progress event was observed between the two

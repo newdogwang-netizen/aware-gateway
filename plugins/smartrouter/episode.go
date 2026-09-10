@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,14 +13,19 @@ import (
 )
 
 const (
-	defaultEpisodeRecentEvents                 = 5
-	defaultEpisodeLengthStreakThreshold        = 1
-	defaultEpisodeLengthWindowThreshold        = 2
-	defaultEpisodeMaxTokensMultiplier          = 3.0
-	defaultEpisodeTimeoutMultiplier            = 2.0
-	defaultEpisodeMaxTokensCeiling             = 8192
-	defaultEpisodeTimeoutMsCeiling             = 240000
-	defaultEpisodeNoProgressAgentCallThreshold = 50
+	defaultEpisodeRecentEvents                     = 5
+	defaultEpisodeLengthStreakThreshold            = 1
+	defaultEpisodeLengthWindowThreshold            = 2
+	defaultEpisodeMaxTokensMultiplier              = 3.0
+	defaultEpisodeTimeoutMultiplier                = 2.0
+	defaultEpisodeMaxTokensCeiling                 = 8192
+	defaultEpisodeTimeoutMsCeiling                 = 240000
+	defaultEpisodeNoProgressAgentCallThreshold     = 50
+	defaultDeliveryCandidateProgressThreshold      = 6
+	defaultDeliveryCandidateIdleCallThreshold      = 3
+	defaultDeliveryCandidateFloorAttemptLimit      = 2
+	defaultAnalysisProgressApplicationAttemptLimit = 3
+	defaultExecutionStallRecoveryThreshold         = 2
 
 	episodeOperationContinue  = "continue"
 	episodeOperationInterrupt = "interrupt"
@@ -36,12 +42,14 @@ const (
 
 	routeOutcomePending          = "pending"
 	routeOutcomeToolCall         = "tool_call"
+	routeOutcomeExecutionStall   = "execution_stall"
 	routeOutcomeDeliveryChanged  = "delivery_changed"
 	routeOutcomeWorkspaceChanged = "workspace_changed"
 	routeOutcomeTestPassed       = "test_passed"
 	routeOutcomeTestFailed       = "test_failed"
 	routeOutcomeVerifierPassed   = "verifier_passed"
 	routeOutcomeVerifierFailed   = "verifier_failed"
+	routeOutcomeAnalysisProgress = "analysis_progress"
 	routeOutcomeNoProgress       = "no_progress"
 	routeOutcomeRunException     = "run_exception"
 	routeOutcomeNone             = "none"
@@ -58,6 +66,12 @@ const (
 	nextMinCapabilityPremiumReason  = "premium_reason"
 	nextMinCapabilityPremiumRecover = "premium_recover"
 	nextMinCapabilityPremiumAssess  = "premium_assess"
+
+	replanHypothesisNone       = "none"
+	replanHypothesisPending    = "pending"
+	replanHypothesisOpen       = "open"
+	replanHypothesisProgressed = "progressed"
+	replanHypothesisStale      = "stale"
 )
 
 // EpisodeConfig enables a small in-memory event projection for one task line.
@@ -103,62 +117,72 @@ type RouteOutcomeSummary struct {
 }
 
 type EpisodeState struct {
-	ID                          string
-	Version                     int
-	CallCount                   int
-	TotalCost                   float64
-	TotalTokens                 int
-	ToolCallCount               int
-	FileWriteCount              int
-	TestRunCount                int
-	TestPassedCount             int
-	TestFailedCount             int
-	DeliveryFileWriteCount      int
-	ExplorationEventCount       int
-	ImplementationProgressCount int
-	ValidationProgressCount     int
-	DeliveryProgressCount       int
-	CandidateProgressCount      int
-	StrongProgressCount         int
-	ExplorationSinceProgress    int
-	ReplanCount                 int
-	LLMCallsSinceReplan         int
-	ExplorationSinceReplan      int
-	LastReplanEventID           string
-	NoProgressEventCount        int
-	ActiveNoProgress            bool
-	EventsSinceProgress         int
-	LLMCallsSinceProgress       int
-	LengthPressureSinceProgress int
-	LastProgressEventID         string
-	LastProgressKind            string
-	VerifierReward              float64
-	CompletionReadiness         string
-	LastDeliveryEventID         string
-	NoProgressSeverity          string
-	LastModel                   string
-	LastBudgetAction            string
-	LastFinishReason            string
-	LastRouteTraceID            string
-	LastRouteOutcomeLabel       string
-	LastRouteOutcomeEventID     string
-	LastRouteOutcomeProgress    bool
-	LastRouteOutcomeEventCount  int
-	RouteOutcomeEventCount      int
-	RouteOutcomeProgressCount   int
-	RouteOutcomeNegativeCount   int
-	NextMinCapability           string
-	NextCapabilityReason        string
-	NextBudgetActionHint        string
-	LastFailureFingerprint      string
-	SameFailureFingerprintCount int
-	FailureFrontierSize         int
-	ConsecutiveLengthFinishes   int
-	RecentLengthFinishes        int
-	ConsecutiveErrors           int
-	RecentEvents                []EpisodeEvent
-	RecentRouteOutcomes         []RouteOutcomeSummary
-	SeenEventIDs                map[string]struct{}
+	ID                                         string
+	Version                                    int
+	CallCount                                  int
+	TotalCost                                  float64
+	TotalTokens                                int
+	ToolCallCount                              int
+	ExecutionStallCount                        int
+	ExecutionStallsSinceProgress               int
+	FileWriteCount                             int
+	TestRunCount                               int
+	TestPassedCount                            int
+	TestFailedCount                            int
+	DeliveryFileWriteCount                     int
+	ExplorationEventCount                      int
+	ImplementationProgressCount                int
+	ValidationProgressCount                    int
+	DeliveryProgressCount                      int
+	CandidateProgressCount                     int
+	StrongProgressCount                        int
+	ExplorationSinceProgress                   int
+	ReplanCount                                int
+	LLMCallsSinceReplan                        int
+	ExplorationSinceReplan                     int
+	LastReplanEventID                          string
+	ReplanHypothesisCount                      int
+	LastReplanHypothesisEventID                string
+	LastReplanHypothesis                       string
+	ReplanHypothesisStatus                     string
+	LLMCallsSinceHypothesis                    int
+	ExplorationSinceHypothesis                 int
+	NoProgressEventCount                       int
+	ActiveNoProgress                           bool
+	EventsSinceProgress                        int
+	LLMCallsSinceProgress                      int
+	LengthPressureSinceProgress                int
+	AnalysisApplicationAttemptsSinceProgress   int
+	AnalysisApplicationRecoveriesSinceProgress int
+	LastProgressEventID                        string
+	LastProgressKind                           string
+	VerifierReward                             float64
+	CompletionReadiness                        string
+	LastDeliveryEventID                        string
+	NoProgressSeverity                         string
+	LastModel                                  string
+	LastBudgetAction                           string
+	LastFinishReason                           string
+	LastRouteTraceID                           string
+	LastRouteOutcomeLabel                      string
+	LastRouteOutcomeEventID                    string
+	LastRouteOutcomeProgress                   bool
+	LastRouteOutcomeEventCount                 int
+	RouteOutcomeEventCount                     int
+	RouteOutcomeProgressCount                  int
+	RouteOutcomeNegativeCount                  int
+	NextMinCapability                          string
+	NextCapabilityReason                       string
+	NextBudgetActionHint                       string
+	LastFailureFingerprint                     string
+	SameFailureFingerprintCount                int
+	FailureFrontierSize                        int
+	ConsecutiveLengthFinishes                  int
+	RecentLengthFinishes                       int
+	ConsecutiveErrors                          int
+	RecentEvents                               []EpisodeEvent
+	RecentRouteOutcomes                        []RouteOutcomeSummary
+	SeenEventIDs                               map[string]struct{}
 }
 
 type EpisodeSession struct {
@@ -181,61 +205,71 @@ type EpisodeResolution struct {
 }
 
 type EpisodeSnapshot struct {
-	ID                          string
-	Version                     int
-	CallCount                   int
-	TotalCost                   float64
-	TotalTokens                 int
-	ToolCallCount               int
-	FileWriteCount              int
-	TestRunCount                int
-	TestPassedCount             int
-	TestFailedCount             int
-	DeliveryFileWriteCount      int
-	ExplorationEventCount       int
-	ImplementationProgressCount int
-	ValidationProgressCount     int
-	DeliveryProgressCount       int
-	CandidateProgressCount      int
-	StrongProgressCount         int
-	ExplorationSinceProgress    int
-	ReplanCount                 int
-	LLMCallsSinceReplan         int
-	ExplorationSinceReplan      int
-	LastReplanEventID           string
-	NoProgressEventCount        int
-	ActiveNoProgress            bool
-	EventsSinceProgress         int
-	LLMCallsSinceProgress       int
-	LengthPressureSinceProgress int
-	LastProgressEventID         string
-	LastProgressKind            string
-	VerifierReward              float64
-	CompletionReadiness         string
-	LastDeliveryEventID         string
-	NoProgressSeverity          string
-	LastModel                   string
-	LastBudgetAction            string
-	LastFinishReason            string
-	LastRouteTraceID            string
-	LastRouteOutcomeLabel       string
-	LastRouteOutcomeEventID     string
-	LastRouteOutcomeProgress    bool
-	LastRouteOutcomeEventCount  int
-	RouteOutcomeEventCount      int
-	RouteOutcomeProgressCount   int
-	RouteOutcomeNegativeCount   int
-	NextMinCapability           string
-	NextCapabilityReason        string
-	NextBudgetActionHint        string
-	LastFailureFingerprint      string
-	SameFailureFingerprintCount int
-	FailureFrontierSize         int
-	ConsecutiveLengthFinishes   int
-	RecentLengthFinishes        int
-	ConsecutiveErrors           int
-	RecentEvents                []EpisodeEvent
-	RecentRouteOutcomes         []RouteOutcomeSummary
+	ID                                         string
+	Version                                    int
+	CallCount                                  int
+	TotalCost                                  float64
+	TotalTokens                                int
+	ToolCallCount                              int
+	ExecutionStallCount                        int
+	ExecutionStallsSinceProgress               int
+	FileWriteCount                             int
+	TestRunCount                               int
+	TestPassedCount                            int
+	TestFailedCount                            int
+	DeliveryFileWriteCount                     int
+	ExplorationEventCount                      int
+	ImplementationProgressCount                int
+	ValidationProgressCount                    int
+	DeliveryProgressCount                      int
+	CandidateProgressCount                     int
+	StrongProgressCount                        int
+	ExplorationSinceProgress                   int
+	ReplanCount                                int
+	LLMCallsSinceReplan                        int
+	ExplorationSinceReplan                     int
+	LastReplanEventID                          string
+	ReplanHypothesisCount                      int
+	LastReplanHypothesisEventID                string
+	LastReplanHypothesis                       string
+	ReplanHypothesisStatus                     string
+	LLMCallsSinceHypothesis                    int
+	ExplorationSinceHypothesis                 int
+	NoProgressEventCount                       int
+	ActiveNoProgress                           bool
+	EventsSinceProgress                        int
+	LLMCallsSinceProgress                      int
+	LengthPressureSinceProgress                int
+	AnalysisApplicationAttemptsSinceProgress   int
+	AnalysisApplicationRecoveriesSinceProgress int
+	LastProgressEventID                        string
+	LastProgressKind                           string
+	VerifierReward                             float64
+	CompletionReadiness                        string
+	LastDeliveryEventID                        string
+	NoProgressSeverity                         string
+	LastModel                                  string
+	LastBudgetAction                           string
+	LastFinishReason                           string
+	LastRouteTraceID                           string
+	LastRouteOutcomeLabel                      string
+	LastRouteOutcomeEventID                    string
+	LastRouteOutcomeProgress                   bool
+	LastRouteOutcomeEventCount                 int
+	RouteOutcomeEventCount                     int
+	RouteOutcomeProgressCount                  int
+	RouteOutcomeNegativeCount                  int
+	NextMinCapability                          string
+	NextCapabilityReason                       string
+	NextBudgetActionHint                       string
+	LastFailureFingerprint                     string
+	SameFailureFingerprintCount                int
+	FailureFrontierSize                        int
+	ConsecutiveLengthFinishes                  int
+	RecentLengthFinishes                       int
+	ConsecutiveErrors                          int
+	RecentEvents                               []EpisodeEvent
+	RecentRouteOutcomes                        []RouteOutcomeSummary
 }
 
 func (s *SmartRouter) resolveEpisodeForRequest(req *http.Request, parsed *parsedRequest) EpisodeResolution {
@@ -522,6 +556,23 @@ func (s *SmartRouter) Record(record *plugin.AuditRecord) error {
 		Cost:         record.Cost,
 		TotalTokens:  record.TotalTokens,
 		Timestamp:    record.Timestamp,
+		Observation: map[string]any{
+			"trace_id":              record.TraceID,
+			"outcome":               episodeOutcome(record),
+			"model":                 record.Model,
+			"routed_model":          record.RoutedModel,
+			"pool":                  record.Pool,
+			"budget_action":         record.BudgetAction,
+			"route_max_tokens":      record.RouteMaxTokens,
+			"route_timeout_ms":      record.RouteTimeoutMs,
+			"finish_reason":         record.FinishReason,
+			"status":                record.Status,
+			"latency_ms":            record.LatencyMs,
+			"cost_usd":              record.Cost,
+			"total_tokens":          record.TotalTokens,
+			"routing_reason":        record.RoutingReason,
+			"route_context_summary": routeContextSummaryFromReason(record.RoutingReason),
+		},
 	}
 	if event.Model == "" {
 		event.Model = record.Model
@@ -649,20 +700,23 @@ func episodeEventFromTraceEntry(trace plugin.TraceEntry) EpisodeEvent {
 		TotalTokens:  trace.TotalTokens,
 		Timestamp:    timestamp,
 		Observation: map[string]any{
-			"trace_id":           trace.TraceID,
-			"outcome":            outcome,
-			"model":              trace.Model,
-			"routed_model":       trace.RoutedModel,
-			"pool":               trace.Pool,
-			"budget_action":      trace.BudgetAction,
-			"route_max_tokens":   trace.RouteMaxTokens,
-			"route_timeout_ms":   trace.RouteTimeoutMs,
-			"finish_reason":      trace.FinishReason,
-			"status":             trace.Status,
-			"latency_ms":         trace.LatencyMs,
-			"cost_usd":           trace.Cost,
-			"total_tokens":       trace.TotalTokens,
-			"routing_reason":     trace.RoutingReason,
+			"trace_id":         trace.TraceID,
+			"outcome":          outcome,
+			"model":            trace.Model,
+			"routed_model":     trace.RoutedModel,
+			"pool":             trace.Pool,
+			"budget_action":    trace.BudgetAction,
+			"route_max_tokens": trace.RouteMaxTokens,
+			"route_timeout_ms": trace.RouteTimeoutMs,
+			"finish_reason":    trace.FinishReason,
+			"status":           trace.Status,
+			"latency_ms":       trace.LatencyMs,
+			"cost_usd":         trace.Cost,
+			"total_tokens":     trace.TotalTokens,
+			"routing_reason":   trace.RoutingReason,
+			"route_context_summary": routeContextSummaryFromReason(
+				trace.RoutingReason,
+			),
 			"backfill_source":    "audit_trace",
 			"original_step_name": trace.StepName,
 		},
@@ -867,6 +921,9 @@ func closePendingRouteOutcomeBeforeNextRoute(state *EpisodeState, event EpisodeE
 	state.RouteOutcomeEventCount++
 	state.RouteOutcomeNegativeCount++
 	updateRecentRouteOutcome(state, routeOutcomeNoProgress, event.ID, false, true)
+	if state.LastRouteTraceID == state.LastReplanHypothesisEventID {
+		markReplanHypothesisStale(state)
+	}
 }
 
 func projectRouteOutcomeState(state *EpisodeState, event EpisodeEvent) {
@@ -888,6 +945,9 @@ func projectRouteOutcomeState(state *EpisodeState, event EpisodeEvent) {
 	}
 	if negative {
 		state.RouteOutcomeNegativeCount++
+		if state.LastReplanHypothesisEventID != "" {
+			markReplanHypothesisStale(state)
+		}
 	}
 }
 
@@ -930,6 +990,8 @@ func routeOutcomeFromEvent(state *EpisodeState, event EpisodeEvent) (string, boo
 	switch event.Kind {
 	case "tool_call":
 		return routeOutcomeToolCall, false, false
+	case "execution_stall":
+		return routeOutcomeExecutionStall, false, true
 	case "file_written", "file_modified":
 		if boolFromObservation(event.Observation, "delivery_target") {
 			return routeOutcomeDeliveryChanged, true, false
@@ -954,6 +1016,8 @@ func routeOutcomeFromEvent(state *EpisodeState, event EpisodeEvent) (string, boo
 			return routeOutcomeVerifierPassed, true, false
 		}
 		return routeOutcomeVerifierFailed, false, true
+	case "analysis_progress":
+		return routeOutcomeAnalysisProgress, boolFromObservation(event.Observation, "analysis_progress"), false
 	case "no_progress":
 		return routeOutcomeNoProgress, false, true
 	case "run_exception":
@@ -967,6 +1031,187 @@ func routeOutcomeLabelForSnapshot(snapshot EpisodeSnapshot) string {
 		return routeOutcomeNone
 	}
 	return valueOrDefault(snapshot.LastRouteOutcomeLabel, routeOutcomePending)
+}
+
+func routeContextSummaryFromReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	const marker = "ctx="
+	idx := strings.Index(reason, marker)
+	if idx == -1 {
+		return ""
+	}
+	rest := strings.TrimSpace(reason[idx+len(marker):])
+	if rest == "" {
+		return ""
+	}
+	if strings.HasPrefix(rest, `"`) {
+		for end := 1; end < len(rest); end++ {
+			if rest[end] != '"' {
+				continue
+			}
+			unquoted, err := strconv.Unquote(rest[:end+1])
+			if err == nil {
+				return compactDecisionText(unquoted, 160)
+			}
+		}
+	}
+	for _, sep := range []string{" | ", " budget_action=", " route_max_tokens=", " capability_floor "} {
+		if end := strings.Index(rest, sep); end >= 0 {
+			rest = rest[:end]
+			break
+		}
+	}
+	return compactDecisionText(strings.Trim(rest, ` "'`), 160)
+}
+
+func replanHypothesisFromEvent(event EpisodeEvent) string {
+	if event.Kind != "llm_call" || event.BudgetAction == budgetActionFreezeOrReplan || event.BudgetAction == budgetActionStopTrial {
+		return ""
+	}
+	if direct := stringFromObservation(event.Observation, "replan_hypothesis"); direct != "" {
+		return compactDecisionText(direct, 160)
+	}
+	if summary := stringFromObservation(event.Observation, "route_context_summary"); summary != "" {
+		return compactDecisionText(summary, 160)
+	}
+	return routeContextSummaryFromReason(stringFromObservation(event.Observation, "routing_reason"))
+}
+
+func startReplanHypothesisWindow(state *EpisodeState, event EpisodeEvent) {
+	if state == nil {
+		return
+	}
+	state.ReplanCount++
+	state.LastReplanEventID = event.ID
+	state.LLMCallsSinceReplan = 0
+	state.ExplorationSinceReplan = 0
+	state.LastReplanHypothesisEventID = ""
+	state.LastReplanHypothesis = ""
+	state.ReplanHypothesisStatus = replanHypothesisPending
+	state.LLMCallsSinceHypothesis = 0
+	state.ExplorationSinceHypothesis = 0
+}
+
+func recordReplanHypothesisFromEvent(state *EpisodeState, event EpisodeEvent) {
+	if state == nil || state.LastReplanEventID == "" {
+		return
+	}
+	if state.LastReplanHypothesisEventID != "" {
+		switch state.ReplanHypothesisStatus {
+		case replanHypothesisOpen, replanHypothesisStale:
+			hypothesis := replanHypothesisFromEvent(event)
+			if hypothesis != "" && hypothesis != state.LastReplanHypothesis {
+				state.ReplanHypothesisCount++
+				state.LastReplanHypothesis = hypothesis
+				state.LastReplanHypothesisEventID = event.ID
+			}
+			return
+		}
+	}
+	hypothesis := replanHypothesisFromEvent(event)
+	if hypothesis == "" {
+		return
+	}
+	if hypothesis != state.LastReplanHypothesis {
+		state.ReplanHypothesisCount++
+	}
+	state.LastReplanHypothesis = hypothesis
+	state.LastReplanHypothesisEventID = event.ID
+	state.ReplanHypothesisStatus = replanHypothesisOpen
+	state.LLMCallsSinceHypothesis = 0
+	state.ExplorationSinceHypothesis = 0
+}
+
+func markReplanHypothesisProgressed(state *EpisodeState) {
+	if state == nil {
+		return
+	}
+	if state.ReplanHypothesisStatus == replanHypothesisOpen ||
+		state.ReplanHypothesisStatus == replanHypothesisPending ||
+		state.ReplanHypothesisStatus == replanHypothesisStale {
+		state.ReplanHypothesisStatus = replanHypothesisProgressed
+		state.LLMCallsSinceHypothesis = 0
+		state.ExplorationSinceHypothesis = 0
+	}
+}
+
+func markReplanHypothesisStale(state *EpisodeState) {
+	if state == nil {
+		return
+	}
+	if state.ReplanHypothesisStatus == replanHypothesisOpen || state.ReplanHypothesisStatus == replanHypothesisPending {
+		state.ReplanHypothesisStatus = replanHypothesisStale
+	}
+}
+
+func hasOpenReplanHypothesis(state *EpisodeState) bool {
+	if state == nil || state.LastReplanEventID == "" || state.LastReplanHypothesis == "" {
+		return false
+	}
+	switch state.ReplanHypothesisStatus {
+	case replanHypothesisOpen:
+		return true
+	default:
+		return false
+	}
+}
+
+func replanHypothesisNeedsApplication(state *EpisodeState) bool {
+	if state == nil || state.LastReplanEventID == "" || state.LastReplanHypothesis == "" {
+		return false
+	}
+	if state.LastBudgetAction == budgetActionHypothesisApply {
+		return false
+	}
+	switch state.ReplanHypothesisStatus {
+	case replanHypothesisOpen, replanHypothesisStale:
+		return state.CandidateProgressCount == 0 && state.StrongProgressCount == 0
+	default:
+		return false
+	}
+}
+
+func hypothesisApplyLengthNeedsRecovery(state *EpisodeState) bool {
+	if state == nil || state.LastBudgetAction != budgetActionHypothesisApply {
+		return false
+	}
+	if state.LastFinishReason != "length" {
+		return false
+	}
+	if state.CandidateProgressCount > 0 || state.StrongProgressCount > 0 {
+		return false
+	}
+	label := routeOutcomeLabelForState(state)
+	return label == routeOutcomePending || label == routeOutcomeNoProgress || label == routeOutcomeNone
+}
+
+func executionStallNeedsRecovery(state *EpisodeState) bool {
+	if state == nil {
+		return false
+	}
+	return state.ExecutionStallsSinceProgress >= defaultExecutionStallRecoveryThreshold
+}
+
+func analysisProgressApplicationExhausted(state *EpisodeState) bool {
+	if state == nil {
+		return false
+	}
+	if state.LastProgressKind != routeOutcomeAnalysisProgress {
+		return false
+	}
+	return state.AnalysisApplicationAttemptsSinceProgress >= defaultAnalysisProgressApplicationAttemptLimit &&
+		state.AnalysisApplicationRecoveriesSinceProgress == 0
+}
+
+func analysisProgressRecoveryAwaitingOutcome(state *EpisodeState) bool {
+	if state == nil {
+		return false
+	}
+	if state.LastProgressKind != routeOutcomeAnalysisProgress {
+		return false
+	}
+	return state.AnalysisApplicationAttemptsSinceProgress >= defaultAnalysisProgressApplicationAttemptLimit &&
+		state.AnalysisApplicationRecoveriesSinceProgress > 0
 }
 
 func refreshNextCapability(state *EpisodeState) {
@@ -984,12 +1229,6 @@ func deriveNextCapability(state *EpisodeState) (string, string, string) {
 		return nextMinCapabilityUnknown, "empty_episode_state", ""
 	}
 
-	severity := valueOrDefault(state.NoProgressSeverity, "none")
-	if severity == "blocked" || severity == "stale" || state.ActiveNoProgress {
-		return nextMinCapabilityPremiumRecover,
-			"episode_no_progress_" + severity,
-			budgetActionPremiumRecover
-	}
 	if state.LastFailureFingerprint != "" && state.SameFailureFingerprintCount >= defaultRepeatedErrorThreshold {
 		return nextMinCapabilityPremiumRecover,
 			"repeated_test_failure_frontier",
@@ -1014,14 +1253,70 @@ func deriveNextCapability(state *EpisodeState) (string, string, string) {
 		return nextMinCapabilityPremiumAssess,
 			"validation_passed_assess_hidden_gap",
 			budgetActionPremiumReason
-	case completionReadinessDeliveryCandidate:
+	}
+
+	if hypothesisApplyLengthNeedsRecovery(state) {
+		return nextMinCapabilityPremiumRecover,
+			"hypothesis_apply_length_truncated",
+			budgetActionPremiumRecover
+	}
+
+	if executionStallNeedsRecovery(state) {
+		return nextMinCapabilityPremiumRecover,
+			"execution_stall_needs_recovery",
+			budgetActionPremiumRecover
+	}
+
+	if analysisProgressApplicationExhausted(state) {
+		return nextMinCapabilityPremiumRecover,
+			"analysis_progress_application_exhausted",
+			budgetActionPremiumRecover
+	}
+
+	if deliveryCandidateNeedsDelivery(state, readiness) {
+		if deliveryCandidateFloorExhausted(state, readiness) {
+			return nextMinCapabilityPremiumRecover,
+				"delivery_candidate_floor_exhausted",
+				budgetActionPremiumRecover
+		}
+		return nextMinCapabilityCheapExecute,
+			"delivery_candidate_needs_delivery",
+			budgetActionCheapExecute
+	}
+
+	if replanHypothesisNeedsApplication(state) {
+		return nextMinCapabilityCheapExecute,
+			"replan_hypothesis_needs_validation",
+			budgetActionHypothesisApply
+	}
+
+	severity := valueOrDefault(state.NoProgressSeverity, "none")
+	if severity == "blocked" || severity == "stale" || state.ActiveNoProgress {
+		return nextMinCapabilityPremiumRecover,
+			"episode_no_progress_" + severity,
+			budgetActionPremiumRecover
+	}
+
+	if readiness == completionReadinessDeliveryCandidate {
 		return nextMinCapabilityCheapExecute,
 			"target_changed_needs_validation",
 			budgetActionCheapExecute
 	}
 
+	if analysisProgressRecoveryAwaitingOutcome(state) {
+		return nextMinCapabilityCheapProbe,
+			"analysis_progress_recovery_awaiting_outcome",
+			budgetActionCheapProbe
+	}
+
+	if state.LastProgressKind == routeOutcomeAnalysisProgress {
+		return nextMinCapabilityCheapExecute,
+			"analysis_progress_needs_application",
+			budgetActionCheapExecute
+	}
+
 	switch routeOutcomeLabelForState(state) {
-	case routeOutcomeVerifierFailed, routeOutcomeRunException, routeOutcomeNoProgress:
+	case routeOutcomeVerifierFailed, routeOutcomeRunException, routeOutcomeNoProgress, routeOutcomeExecutionStall:
 		return nextMinCapabilityPremiumRecover,
 			"last_route_outcome_negative",
 			budgetActionPremiumRecover
@@ -1041,6 +1336,10 @@ func deriveNextCapability(state *EpisodeState) (string, string, string) {
 		return nextMinCapabilityCheapExecute,
 			"last_route_changed_files_needs_validation",
 			budgetActionCheapExecute
+	case routeOutcomeAnalysisProgress:
+		return nextMinCapabilityCheapExecute,
+			"analysis_progress_needs_application",
+			budgetActionCheapExecute
 	}
 
 	if severity == "watch" {
@@ -1051,6 +1350,73 @@ func deriveNextCapability(state *EpisodeState) (string, string, string) {
 	return nextMinCapabilityCheapProbe,
 		"no_blocking_outcome",
 		budgetActionCheapProbe
+}
+
+func deliveryCandidateNeedsDelivery(state *EpisodeState, readiness string) bool {
+	if state == nil || readiness != completionReadinessDeliveryCandidate {
+		return false
+	}
+	if state.DeliveryFileWriteCount > 0 || state.DeliveryProgressCount > 0 {
+		return false
+	}
+	if state.ValidationProgressCount > 0 || state.TestRunCount > 0 {
+		return false
+	}
+	if state.ImplementationProgressCount < defaultDeliveryCandidateProgressThreshold {
+		return false
+	}
+	return state.LLMCallsSinceProgress >= defaultDeliveryCandidateIdleCallThreshold ||
+		state.ExplorationSinceProgress >= defaultDeliveryCandidateIdleCallThreshold ||
+		state.LengthPressureSinceProgress >= defaultEpisodeLengthWindowThreshold
+}
+
+func deliveryCandidateFloorExhausted(state *EpisodeState, readiness string) bool {
+	if !deliveryCandidateNeedsDelivery(state, readiness) {
+		return false
+	}
+	return recentRuleCallCount(state.RecentEvents, "episode_delivery_candidate_floor") >= defaultDeliveryCandidateFloorAttemptLimit
+}
+
+func recentRuleCallCount(events []EpisodeEvent, ruleID string) int {
+	if ruleID == "" {
+		return 0
+	}
+	count := 0
+	for _, event := range events {
+		if llmCallFromRule(event, ruleID) {
+			count++
+		}
+	}
+	return count
+}
+
+func llmCallFromRule(event EpisodeEvent, ruleID string) bool {
+	if ruleID == "" || event.Kind != "llm_call" {
+		return false
+	}
+	reason := stringFromObservation(event.Observation, "routing_reason")
+	return routingReasonHasRuleID(reason, ruleID)
+}
+
+func routingReasonHasRuleID(reason, ruleID string) bool {
+	if ruleID == "" {
+		return false
+	}
+	needle := "rule_id=" + ruleID
+	index := strings.Index(reason, needle)
+	if index < 0 {
+		return false
+	}
+	end := index + len(needle)
+	if end >= len(reason) {
+		return true
+	}
+	switch reason[end] {
+	case ' ', ';', ',', '\t', '\n', '\r':
+		return true
+	default:
+		return false
+	}
 }
 
 func routeOutcomeLabelForState(state *EpisodeState) string {
@@ -1108,17 +1474,28 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 			state.ConsecutiveErrors = 0
 		}
 		state.LLMCallsSinceProgress++
+		if llmCallFromRule(event, "episode_analysis_progress_application") {
+			state.AnalysisApplicationAttemptsSinceProgress++
+		}
+		if llmCallFromRule(event, "episode_analysis_progress_application_recovery") {
+			state.AnalysisApplicationRecoveriesSinceProgress++
+		}
 		beginRouteOutcomeWindow(state, event)
 		if event.BudgetAction == budgetActionFreezeOrReplan {
-			state.ReplanCount++
-			state.LastReplanEventID = event.ID
-			state.LLMCallsSinceReplan = 0
-			state.ExplorationSinceReplan = 0
+			startReplanHypothesisWindow(state, event)
 		} else if state.LastReplanEventID != "" {
 			state.LLMCallsSinceReplan++
+			if state.LastReplanHypothesisEventID != "" {
+				state.LLMCallsSinceHypothesis++
+			}
+			recordReplanHypothesisFromEvent(state, event)
 		}
 	case "tool_call":
 		state.ToolCallCount++
+	case "execution_stall":
+		state.ExecutionStallCount++
+		state.ExecutionStallsSinceProgress++
+		markReplanHypothesisStale(state)
 	case "file_written", "file_modified":
 		state.FileWriteCount++
 		deliveryProgress = isDeliveryProgressEvent(event)
@@ -1173,9 +1550,11 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 		} else {
 			state.CompletionReadiness = completionReadinessVerifierFailed
 		}
+	case "analysis_progress":
 	case "no_progress":
 		state.NoProgressEventCount++
 		state.ActiveNoProgress = true
+		markReplanHypothesisStale(state)
 	}
 	if event.Kind != "llm_call" {
 		projectRouteOutcomeState(state, event)
@@ -1186,6 +1565,9 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 		state.ExplorationSinceProgress++
 		if state.LastReplanEventID != "" {
 			state.ExplorationSinceReplan++
+		}
+		if state.LastReplanHypothesisEventID != "" {
+			state.ExplorationSinceHypothesis++
 		}
 	}
 	if implementationProgress {
@@ -1209,9 +1591,13 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 		state.LLMCallsSinceProgress = 0
 		state.LengthPressureSinceProgress = 0
 		state.ExplorationSinceProgress = 0
+		state.ExecutionStallsSinceProgress = 0
+		state.AnalysisApplicationAttemptsSinceProgress = 0
+		state.AnalysisApplicationRecoveriesSinceProgress = 0
 		state.LastReplanEventID = ""
 		state.LLMCallsSinceReplan = 0
 		state.ExplorationSinceReplan = 0
+		markReplanHypothesisProgressed(state)
 		state.ConsecutiveLengthFinishes = 0
 		state.ActiveNoProgress = false
 		if clearsFailureFrontier(event) {
@@ -1264,61 +1650,71 @@ func snapshotFromEpisodeState(state *EpisodeState) EpisodeSnapshot {
 	routeOutcomes := make([]RouteOutcomeSummary, len(state.RecentRouteOutcomes))
 	copy(routeOutcomes, state.RecentRouteOutcomes)
 	return EpisodeSnapshot{
-		ID:                          state.ID,
-		Version:                     state.Version,
-		CallCount:                   state.CallCount,
-		TotalCost:                   state.TotalCost,
-		TotalTokens:                 state.TotalTokens,
-		ToolCallCount:               state.ToolCallCount,
-		FileWriteCount:              state.FileWriteCount,
-		TestRunCount:                state.TestRunCount,
-		TestPassedCount:             state.TestPassedCount,
-		TestFailedCount:             state.TestFailedCount,
-		DeliveryFileWriteCount:      state.DeliveryFileWriteCount,
-		ExplorationEventCount:       state.ExplorationEventCount,
-		ImplementationProgressCount: state.ImplementationProgressCount,
-		ValidationProgressCount:     state.ValidationProgressCount,
-		DeliveryProgressCount:       state.DeliveryProgressCount,
-		CandidateProgressCount:      state.CandidateProgressCount,
-		StrongProgressCount:         state.StrongProgressCount,
-		ExplorationSinceProgress:    state.ExplorationSinceProgress,
-		ReplanCount:                 state.ReplanCount,
-		LLMCallsSinceReplan:         state.LLMCallsSinceReplan,
-		ExplorationSinceReplan:      state.ExplorationSinceReplan,
-		LastReplanEventID:           state.LastReplanEventID,
-		NoProgressEventCount:        state.NoProgressEventCount,
-		ActiveNoProgress:            state.ActiveNoProgress,
-		EventsSinceProgress:         state.EventsSinceProgress,
-		LLMCallsSinceProgress:       state.LLMCallsSinceProgress,
-		LengthPressureSinceProgress: state.LengthPressureSinceProgress,
-		LastProgressEventID:         state.LastProgressEventID,
-		LastProgressKind:            state.LastProgressKind,
-		VerifierReward:              state.VerifierReward,
-		CompletionReadiness:         state.CompletionReadiness,
-		LastDeliveryEventID:         state.LastDeliveryEventID,
-		NoProgressSeverity:          state.NoProgressSeverity,
-		LastModel:                   state.LastModel,
-		LastBudgetAction:            state.LastBudgetAction,
-		LastFinishReason:            state.LastFinishReason,
-		LastRouteTraceID:            state.LastRouteTraceID,
-		LastRouteOutcomeLabel:       state.LastRouteOutcomeLabel,
-		LastRouteOutcomeEventID:     state.LastRouteOutcomeEventID,
-		LastRouteOutcomeProgress:    state.LastRouteOutcomeProgress,
-		LastRouteOutcomeEventCount:  state.LastRouteOutcomeEventCount,
-		RouteOutcomeEventCount:      state.RouteOutcomeEventCount,
-		RouteOutcomeProgressCount:   state.RouteOutcomeProgressCount,
-		RouteOutcomeNegativeCount:   state.RouteOutcomeNegativeCount,
-		NextMinCapability:           state.NextMinCapability,
-		NextCapabilityReason:        state.NextCapabilityReason,
-		NextBudgetActionHint:        state.NextBudgetActionHint,
-		LastFailureFingerprint:      state.LastFailureFingerprint,
-		SameFailureFingerprintCount: state.SameFailureFingerprintCount,
-		FailureFrontierSize:         state.FailureFrontierSize,
-		ConsecutiveLengthFinishes:   state.ConsecutiveLengthFinishes,
-		RecentLengthFinishes:        state.RecentLengthFinishes,
-		ConsecutiveErrors:           state.ConsecutiveErrors,
-		RecentEvents:                recent,
-		RecentRouteOutcomes:         routeOutcomes,
+		ID:                                         state.ID,
+		Version:                                    state.Version,
+		CallCount:                                  state.CallCount,
+		TotalCost:                                  state.TotalCost,
+		TotalTokens:                                state.TotalTokens,
+		ToolCallCount:                              state.ToolCallCount,
+		ExecutionStallCount:                        state.ExecutionStallCount,
+		ExecutionStallsSinceProgress:               state.ExecutionStallsSinceProgress,
+		FileWriteCount:                             state.FileWriteCount,
+		TestRunCount:                               state.TestRunCount,
+		TestPassedCount:                            state.TestPassedCount,
+		TestFailedCount:                            state.TestFailedCount,
+		DeliveryFileWriteCount:                     state.DeliveryFileWriteCount,
+		ExplorationEventCount:                      state.ExplorationEventCount,
+		ImplementationProgressCount:                state.ImplementationProgressCount,
+		ValidationProgressCount:                    state.ValidationProgressCount,
+		DeliveryProgressCount:                      state.DeliveryProgressCount,
+		CandidateProgressCount:                     state.CandidateProgressCount,
+		StrongProgressCount:                        state.StrongProgressCount,
+		ExplorationSinceProgress:                   state.ExplorationSinceProgress,
+		ReplanCount:                                state.ReplanCount,
+		LLMCallsSinceReplan:                        state.LLMCallsSinceReplan,
+		ExplorationSinceReplan:                     state.ExplorationSinceReplan,
+		LastReplanEventID:                          state.LastReplanEventID,
+		ReplanHypothesisCount:                      state.ReplanHypothesisCount,
+		LastReplanHypothesisEventID:                state.LastReplanHypothesisEventID,
+		LastReplanHypothesis:                       state.LastReplanHypothesis,
+		ReplanHypothesisStatus:                     state.ReplanHypothesisStatus,
+		LLMCallsSinceHypothesis:                    state.LLMCallsSinceHypothesis,
+		ExplorationSinceHypothesis:                 state.ExplorationSinceHypothesis,
+		NoProgressEventCount:                       state.NoProgressEventCount,
+		ActiveNoProgress:                           state.ActiveNoProgress,
+		EventsSinceProgress:                        state.EventsSinceProgress,
+		LLMCallsSinceProgress:                      state.LLMCallsSinceProgress,
+		LengthPressureSinceProgress:                state.LengthPressureSinceProgress,
+		AnalysisApplicationAttemptsSinceProgress:   state.AnalysisApplicationAttemptsSinceProgress,
+		AnalysisApplicationRecoveriesSinceProgress: state.AnalysisApplicationRecoveriesSinceProgress,
+		LastProgressEventID:                        state.LastProgressEventID,
+		LastProgressKind:                           state.LastProgressKind,
+		VerifierReward:                             state.VerifierReward,
+		CompletionReadiness:                        state.CompletionReadiness,
+		LastDeliveryEventID:                        state.LastDeliveryEventID,
+		NoProgressSeverity:                         state.NoProgressSeverity,
+		LastModel:                                  state.LastModel,
+		LastBudgetAction:                           state.LastBudgetAction,
+		LastFinishReason:                           state.LastFinishReason,
+		LastRouteTraceID:                           state.LastRouteTraceID,
+		LastRouteOutcomeLabel:                      state.LastRouteOutcomeLabel,
+		LastRouteOutcomeEventID:                    state.LastRouteOutcomeEventID,
+		LastRouteOutcomeProgress:                   state.LastRouteOutcomeProgress,
+		LastRouteOutcomeEventCount:                 state.LastRouteOutcomeEventCount,
+		RouteOutcomeEventCount:                     state.RouteOutcomeEventCount,
+		RouteOutcomeProgressCount:                  state.RouteOutcomeProgressCount,
+		RouteOutcomeNegativeCount:                  state.RouteOutcomeNegativeCount,
+		NextMinCapability:                          state.NextMinCapability,
+		NextCapabilityReason:                       state.NextCapabilityReason,
+		NextBudgetActionHint:                       state.NextBudgetActionHint,
+		LastFailureFingerprint:                     state.LastFailureFingerprint,
+		SameFailureFingerprintCount:                state.SameFailureFingerprintCount,
+		FailureFrontierSize:                        state.FailureFrontierSize,
+		ConsecutiveLengthFinishes:                  state.ConsecutiveLengthFinishes,
+		RecentLengthFinishes:                       state.RecentLengthFinishes,
+		ConsecutiveErrors:                          state.ConsecutiveErrors,
+		RecentEvents:                               recent,
+		RecentRouteOutcomes:                        routeOutcomes,
 	}
 }
 
@@ -1342,8 +1738,10 @@ func (s *SmartRouter) renderEpisodeSnapshot(snapshot EpisodeSnapshot) string {
 			valueOrUnknown(snapshot.LastFinishReason),
 		),
 		fmt.Sprintf(
-			"progress tools=%d file_writes=%d test_runs=%d test_passed=%d test_failed=%d exploration=%d implementation=%d validation=%d delivery=%d candidate=%d strong=%d exploration_since_progress=%d no_progress_events=%d active_no_progress=%t no_progress=%s events_since_progress=%d llm_since_progress=%d length_since_progress=%d last_progress=%s verifier_reward=%.3f",
+			"progress tools=%d execution_stalls=%d execution_stalls_since_progress=%d file_writes=%d test_runs=%d test_passed=%d test_failed=%d exploration=%d implementation=%d validation=%d delivery=%d candidate=%d strong=%d exploration_since_progress=%d analysis_apply_attempts_since_progress=%d analysis_apply_recoveries_since_progress=%d no_progress_events=%d active_no_progress=%t no_progress=%s events_since_progress=%d llm_since_progress=%d length_since_progress=%d last_progress=%s verifier_reward=%.3f",
 			snapshot.ToolCallCount,
+			snapshot.ExecutionStallCount,
+			snapshot.ExecutionStallsSinceProgress,
 			snapshot.FileWriteCount,
 			snapshot.TestRunCount,
 			snapshot.TestPassedCount,
@@ -1355,6 +1753,8 @@ func (s *SmartRouter) renderEpisodeSnapshot(snapshot EpisodeSnapshot) string {
 			snapshot.CandidateProgressCount,
 			snapshot.StrongProgressCount,
 			snapshot.ExplorationSinceProgress,
+			snapshot.AnalysisApplicationAttemptsSinceProgress,
+			snapshot.AnalysisApplicationRecoveriesSinceProgress,
 			snapshot.NoProgressEventCount,
 			snapshot.ActiveNoProgress,
 			valueOrDefault(snapshot.NoProgressSeverity, "none"),
@@ -1390,6 +1790,15 @@ func (s *SmartRouter) renderEpisodeSnapshot(snapshot EpisodeSnapshot) string {
 			snapshot.LLMCallsSinceReplan,
 			snapshot.ExplorationSinceReplan,
 			valueOrUnknown(snapshot.LastReplanEventID),
+		),
+		fmt.Sprintf(
+			"replan_hypothesis status=%s count=%d event=%s llm_since_hypothesis=%d exploration_since_hypothesis=%d summary=%q",
+			valueOrDefault(snapshot.ReplanHypothesisStatus, replanHypothesisNone),
+			snapshot.ReplanHypothesisCount,
+			valueOrUnknown(snapshot.LastReplanHypothesisEventID),
+			snapshot.LLMCallsSinceHypothesis,
+			snapshot.ExplorationSinceHypothesis,
+			compactDecisionText(snapshot.LastReplanHypothesis, 160),
 		),
 		fmt.Sprintf(
 			"failure_frontier size=%d same_failure_count=%d last_failure=%s",
@@ -1469,59 +1878,69 @@ func renderEpisodeStateJSON(snapshot EpisodeSnapshot) string {
 
 func episodeStatePayload(snapshot EpisodeSnapshot) map[string]any {
 	payload := map[string]any{
-		"episode_id":                     snapshot.ID,
-		"state_version":                  snapshot.Version,
-		"call_count":                     snapshot.CallCount,
-		"total_cost":                     snapshot.TotalCost,
-		"total_tokens":                   snapshot.TotalTokens,
-		"tool_call_count":                snapshot.ToolCallCount,
-		"file_write_count":               snapshot.FileWriteCount,
-		"test_run_count":                 snapshot.TestRunCount,
-		"test_passed_count":              snapshot.TestPassedCount,
-		"test_failed_count":              snapshot.TestFailedCount,
-		"delivery_file_write_count":      snapshot.DeliveryFileWriteCount,
-		"exploration_event_count":        snapshot.ExplorationEventCount,
-		"implementation_progress_count":  snapshot.ImplementationProgressCount,
-		"validation_progress_count":      snapshot.ValidationProgressCount,
-		"delivery_progress_count":        snapshot.DeliveryProgressCount,
-		"candidate_progress_count":       snapshot.CandidateProgressCount,
-		"strong_progress_count":          snapshot.StrongProgressCount,
-		"exploration_since_progress":     snapshot.ExplorationSinceProgress,
-		"replan_count":                   snapshot.ReplanCount,
-		"llm_calls_since_replan":         snapshot.LLMCallsSinceReplan,
-		"exploration_since_replan":       snapshot.ExplorationSinceReplan,
-		"last_replan_event_id":           snapshot.LastReplanEventID,
-		"no_progress_event_count":        snapshot.NoProgressEventCount,
-		"active_no_progress":             snapshot.ActiveNoProgress,
-		"events_since_progress":          snapshot.EventsSinceProgress,
-		"llm_calls_since_progress":       snapshot.LLMCallsSinceProgress,
-		"length_pressure_since_progress": snapshot.LengthPressureSinceProgress,
-		"last_progress_event_id":         snapshot.LastProgressEventID,
-		"last_progress_kind":             snapshot.LastProgressKind,
-		"verifier_reward":                snapshot.VerifierReward,
-		"completion_readiness":           valueOrDefault(snapshot.CompletionReadiness, completionReadinessNone),
-		"last_delivery_event_id":         snapshot.LastDeliveryEventID,
-		"no_progress_severity":           valueOrDefault(snapshot.NoProgressSeverity, "none"),
-		"last_model":                     snapshot.LastModel,
-		"last_budget_action":             snapshot.LastBudgetAction,
-		"last_finish_reason":             snapshot.LastFinishReason,
-		"last_route_trace_id":            snapshot.LastRouteTraceID,
-		"last_route_outcome_label":       routeOutcomeLabelForSnapshot(snapshot),
-		"last_route_outcome_event_id":    snapshot.LastRouteOutcomeEventID,
-		"last_route_outcome_progress":    snapshot.LastRouteOutcomeProgress,
-		"last_route_outcome_event_count": snapshot.LastRouteOutcomeEventCount,
-		"route_outcome_event_count":      snapshot.RouteOutcomeEventCount,
-		"route_outcome_progress_count":   snapshot.RouteOutcomeProgressCount,
-		"route_outcome_negative_count":   snapshot.RouteOutcomeNegativeCount,
-		"next_min_capability":            valueOrDefault(snapshot.NextMinCapability, nextMinCapabilityUnknown),
-		"next_capability_reason":         snapshot.NextCapabilityReason,
-		"next_budget_action_hint":        snapshot.NextBudgetActionHint,
-		"last_failure_fingerprint":       snapshot.LastFailureFingerprint,
-		"same_failure_fingerprint_count": snapshot.SameFailureFingerprintCount,
-		"failure_frontier_size":          snapshot.FailureFrontierSize,
-		"consecutive_length_finishes":    snapshot.ConsecutiveLengthFinishes,
-		"recent_length_finishes":         snapshot.RecentLengthFinishes,
-		"consecutive_errors":             snapshot.ConsecutiveErrors,
+		"episode_id":                                     snapshot.ID,
+		"state_version":                                  snapshot.Version,
+		"call_count":                                     snapshot.CallCount,
+		"total_cost":                                     snapshot.TotalCost,
+		"total_tokens":                                   snapshot.TotalTokens,
+		"tool_call_count":                                snapshot.ToolCallCount,
+		"execution_stall_count":                          snapshot.ExecutionStallCount,
+		"execution_stalls_since_progress":                snapshot.ExecutionStallsSinceProgress,
+		"file_write_count":                               snapshot.FileWriteCount,
+		"test_run_count":                                 snapshot.TestRunCount,
+		"test_passed_count":                              snapshot.TestPassedCount,
+		"test_failed_count":                              snapshot.TestFailedCount,
+		"delivery_file_write_count":                      snapshot.DeliveryFileWriteCount,
+		"exploration_event_count":                        snapshot.ExplorationEventCount,
+		"implementation_progress_count":                  snapshot.ImplementationProgressCount,
+		"validation_progress_count":                      snapshot.ValidationProgressCount,
+		"delivery_progress_count":                        snapshot.DeliveryProgressCount,
+		"candidate_progress_count":                       snapshot.CandidateProgressCount,
+		"strong_progress_count":                          snapshot.StrongProgressCount,
+		"exploration_since_progress":                     snapshot.ExplorationSinceProgress,
+		"replan_count":                                   snapshot.ReplanCount,
+		"llm_calls_since_replan":                         snapshot.LLMCallsSinceReplan,
+		"exploration_since_replan":                       snapshot.ExplorationSinceReplan,
+		"last_replan_event_id":                           snapshot.LastReplanEventID,
+		"replan_hypothesis_count":                        snapshot.ReplanHypothesisCount,
+		"last_replan_hypothesis_event_id":                snapshot.LastReplanHypothesisEventID,
+		"last_replan_hypothesis":                         snapshot.LastReplanHypothesis,
+		"replan_hypothesis_status":                       valueOrDefault(snapshot.ReplanHypothesisStatus, replanHypothesisNone),
+		"llm_calls_since_replan_hypothesis":              snapshot.LLMCallsSinceHypothesis,
+		"exploration_since_replan_hypothesis":            snapshot.ExplorationSinceHypothesis,
+		"no_progress_event_count":                        snapshot.NoProgressEventCount,
+		"active_no_progress":                             snapshot.ActiveNoProgress,
+		"events_since_progress":                          snapshot.EventsSinceProgress,
+		"llm_calls_since_progress":                       snapshot.LLMCallsSinceProgress,
+		"length_pressure_since_progress":                 snapshot.LengthPressureSinceProgress,
+		"analysis_application_attempts_since_progress":   snapshot.AnalysisApplicationAttemptsSinceProgress,
+		"analysis_application_recoveries_since_progress": snapshot.AnalysisApplicationRecoveriesSinceProgress,
+		"last_progress_event_id":                         snapshot.LastProgressEventID,
+		"last_progress_kind":                             snapshot.LastProgressKind,
+		"verifier_reward":                                snapshot.VerifierReward,
+		"completion_readiness":                           valueOrDefault(snapshot.CompletionReadiness, completionReadinessNone),
+		"last_delivery_event_id":                         snapshot.LastDeliveryEventID,
+		"no_progress_severity":                           valueOrDefault(snapshot.NoProgressSeverity, "none"),
+		"last_model":                                     snapshot.LastModel,
+		"last_budget_action":                             snapshot.LastBudgetAction,
+		"last_finish_reason":                             snapshot.LastFinishReason,
+		"last_route_trace_id":                            snapshot.LastRouteTraceID,
+		"last_route_outcome_label":                       routeOutcomeLabelForSnapshot(snapshot),
+		"last_route_outcome_event_id":                    snapshot.LastRouteOutcomeEventID,
+		"last_route_outcome_progress":                    snapshot.LastRouteOutcomeProgress,
+		"last_route_outcome_event_count":                 snapshot.LastRouteOutcomeEventCount,
+		"route_outcome_event_count":                      snapshot.RouteOutcomeEventCount,
+		"route_outcome_progress_count":                   snapshot.RouteOutcomeProgressCount,
+		"route_outcome_negative_count":                   snapshot.RouteOutcomeNegativeCount,
+		"next_min_capability":                            valueOrDefault(snapshot.NextMinCapability, nextMinCapabilityUnknown),
+		"next_capability_reason":                         snapshot.NextCapabilityReason,
+		"next_budget_action_hint":                        snapshot.NextBudgetActionHint,
+		"last_failure_fingerprint":                       snapshot.LastFailureFingerprint,
+		"same_failure_fingerprint_count":                 snapshot.SameFailureFingerprintCount,
+		"failure_frontier_size":                          snapshot.FailureFrontierSize,
+		"consecutive_length_finishes":                    snapshot.ConsecutiveLengthFinishes,
+		"recent_length_finishes":                         snapshot.RecentLengthFinishes,
+		"consecutive_errors":                             snapshot.ConsecutiveErrors,
 	}
 	if len(snapshot.RecentEvents) > 0 {
 		recent := make([]map[string]any, 0, len(snapshot.RecentEvents))
@@ -1540,7 +1959,11 @@ func episodeStatePayload(snapshot EpisodeSnapshot) map[string]any {
 				"latency_ms":         event.LatencyMs,
 				"progress_tier":      stringFromObservation(event.Observation, "progress_tier"),
 				"effective_progress": boolFromObservation(event.Observation, "effective_progress"),
-				"evidence_refs":      event.EvidenceRefs,
+				"route_context_summary": stringFromObservation(
+					event.Observation,
+					"route_context_summary",
+				),
+				"evidence_refs": event.EvidenceRefs,
 			})
 		}
 		payload["recent_events"] = recent
@@ -2160,7 +2583,7 @@ func countLengthFinishes(events []EpisodeEvent) int {
 func countRecentEpisodeErrors(events []EpisodeEvent) int {
 	count := 0
 	for _, event := range events {
-		if event.Status >= 400 || event.Outcome == "error" || event.Kind == "run_exception" {
+		if event.Status >= 400 || event.Outcome == "error" || event.Kind == "run_exception" || event.Kind == "execution_stall" {
 			count++
 		}
 	}
@@ -2204,6 +2627,8 @@ func isStrongProgressEvent(event EpisodeEvent) bool {
 		return intFromObservation(event.Observation, "failed_count") == 0
 	case "verifier_result":
 		return floatFromObservation(event.Observation, "reward") > 0
+	case "analysis_progress":
+		return boolFromObservation(event.Observation, "analysis_progress")
 	default:
 		return false
 	}

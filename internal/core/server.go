@@ -806,6 +806,8 @@ func validateEpisodeEvent(event plugin.EpisodeEvent) error {
 		"test_failed",
 		"test_passed",
 		"verifier_result",
+		"analysis_progress",
+		"execution_stall",
 		"no_progress",
 		"run_exception":
 	default:

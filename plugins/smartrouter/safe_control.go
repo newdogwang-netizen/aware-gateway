@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/aware/gateway/internal/plugin"
 )
@@ -20,6 +21,7 @@ const (
 	defaultLongExplorationThreshold      = 12
 	defaultLongExplorationCallThreshold  = 12
 	defaultPostReplanNoProgressCallLimit = 3
+	defaultPendingRouteOutcomeGrace      = 30 * time.Second
 )
 
 // SafeControlConfig enables a local high-confidence routing layer before the
@@ -68,7 +70,7 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 	obs := s.observeSafeControlState(req, parsed)
 	message := normalizeForRules(parsed.LatestUserMsg)
 
-	if decision, history, ok := s.episodeStopGateDecision(req, cfg); ok {
+	if decision, history, ok := s.episodeStopGateDecision(req, cfg, parsed); ok {
 		return decision, history, true
 	}
 
@@ -109,6 +111,10 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 	}
 
 	if decision, history, ok := s.episodeDeliveryStateControlDecision(req); ok {
+		return decision, history, true
+	}
+
+	if decision, history, ok := s.episodePriorityStateControlDecision(req); ok {
 		return decision, history, true
 	}
 
@@ -186,7 +192,7 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 	return nil, nil, false
 }
 
-func (s *SmartRouter) episodeStopGateDecision(req *http.Request, cfg SafeControlConfig) (*plugin.RoutingDecision, *DecisionResponse, bool) {
+func (s *SmartRouter) episodeStopGateDecision(req *http.Request, cfg SafeControlConfig, parsed *parsedRequest) (*plugin.RoutingDecision, *DecisionResponse, bool) {
 	episodeCfg := s.episodeConfig()
 	if !episodeCfg.Enabled {
 		return nil, nil, false
@@ -209,17 +215,12 @@ func (s *SmartRouter) episodeStopGateDecision(req *http.Request, cfg SafeControl
 		)
 	}
 
-	if shouldStopPostReplanNoProgress(snapshot, cfg) {
-		return s.localStopGateRoute(
-			req,
-			"episode_replan_no_progress_stop_gate",
-			"gateway_replan_no_progress_stop_gate",
-			"aware-gateway stop gate: bounded replan produced no effective progress",
-			0.96,
-			episodePostReplanStopEvidence(snapshot, cfg),
-			"bounded replan produced no effective progress",
-			"stop trial after bounded replan produced no progress",
-		)
+	if shouldRecoverHypothesisApplyLength(snapshot) {
+		return nil, nil, false
+	}
+
+	if shouldRecoverExecutionStall(snapshot) {
+		return nil, nil, false
 	}
 
 	if shouldStopCostWithoutVerifier(snapshot, cfg) {
@@ -232,6 +233,23 @@ func (s *SmartRouter) episodeStopGateDecision(req *http.Request, cfg SafeControl
 			episodeCostStopEvidence(snapshot, cfg),
 			"cost threshold exceeded without verifier proximity",
 			"stop trial before spending past cost gate",
+		)
+	}
+
+	if pendingRouteOutcomeAwaitingProjection(snapshot, parsed) {
+		return nil, nil, false
+	}
+
+	if shouldStopPostReplanNoProgress(snapshot, cfg) {
+		return s.localStopGateRoute(
+			req,
+			"episode_replan_no_progress_stop_gate",
+			"gateway_replan_no_progress_stop_gate",
+			"aware-gateway stop gate: bounded replan produced no effective progress",
+			0.96,
+			episodePostReplanStopEvidence(snapshot, cfg),
+			"bounded replan produced no effective progress",
+			"stop trial after bounded replan produced no progress",
 		)
 	}
 
@@ -315,6 +333,9 @@ func shouldStopBlockedPremiumNoProgress(snapshot EpisodeSnapshot) bool {
 	if snapshot.LastBudgetAction != budgetActionPremiumRecover {
 		return false
 	}
+	if pendingRouteOutcomeInGrace(snapshot) {
+		return false
+	}
 	label := routeOutcomeLabelForSnapshot(snapshot)
 	return label == routeOutcomePending || label == routeOutcomeNoProgress
 }
@@ -342,6 +363,9 @@ func shouldStopAgentCallNoProgress(snapshot EpisodeSnapshot, cfg SafeControlConf
 	if snapshot.CandidateProgressCount > 0 || snapshot.StrongProgressCount > 0 {
 		return false
 	}
+	if pendingRouteOutcomeInGrace(snapshot) {
+		return false
+	}
 	return !episodeCloseToVerifier(snapshot)
 }
 
@@ -363,12 +387,46 @@ func shouldStopPostReplanNoProgress(snapshot EpisodeSnapshot, cfg SafeControlCon
 	if limit <= 0 || snapshot.LastReplanEventID == "" || episodeCloseToVerifier(snapshot) {
 		return false
 	}
-	return snapshot.LLMCallsSinceReplan >= limit
+	if shouldApplyOpenReplanHypothesis(snapshot) {
+		return false
+	}
+	if pendingRouteOutcomeInGrace(snapshot) {
+		return false
+	}
+	if snapshot.LLMCallsSinceReplan < limit {
+		return false
+	}
+	if snapshot.LastReplanHypothesis != "" &&
+		snapshot.ReplanHypothesisStatus == replanHypothesisOpen &&
+		snapshot.LLMCallsSinceHypothesis == 0 &&
+		snapshot.ExplorationSinceHypothesis == 0 {
+		return false
+	}
+	return postReplanStopEvidenceExhausted(snapshot, cfg)
+}
+
+func postReplanStopEvidenceExhausted(snapshot EpisodeSnapshot, cfg SafeControlConfig) bool {
+	switch routeOutcomeLabelForSnapshot(snapshot) {
+	case routeOutcomeNone, routeOutcomePending, routeOutcomeNoProgress,
+		routeOutcomeRunException, routeOutcomeTestFailed, routeOutcomeVerifierFailed:
+		return true
+	}
+	threshold := cfg.LongExplorationThreshold
+	if threshold <= 0 {
+		threshold = defaultLongExplorationThreshold
+	}
+	return threshold > 0 && snapshot.ExplorationSinceReplan >= threshold
 }
 
 func shouldStopLengthPressureWithoutProgress(snapshot EpisodeSnapshot, cfg SafeControlConfig) bool {
 	threshold := cfg.StopLengthPressureThreshold
 	if threshold <= 0 || snapshot.LengthPressureSinceProgress < threshold {
+		return false
+	}
+	if shouldApplyOpenReplanHypothesis(snapshot) {
+		return false
+	}
+	if pendingRouteOutcomeInGrace(snapshot) {
 		return false
 	}
 	if snapshot.ImplementationProgressCount > 0 ||
@@ -378,6 +436,106 @@ func shouldStopLengthPressureWithoutProgress(snapshot EpisodeSnapshot, cfg SafeC
 		return false
 	}
 	return !episodeCloseToVerifier(snapshot)
+}
+
+func shouldApplyOpenReplanHypothesis(snapshot EpisodeSnapshot) bool {
+	if snapshot.LastReplanEventID == "" || snapshot.LastReplanHypothesis == "" {
+		return false
+	}
+	if snapshot.LastBudgetAction == budgetActionHypothesisApply {
+		return false
+	}
+	switch valueOrDefault(snapshot.ReplanHypothesisStatus, replanHypothesisNone) {
+	case replanHypothesisOpen, replanHypothesisStale:
+		return snapshot.CandidateProgressCount == 0 && snapshot.StrongProgressCount == 0
+	default:
+		return false
+	}
+}
+
+func shouldRecoverHypothesisApplyLength(snapshot EpisodeSnapshot) bool {
+	if snapshot.ID == "" || snapshot.LastBudgetAction != budgetActionHypothesisApply {
+		return false
+	}
+	if snapshot.LastFinishReason != "length" {
+		return false
+	}
+	if snapshot.CandidateProgressCount > 0 || snapshot.StrongProgressCount > 0 {
+		return false
+	}
+	label := routeOutcomeLabelForSnapshot(snapshot)
+	return label == routeOutcomePending || label == routeOutcomeNoProgress || label == routeOutcomeNone
+}
+
+func shouldRecoverExecutionStall(snapshot EpisodeSnapshot) bool {
+	if snapshot.ID == "" {
+		return false
+	}
+	if episodeCloseToVerifier(snapshot) {
+		return false
+	}
+	return snapshot.ExecutionStallsSinceProgress >= defaultExecutionStallRecoveryThreshold
+}
+
+func shouldRecoverAnalysisProgressApplication(snapshot EpisodeSnapshot) bool {
+	if snapshot.ID == "" || episodeCloseToVerifier(snapshot) {
+		return false
+	}
+	if snapshot.LastProgressKind != routeOutcomeAnalysisProgress {
+		return false
+	}
+	return snapshot.AnalysisApplicationAttemptsSinceProgress >= defaultAnalysisProgressApplicationAttemptLimit &&
+		snapshot.AnalysisApplicationRecoveriesSinceProgress == 0
+}
+
+func shouldApplyAnalysisProgress(snapshot EpisodeSnapshot) bool {
+	if snapshot.ID == "" || episodeCloseToVerifier(snapshot) {
+		return false
+	}
+	if shouldRecoverAnalysisProgressApplication(snapshot) {
+		return false
+	}
+	if valueOrDefault(snapshot.NextCapabilityReason, "") != "analysis_progress_needs_application" {
+		return false
+	}
+	if snapshot.LastProgressKind != routeOutcomeAnalysisProgress {
+		return false
+	}
+	return snapshot.StrongProgressCount > 0
+}
+
+func pendingRouteOutcomeInGrace(snapshot EpisodeSnapshot) bool {
+	if routeOutcomeLabelForSnapshot(snapshot) != routeOutcomePending {
+		return false
+	}
+	if snapshot.LastRouteTraceID == "" || snapshot.LastRouteOutcomeEventCount > 0 {
+		return false
+	}
+	if snapshot.LastBudgetAction == "" || snapshot.LastBudgetAction == budgetActionStopTrial {
+		return false
+	}
+	event, ok := latestLLMEvent(snapshot)
+	if !ok || event.Timestamp.IsZero() {
+		return false
+	}
+	age := time.Since(event.Timestamp)
+	return age >= 0 && age < defaultPendingRouteOutcomeGrace
+}
+
+func pendingRouteOutcomeAwaitingProjection(snapshot EpisodeSnapshot, parsed *parsedRequest) bool {
+	if routeOutcomeLabelForSnapshot(snapshot) != routeOutcomePending {
+		return false
+	}
+	if snapshot.LastRouteTraceID == "" || snapshot.LastRouteOutcomeEventCount > 0 {
+		return false
+	}
+	if snapshot.LastBudgetAction == "" || snapshot.LastBudgetAction == budgetActionStopTrial {
+		return false
+	}
+	if parsed != nil && parsed.HasToolObservation {
+		return true
+	}
+	return pendingRouteOutcomeInGrace(snapshot)
 }
 
 func episodeLongExplorationEvidence(snapshot EpisodeSnapshot, cfg SafeControlConfig) []string {
@@ -406,6 +564,9 @@ func episodePostReplanStopEvidence(snapshot EpisodeSnapshot, cfg SafeControlConf
 		fmt.Sprintf("llm_since_replan=%d", snapshot.LLMCallsSinceReplan),
 		fmt.Sprintf("post_replan_no_progress_call_limit=%d", cfg.PostReplanNoProgressCallLimit),
 		fmt.Sprintf("exploration_since_replan=%d", snapshot.ExplorationSinceReplan),
+		"replan_hypothesis_status=" + valueOrDefault(snapshot.ReplanHypothesisStatus, replanHypothesisNone),
+		"last_replan_hypothesis_event=" + valueOrUnknown(snapshot.LastReplanHypothesisEventID),
+		"last_replan_hypothesis=" + valueOrUnknown(compactDecisionText(snapshot.LastReplanHypothesis, 90)),
 		fmt.Sprintf("candidate_progress=%d", snapshot.CandidateProgressCount),
 		fmt.Sprintf("strong_progress=%d", snapshot.StrongProgressCount),
 		"last_budget=" + valueOrUnknown(snapshot.LastBudgetAction),
@@ -530,7 +691,10 @@ func (s *SmartRouter) episodeDeliveryStateControlDecision(req *http.Request) (*p
 		return nil, nil, false
 	}
 	expected := valueOrDefault(snapshot.NextMinCapability, nextMinCapabilityUnknown)
-	if expected != nextMinCapabilityPremiumAssess && expected != nextMinCapabilityPremiumReason && expected != nextMinCapabilityPremiumRecover {
+	if expected != nextMinCapabilityCheapExecute &&
+		expected != nextMinCapabilityPremiumAssess &&
+		expected != nextMinCapabilityPremiumReason &&
+		expected != nextMinCapabilityPremiumRecover {
 		return nil, nil, false
 	}
 	reason := valueOrDefault(snapshot.NextCapabilityReason, "state_floor")
@@ -552,7 +716,14 @@ func (s *SmartRouter) episodeDeliveryStateControlDecision(req *http.Request) (*p
 	summary := "delivery evidence requires premium assessment"
 	shortReason := "episode delivery state requires premium assessment"
 	confidence := 0.95
-	if expected == nextMinCapabilityPremiumRecover {
+	premium := true
+	if expected == nextMinCapabilityCheapExecute {
+		turnType = "finalization"
+		summary = "implementation candidate needs delivery or direct validation"
+		shortReason = "episode delivery candidate should be delivered or validated now"
+		confidence = 0.93
+		premium = false
+	} else if expected == nextMinCapabilityPremiumRecover {
 		turnType = "recovery"
 		hypothesisState = "contradicted"
 		summary = "delivery evidence requires premium recovery"
@@ -560,11 +731,11 @@ func (s *SmartRouter) episodeDeliveryStateControlDecision(req *http.Request) (*p
 		confidence = 0.96
 	}
 
-	return s.safeControlRoute(
+	decision, history, ok := s.safeControlRoute(
 		req,
 		ruleID,
 		action,
-		true,
+		premium,
 		confidence,
 		episodeDeliveryFloorEvidence(snapshot, expected, reason),
 		turnType,
@@ -572,6 +743,10 @@ func (s *SmartRouter) episodeDeliveryStateControlDecision(req *http.Request) (*p
 		summary,
 		shortReason,
 	)
+	if ok && expected == nextMinCapabilityCheapExecute {
+		decision.AgentInstruction = deliveryCandidateAgentInstruction
+	}
+	return decision, history, ok
 }
 
 func episodeDeliveryFloorRuleID(expected, reason string) string {
@@ -584,6 +759,10 @@ func episodeDeliveryFloorRuleID(expected, reason string) string {
 		return "episode_verifier_assessment_floor"
 	case "validation_passed_assess_hidden_gap":
 		return "episode_validation_assessment_floor"
+	case "delivery_candidate_needs_delivery":
+		return "episode_delivery_candidate_floor"
+	case "delivery_candidate_floor_exhausted":
+		return "episode_delivery_candidate_recovery_floor"
 	case "last_route_verifier_failed", "last_route_outcome_negative", "last_route_validation_failed":
 		return "episode_route_outcome_recovery_floor"
 	case "last_route_verifier_passed", "last_route_validation_passed":
@@ -604,6 +783,17 @@ func isDeliveryCapabilityFloor(snapshot EpisodeSnapshot, expected, reason string
 		return true
 	case "validation_passed_assess_hidden_gap":
 		return snapshot.DeliveryFileWriteCount > 0 || snapshot.LastDeliveryEventID != ""
+	case "delivery_candidate_needs_delivery":
+		return expected == nextMinCapabilityCheapExecute &&
+			snapshot.CompletionReadiness == completionReadinessDeliveryCandidate &&
+			snapshot.DeliveryFileWriteCount == 0 &&
+			snapshot.ImplementationProgressCount >= defaultDeliveryCandidateProgressThreshold
+	case "delivery_candidate_floor_exhausted":
+		return expected == nextMinCapabilityPremiumRecover &&
+			snapshot.CompletionReadiness == completionReadinessDeliveryCandidate &&
+			snapshot.DeliveryFileWriteCount == 0 &&
+			snapshot.ImplementationProgressCount >= defaultDeliveryCandidateProgressThreshold &&
+			recentRuleCallCount(snapshot.RecentEvents, "episode_delivery_candidate_floor") >= defaultDeliveryCandidateFloorAttemptLimit
 	default:
 		return false
 	}
@@ -618,7 +808,13 @@ func episodeDeliveryFloorEvidence(snapshot EpisodeSnapshot, expected, reason str
 		"reason=" + valueOrUnknown(reason),
 		"budget_hint=" + valueOrUnknown(snapshot.NextBudgetActionHint),
 		"completion_readiness=" + valueOrDefault(snapshot.CompletionReadiness, completionReadinessNone),
+		fmt.Sprintf("implementation_progress=%d", snapshot.ImplementationProgressCount),
+		fmt.Sprintf("validation_progress=%d", snapshot.ValidationProgressCount),
 		fmt.Sprintf("delivery_file_writes=%d", snapshot.DeliveryFileWriteCount),
+		fmt.Sprintf("delivery_progress=%d", snapshot.DeliveryProgressCount),
+		fmt.Sprintf("recent_delivery_floor_attempts=%d", recentRuleCallCount(snapshot.RecentEvents, "episode_delivery_candidate_floor")),
+		fmt.Sprintf("llm_since_progress=%d", snapshot.LLMCallsSinceProgress),
+		fmt.Sprintf("exploration_since_progress=%d", snapshot.ExplorationSinceProgress),
 		fmt.Sprintf("test_passed=%d", snapshot.TestPassedCount),
 		fmt.Sprintf("test_failed=%d", snapshot.TestFailedCount),
 		fmt.Sprintf("verifier_reward=%.3f", snapshot.VerifierReward),
@@ -626,6 +822,95 @@ func episodeDeliveryFloorEvidence(snapshot EpisodeSnapshot, expected, reason str
 		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
 		"last_route_outcome=" + routeOutcomeLabelForSnapshot(snapshot),
 	}
+}
+
+func (s *SmartRouter) episodePriorityStateControlDecision(req *http.Request) (*plugin.RoutingDecision, *DecisionResponse, bool) {
+	episodeCfg := s.episodeConfig()
+	if !episodeCfg.Enabled {
+		return nil, nil, false
+	}
+	snapshot := s.episodeSnapshot(req)
+	if snapshot.ID == "" {
+		return nil, nil, false
+	}
+
+	if shouldRecoverHypothesisApplyLength(snapshot) {
+		decision, history, ok := s.safeControlRoute(
+			req,
+			"episode_hypothesis_apply_length_recovery",
+			budgetActionPremiumRecover,
+			true,
+			0.95,
+			episodeHypothesisApplyLengthRecoveryEvidence(snapshot),
+			"recovery",
+			"open",
+			"hypothesis application was truncated before a usable action",
+			"recover truncated hypothesis application",
+		)
+		if ok {
+			decision.AgentInstruction = hypothesisApplyLengthRecoveryAgentInstruction
+		}
+		return decision, history, ok
+	}
+
+	if shouldRecoverExecutionStall(snapshot) {
+		decision, history, ok := s.safeControlRoute(
+			req,
+			"episode_execution_stall_recovery",
+			budgetActionPremiumRecover,
+			true,
+			0.94,
+			episodeExecutionStallRecoveryEvidence(snapshot),
+			"recovery",
+			"stalled",
+			"execution channel is stuck before useful outcome projection",
+			"recover stuck shell or truncated command execution",
+		)
+		if ok {
+			decision.AgentInstruction = executionStallRecoveryAgentInstruction
+		}
+		return decision, history, ok
+	}
+
+	if shouldRecoverAnalysisProgressApplication(snapshot) {
+		decision, history, ok := s.safeControlRoute(
+			req,
+			"episode_analysis_progress_application_recovery",
+			budgetActionPremiumRecover,
+			true,
+			0.94,
+			episodeAnalysisProgressApplicationRecoveryEvidence(snapshot),
+			"recovery",
+			"stalled",
+			"cheap application attempts after analysis progress did not produce delivery",
+			"recover stalled analysis application",
+		)
+		if ok {
+			decision.AgentInstruction = analysisProgressApplicationRecoveryAgentInstruction
+		}
+		return decision, history, ok
+	}
+
+	if shouldApplyAnalysisProgress(snapshot) {
+		decision, history, ok := s.safeControlRoute(
+			req,
+			"episode_analysis_progress_application",
+			budgetActionCheapExecute,
+			false,
+			0.93,
+			episodeAnalysisProgressApplicationEvidence(snapshot),
+			"validation",
+			"stable",
+			"latest strong analysis progress needs direct application",
+			"apply latest verified facts before further broad exploration",
+		)
+		if ok {
+			decision.AgentInstruction = analysisProgressApplicationAgentInstruction
+		}
+		return decision, history, ok
+	}
+
+	return nil, nil, false
 }
 
 func (s *SmartRouter) episodeStateControlDecision(req *http.Request) (*plugin.RoutingDecision, *DecisionResponse, bool) {
@@ -668,6 +953,10 @@ func (s *SmartRouter) episodeStateControlDecision(req *http.Request) (*plugin.Ro
 		}
 	}
 
+	if decision, history, ok := s.episodePriorityStateControlDecision(req); ok {
+		return decision, history, true
+	}
+
 	if shouldReplanLongExploration(snapshot, controlCfg) {
 		return s.safeControlRoute(
 			req,
@@ -680,6 +969,21 @@ func (s *SmartRouter) episodeStateControlDecision(req *http.Request) (*plugin.Ro
 			"forming",
 			"long exploration requires a bounded replan before more execution",
 			"long exploration; freeze budget and replan",
+		)
+	}
+
+	if shouldApplyOpenReplanHypothesis(snapshot) {
+		return s.safeControlRoute(
+			req,
+			"episode_replan_hypothesis_apply",
+			budgetActionHypothesisApply,
+			false,
+			0.94,
+			episodeHypothesisApplyEvidence(snapshot),
+			"validation",
+			"stable",
+			"open replan hypothesis needs direct application",
+			"validate or apply open replan hypothesis",
 		)
 	}
 
@@ -722,6 +1026,106 @@ func (s *SmartRouter) episodeStateControlDecision(req *http.Request) (*plugin.Ro
 		summary,
 		reason,
 	)
+}
+
+func episodeHypothesisApplyEvidence(snapshot EpisodeSnapshot) []string {
+	return []string{
+		fmt.Sprintf("episode_id=%s", snapshot.ID),
+		fmt.Sprintf("state_version=%d", snapshot.Version),
+		"replan_hypothesis_status=" + valueOrDefault(snapshot.ReplanHypothesisStatus, replanHypothesisNone),
+		"last_replan=" + valueOrUnknown(snapshot.LastReplanEventID),
+		"last_replan_hypothesis_event=" + valueOrUnknown(snapshot.LastReplanHypothesisEventID),
+		"last_replan_hypothesis=" + valueOrUnknown(compactDecisionText(snapshot.LastReplanHypothesis, 90)),
+		fmt.Sprintf("llm_since_hypothesis=%d", snapshot.LLMCallsSinceHypothesis),
+		fmt.Sprintf("exploration_since_hypothesis=%d", snapshot.ExplorationSinceHypothesis),
+		fmt.Sprintf("llm_since_replan=%d", snapshot.LLMCallsSinceReplan),
+		fmt.Sprintf("exploration_since_replan=%d", snapshot.ExplorationSinceReplan),
+		fmt.Sprintf("length_since_progress=%d", snapshot.LengthPressureSinceProgress),
+		fmt.Sprintf("candidate_progress=%d", snapshot.CandidateProgressCount),
+		fmt.Sprintf("strong_progress=%d", snapshot.StrongProgressCount),
+		"last_budget=" + valueOrUnknown(snapshot.LastBudgetAction),
+		"last_route_outcome=" + routeOutcomeLabelForSnapshot(snapshot),
+		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
+	}
+}
+
+func episodeHypothesisApplyLengthRecoveryEvidence(snapshot EpisodeSnapshot) []string {
+	return []string{
+		fmt.Sprintf("episode_id=%s", snapshot.ID),
+		fmt.Sprintf("state_version=%d", snapshot.Version),
+		"last_budget=" + valueOrUnknown(snapshot.LastBudgetAction),
+		"last_finish=" + valueOrUnknown(snapshot.LastFinishReason),
+		"last_route_outcome=" + routeOutcomeLabelForSnapshot(snapshot),
+		"replan_hypothesis_status=" + valueOrDefault(snapshot.ReplanHypothesisStatus, replanHypothesisNone),
+		"last_replan=" + valueOrUnknown(snapshot.LastReplanEventID),
+		"last_replan_hypothesis_event=" + valueOrUnknown(snapshot.LastReplanHypothesisEventID),
+		"last_replan_hypothesis=" + valueOrUnknown(compactDecisionText(snapshot.LastReplanHypothesis, 90)),
+		fmt.Sprintf("llm_since_hypothesis=%d", snapshot.LLMCallsSinceHypothesis),
+		fmt.Sprintf("exploration_since_hypothesis=%d", snapshot.ExplorationSinceHypothesis),
+		fmt.Sprintf("llm_since_replan=%d", snapshot.LLMCallsSinceReplan),
+		fmt.Sprintf("exploration_since_replan=%d", snapshot.ExplorationSinceReplan),
+		fmt.Sprintf("length_since_progress=%d", snapshot.LengthPressureSinceProgress),
+		fmt.Sprintf("candidate_progress=%d", snapshot.CandidateProgressCount),
+		fmt.Sprintf("strong_progress=%d", snapshot.StrongProgressCount),
+	}
+}
+
+func episodeExecutionStallRecoveryEvidence(snapshot EpisodeSnapshot) []string {
+	return []string{
+		fmt.Sprintf("episode_id=%s", snapshot.ID),
+		fmt.Sprintf("state_version=%d", snapshot.Version),
+		fmt.Sprintf("execution_stalls=%d", snapshot.ExecutionStallCount),
+		fmt.Sprintf("execution_stalls_since_progress=%d", snapshot.ExecutionStallsSinceProgress),
+		fmt.Sprintf("threshold=%d", defaultExecutionStallRecoveryThreshold),
+		fmt.Sprintf("llm_since_progress=%d", snapshot.LLMCallsSinceProgress),
+		fmt.Sprintf("exploration_since_progress=%d", snapshot.ExplorationSinceProgress),
+		"last_budget=" + valueOrUnknown(snapshot.LastBudgetAction),
+		"last_route_outcome=" + routeOutcomeLabelForSnapshot(snapshot),
+		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
+	}
+}
+
+func episodeAnalysisProgressApplicationEvidence(snapshot EpisodeSnapshot) []string {
+	return []string{
+		fmt.Sprintf("episode_id=%s", snapshot.ID),
+		fmt.Sprintf("state_version=%d", snapshot.Version),
+		fmt.Sprintf("strong_progress=%d", snapshot.StrongProgressCount),
+		fmt.Sprintf("analysis_apply_attempts_since_progress=%d", snapshot.AnalysisApplicationAttemptsSinceProgress),
+		fmt.Sprintf("analysis_apply_recoveries_since_progress=%d", snapshot.AnalysisApplicationRecoveriesSinceProgress),
+		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
+		"last_progress_event=" + valueOrUnknown(snapshot.LastProgressEventID),
+		"last_route_outcome=" + routeOutcomeLabelForSnapshot(snapshot),
+		"next_capability=" + valueOrDefault(snapshot.NextMinCapability, nextMinCapabilityUnknown),
+		"reason=" + valueOrDefault(snapshot.NextCapabilityReason, "analysis_progress_needs_application"),
+		"budget_hint=" + valueOrUnknown(snapshot.NextBudgetActionHint),
+		fmt.Sprintf("llm_since_progress=%d", snapshot.LLMCallsSinceProgress),
+		fmt.Sprintf("exploration_since_progress=%d", snapshot.ExplorationSinceProgress),
+		fmt.Sprintf("delivery_file_writes=%d", snapshot.DeliveryFileWriteCount),
+		fmt.Sprintf("test_passed=%d", snapshot.TestPassedCount),
+		fmt.Sprintf("verifier_reward=%.3f", snapshot.VerifierReward),
+	}
+}
+
+func episodeAnalysisProgressApplicationRecoveryEvidence(snapshot EpisodeSnapshot) []string {
+	return []string{
+		fmt.Sprintf("episode_id=%s", snapshot.ID),
+		fmt.Sprintf("state_version=%d", snapshot.Version),
+		fmt.Sprintf("strong_progress=%d", snapshot.StrongProgressCount),
+		fmt.Sprintf("analysis_apply_attempts_since_progress=%d", snapshot.AnalysisApplicationAttemptsSinceProgress),
+		fmt.Sprintf("analysis_apply_recoveries_since_progress=%d", snapshot.AnalysisApplicationRecoveriesSinceProgress),
+		fmt.Sprintf("analysis_apply_attempt_limit=%d", defaultAnalysisProgressApplicationAttemptLimit),
+		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
+		"last_progress_event=" + valueOrUnknown(snapshot.LastProgressEventID),
+		"last_route_outcome=" + routeOutcomeLabelForSnapshot(snapshot),
+		"next_capability=" + valueOrDefault(snapshot.NextMinCapability, nextMinCapabilityUnknown),
+		"reason=" + valueOrDefault(snapshot.NextCapabilityReason, "analysis_progress_application_exhausted"),
+		"budget_hint=" + valueOrUnknown(snapshot.NextBudgetActionHint),
+		fmt.Sprintf("llm_since_progress=%d", snapshot.LLMCallsSinceProgress),
+		fmt.Sprintf("exploration_since_progress=%d", snapshot.ExplorationSinceProgress),
+		fmt.Sprintf("delivery_file_writes=%d", snapshot.DeliveryFileWriteCount),
+		fmt.Sprintf("test_passed=%d", snapshot.TestPassedCount),
+		fmt.Sprintf("verifier_reward=%.3f", snapshot.VerifierReward),
+	}
 }
 
 func (s *SmartRouter) safeControlEscalated(req *http.Request, fingerprint string) bool {

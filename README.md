@@ -123,7 +123,11 @@ validation, verifier readiness evidence, and stale-verifier invalidation when
 target files change after verification. It also checks the online route-outcome
 window that links a posted validation event back to the previous routed agent
 call, exposes the derived next minimum capability for the following turn, and
-verifies hard capability-floor recovery after a failed verifier result.
+verifies hard capability-floor recovery after a failed verifier result. The
+current probe also covers bounded replan hypothesis application, truncated
+hypothesis recovery, delivery-candidate floor exhaustion, analysis-progress
+application/recovery, execution-stall recovery, and exact safe-control rule-id
+matching.
 
 ### Writing a Custom Plugin
 
@@ -398,6 +402,19 @@ recent event window, are fed into the next router prompt and can dynamically
 increase the next route budget within configured ceilings. Audit traces carry
 the resolved episode id, operation, state version before routing, compact
 state-before JSON, and state-after JSON after the request is projected.
+After a bounded replan, the projection also captures the next router context
+summary as a `replan_hypothesis`. While that hypothesis is open, the next
+minimum capability becomes `cheap_execute`, so the next useful turn must
+validate, implement, or explicitly abandon the hypothesis instead of drifting
+back into broad exploration. If the stop threshold is reached exactly when a
+fresh open hypothesis appears, the gateway allows one validation turn before
+closing the run on continued no-progress.
+When the episode has accumulated implementation progress but still has no
+delivery-target write, validation, or test evidence, the controller derives
+`delivery_candidate_needs_delivery`. That state is handled locally with
+`cheap_execute` and a short injected instruction telling the agent to convert
+the current candidate into the required deliverable, or run exactly one
+bounded check that closes the delivery/validation gap.
 
 External runners can also post explicit progress events:
 

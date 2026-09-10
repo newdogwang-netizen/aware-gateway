@@ -16,9 +16,16 @@ const (
 	budgetActionPremiumRecover      = "premium_recover"
 	budgetActionCompletionGuardrail = "completion_guardrail"
 	budgetActionFreezeOrReplan      = "freeze_or_replan"
+	budgetActionHypothesisApply     = "hypothesis_apply"
 	budgetActionStopTrial           = "stop_trial"
 
-	freezeOrReplanAgentInstruction = "Bounded replan turn. Stop broad exploration. State the current hypothesis, the smallest decisive check or implementation pivot, and the abandon condition before further execution. Keep any command narrow and tied to that check."
+	freezeOrReplanAgentInstruction                      = "Bounded replan turn. Stop broad exploration. State the current hypothesis, the smallest decisive check or implementation pivot, and the abandon condition before further execution. Keep any command narrow and tied to that check."
+	hypothesisApplyAgentInstruction                     = "Open-hypothesis turn. Use the current replan hypothesis as the only branch: apply it, validate it, or abandon it with one concrete contradiction. Do not restart broad exploration. Write compact files or a final deliverable instead of dumping long logs; run at most one direct command batch."
+	hypothesisApplyLengthRecoveryAgentInstruction       = "The previous open-hypothesis turn was truncated before producing a usable action. Recover in one concise turn: keep the same hypothesis, emit valid agent JSON, and run exactly one command batch or write the final deliverable. Do not restate long analysis."
+	executionStallRecoveryAgentInstruction              = "Execution recovery turn. The shell or tool channel appears stuck in an interactive or truncated command state. First restore a clean prompt if needed, then run exactly one noninteractive command or write the final deliverable. Avoid heredocs and long dumps; keep output under 120 lines."
+	analysisProgressApplicationAgentInstruction         = "Analysis progress application turn. Use the latest verified or decoded facts now: run exactly one bounded command that applies them, validates them, or writes the required final deliverable. Do not restart broad exploration or restate long reasoning."
+	analysisProgressApplicationRecoveryAgentInstruction = "Analysis application recovery turn. Several cheap application attempts followed verified analysis progress without delivery or validation. In one concise Opus turn, convert the known facts into exactly one concrete delivery, verifier-facing write, or bounded validation command. Do not restart broad exploration."
+	deliveryCandidateAgentInstruction                   = "Delivery candidate turn. Stop broad exploration. If the current facts are enough, write or update the required final deliverable now. If not, run exactly one bounded check that directly closes the missing delivery or validation gap. Do not dump large intermediate output."
 )
 
 // BudgetedRouteConfig lets a routing decision carry execution budget, not only
@@ -79,6 +86,9 @@ func agentInstructionForBudgetAction(action string) string {
 	if normalized == budgetActionFreezeOrReplan {
 		return freezeOrReplanAgentInstruction
 	}
+	if normalized == budgetActionHypothesisApply {
+		return hypothesisApplyAgentInstruction
+	}
 	return ""
 }
 
@@ -136,6 +146,10 @@ func defaultBudgetProfiles() map[string]RouteBudgetProfile {
 			MaxTokens: 2048,
 			TimeoutMs: 60000,
 		},
+		budgetActionHypothesisApply: {
+			MaxTokens: 4096,
+			TimeoutMs: 90000,
+		},
 	}
 }
 
@@ -182,7 +196,8 @@ func normalizeBudgetAction(action string) (string, bool) {
 		budgetActionPremiumReason,
 		budgetActionPremiumRecover,
 		budgetActionCompletionGuardrail,
-		budgetActionFreezeOrReplan:
+		budgetActionFreezeOrReplan,
+		budgetActionHypothesisApply:
 		return normalized, true
 	default:
 		return "", false

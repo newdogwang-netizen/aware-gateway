@@ -19,6 +19,10 @@ import yaml
 EXTRACTOR_VERSION = "outcome-extractor-v1"
 EVENT_SCHEMA_VERSION = "event-schema-v1"
 PROGRESS_RULES_VERSION = "progress-rules-v1"
+DELIVERY_CANDIDATE_PROGRESS_THRESHOLD = 6
+DELIVERY_CANDIDATE_IDLE_CALL_THRESHOLD = 3
+DELIVERY_CANDIDATE_FLOOR_ATTEMPT_LIMIT = 2
+ANALYSIS_PROGRESS_APPLICATION_ATTEMPT_LIMIT = 3
 
 PATCH_DIFF_RE = re.compile(r"^diff --git a/(.*?) b/(.*?)$")
 WRITE_REDIRECT_RE = re.compile(r"(?:^|[\s;&|])(?:\d?>{1,2})\s*((?:/|\.{1,2}/)[^\s;&|]*)")
@@ -33,6 +37,20 @@ FAILURE_OUTPUT_RE = re.compile(
     r"(FAILED|ERROR|Traceback|AssertionError|SyntaxError|IndentationError|command not found|No such file|ModuleNotFoundError|Exception:)"
 )
 PASS_OUTPUT_RE = re.compile(r"(\b\d+\s+passed\b|\bOK\b|\bPASS\b|Reward\s+1\.0|\"reward\"\s*:\s*1)")
+ROUTE_CONTEXT_RE = re.compile(r'ctx="((?:\\.|[^"\\])*)"')
+ANALYSIS_FACT_RE = re.compile(
+    r"\b(seed|key|opcode|isa|vm|bytecode|protocol|payload|ciphertext|cipher|lcg|recurrence|domain|host|flag)\b"
+)
+ANALYSIS_VERIFIED_RE = re.compile(
+    r"\b(matches all|matching all|all .* match|conclusively|confirmed|fully decoded|decoding is correct|valid_all\s+true|valid all)\b"
+)
+ANALYSIS_DECODED_RE = re.compile(
+    r"\b(decoded|decrypted|disassembled|recovered|identified|inferred)\b.*"
+    r"\b(valid|clean|correct|program|payload|bytecode|ciphertext|seed|key|opcode|isa|recurrence)\b"
+)
+HEREDOC_PROMPT_RE = re.compile(r"(?:new terminal output|current terminal screen):\s*>\s*(?:py|eof)\b|\n>\s*(?:py|eof)\b")
+INTERRUPTED_COMMAND_RE = re.compile(r"\b(c-c|\^c|keyboardinterrupt)\b")
+PARSER_WARNING_RE = re.compile(r"previous response had warnings|command \d+ should end with newline")
 
 
 def main() -> None:
@@ -59,7 +77,7 @@ def main() -> None:
     decisions = [trace for trace in traces if is_decision_trace(trace)]
     agent_traces = [trace for trace in traces if not is_decision_trace(trace)]
     cutoff_check = build_replay_cutoff_check(events, decisions, agent_traces, episode_id, rules)
-    summary = build_summary(trial_dir, result, trajectory, traces, events, cutoff_check)
+    summary = build_summary(trial_dir, result, trajectory, traces, events, cutoff_check, rules)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_jsonl(args.output_dir / "episode-events.jsonl", events)
@@ -228,6 +246,9 @@ def tool_events_from_trajectory(episode_id: str, trajectory: list[dict[str, Any]
     for step in trajectory:
         if step.get("source") != "agent":
             continue
+        analysis_event = analysis_progress_from_step(episode_id, step)
+        if analysis_event:
+            events.append(analysis_event)
         tool_calls = step.get("tool_calls") or []
         results = (step.get("observation") or {}).get("results") or []
         for call_index, call in enumerate(tool_calls):
@@ -236,6 +257,12 @@ def tool_events_from_trajectory(episode_id: str, trajectory: list[dict[str, Any]
             result = results[call_index] if call_index < len(results) and isinstance(results[call_index], dict) else {}
             tool_event = trajectory_tool_call_event(episode_id, step, call, result, call_index)
             events.append(tool_event)
+            tool_analysis_event = analysis_progress_from_tool_event(episode_id, tool_event)
+            if tool_analysis_event:
+                events.append(tool_analysis_event)
+            stall_event = execution_stall_from_tool_event(episode_id, tool_event)
+            if stall_event:
+                events.append(stall_event)
             write_event = file_written_from_tool_event(episode_id, tool_event)
             if write_event:
                 events.append(write_event)
@@ -243,6 +270,71 @@ def tool_events_from_trajectory(episode_id: str, trajectory: list[dict[str, Any]
             if test_event:
                 events.append(test_event)
     return events
+
+
+def analysis_progress_from_step(episode_id: str, step: dict[str, Any]) -> dict[str, Any] | None:
+    message = str(step.get("message") or "")
+    signals = detect_analysis_progress(message)
+    if not signals:
+        return None
+    timestamp = timestamp_with_offset(str(step.get("timestamp") or ""), 900)
+    observation = {
+        "analysis_progress": True,
+        "analysis_signals": signals,
+        "analysis_summary": compact_text(message, 420),
+        "message_chars": len(message),
+    }
+    return make_event(
+        episode_id,
+        "analysis_progress",
+        timestamp,
+        "harbor_trajectory",
+        observation,
+        [f"{step.get('_trajectory_ref') or 'trajectory:unknown'}:analysis"],
+        "inferred",
+        "trajectory.timestamp+analysis_offset_ms",
+    )
+
+
+def detect_analysis_progress(message: str) -> list[str]:
+    text = " ".join(str(message or "").split())
+    lower = text.lower()
+    if not lower:
+        return []
+    signals: list[str] = []
+    if ANALYSIS_VERIFIED_RE.search(lower) and ANALYSIS_FACT_RE.search(lower):
+        signals.append("verified_task_fact")
+    if ANALYSIS_DECODED_RE.search(lower) and ANALYSIS_FACT_RE.search(lower):
+        signals.append("decoded_or_recovered_artifact")
+    if re.search(r"\b(solution|answer|flag)\b.*\b(candidate|found|recovered|identified)\b", lower):
+        signals.append("candidate_answer")
+    return signals
+
+
+def analysis_progress_from_tool_event(episode_id: str, tool_event: dict[str, Any]) -> dict[str, Any] | None:
+    observation = tool_event.get("observation") or {}
+    output = str(observation.get("output_preview") or "")
+    signals = detect_analysis_progress(output)
+    if not signals:
+        return None
+    progress_observation = {
+        "analysis_progress": True,
+        "analysis_signals": signals,
+        "analysis_summary": compact_text(output, 420),
+        "message_chars": len(output),
+        "source_event_id": tool_event.get("event_id") or "",
+        "command_kind": observation.get("command_kind") or "",
+    }
+    return make_event(
+        episode_id,
+        "analysis_progress",
+        timestamp_with_offset(tool_event["timestamp"], 250),
+        "trajectory_tool_result",
+        progress_observation,
+        list(tool_event.get("evidence_refs") or []),
+        "inferred",
+        "tool_call.timestamp+analysis_offset_ms",
+    )
 
 
 def trajectory_tool_call_event(
@@ -283,6 +375,58 @@ def trajectory_tool_call_event(
         "observed",
         "trajectory.timestamp+tool_call_index_ms",
     )
+
+
+def execution_stall_from_tool_event(episode_id: str, tool_event: dict[str, Any]) -> dict[str, Any] | None:
+    observation = tool_event.get("observation") or {}
+    signals = detect_execution_stall(observation)
+    if not signals:
+        return None
+    stall_observation = {
+        "step_id": observation.get("step_id"),
+        "call_index": observation.get("call_index"),
+        "stall": True,
+        "stall_signals": signals,
+        "command_kind": observation.get("command_kind") or "",
+        "command_preview": observation.get("command_preview") or "",
+        "output_chars": observation.get("output_chars") or 0,
+        "output_preview": observation.get("output_preview") or "",
+        "result_class": observation.get("result_class") or "unknown",
+        "failure_fingerprint": observation.get("failure_fingerprint") or "",
+    }
+    return make_event(
+        episode_id,
+        "execution_stall",
+        timestamp_with_offset(tool_event["timestamp"], 500),
+        "trajectory_tool_result",
+        stall_observation,
+        list(tool_event.get("evidence_refs") or []),
+        "derived",
+        "tool_call.timestamp+stall_offset_ms",
+    )
+
+
+def detect_execution_stall(observation: dict[str, Any]) -> list[str]:
+    command = str(observation.get("command_preview") or "").strip()
+    output = str(observation.get("output_preview") or "")
+    lower_command = command.lower()
+    lower_output = output.lower()
+    signals: list[str] = []
+    if HEREDOC_PROMPT_RE.search(lower_output):
+        signals.append("heredoc_prompt_residue")
+    if PARSER_WARNING_RE.search(lower_output):
+        signals.append("parser_warning")
+    if lower_command in {"c-c", "^c"} or INTERRUPTED_COMMAND_RE.search(lower_output):
+        signals.append("interrupted_command")
+    if not command and re.search(r"(?:^|\s)>\s*$|(?:^|\s)>\s*(?:py|eof)\b", lower_output):
+        signals.append("empty_keystrokes_prompt")
+    if str(observation.get("failure_fingerprint") or "").lower() == "traceback" and "keyboardinterrupt" in lower_output:
+        signals.append("keyboard_interrupt_traceback")
+    deduped: list[str] = []
+    for signal in signals:
+        if signal not in deduped:
+            deduped.append(signal)
+    return deduped
 
 
 def file_written_from_tool_event(episode_id: str, tool_event: dict[str, Any]) -> dict[str, Any] | None:
@@ -349,6 +493,7 @@ def llm_call_event(episode_id: str, trace: dict[str, Any], index: int) -> dict[s
     outcome = normalize_llm_outcome(trace)
     trace_id = str(trace.get("trace_id") or "")
     evidence = f"trace:{trace_id}" if trace_id else f"trace:index:{index}"
+    routing_reason = str(trace.get("routing_reason") or "")
     observation = {
         "trace_id": trace_id,
         "status": as_int(trace.get("status")),
@@ -365,8 +510,9 @@ def llm_call_event(episode_id: str, trace: dict[str, Any], index: int) -> dict[s
         "total_tokens": as_int(trace.get("total_tokens")),
         "cost_usd": as_float(trace.get("cost")),
         "latency_ms": as_int(trace.get("latency_ms")),
-        "episode_adjust": "episode_adjust=" in str(trace.get("routing_reason") or ""),
-        "routing_reason": str(trace.get("routing_reason") or ""),
+        "episode_adjust": "episode_adjust=" in routing_reason,
+        "routing_reason": routing_reason,
+        "route_context_summary": route_context_summary_from_reason(routing_reason),
     }
     return make_event(
         episode_id,
@@ -394,6 +540,27 @@ def normalize_llm_outcome(trace: dict[str, Any]) -> str:
     return "unknown"
 
 
+def route_context_summary_from_reason(reason: str) -> str:
+    reason = " ".join(str(reason or "").split())
+    if not reason:
+        return ""
+    match = ROUTE_CONTEXT_RE.search(reason)
+    if match:
+        try:
+            return " ".join(json.loads(f'"{match.group(1)}"').split())
+        except json.JSONDecodeError:
+            return " ".join(match.group(1).replace(r"\"", '"').split())
+    marker = "ctx="
+    if marker not in reason:
+        return ""
+    rest = reason.split(marker, 1)[1].strip()
+    for sep in (" | ", " budget_action=", " route_max_tokens=", " capability_floor "):
+        if sep in rest:
+            rest = rest.split(sep, 1)[0]
+            break
+    return rest.strip(" '\"")
+
+
 def trajectory_llm_call_event(episode_id: str, step: dict[str, Any], index: int) -> dict[str, Any]:
     timestamp = normalize_timestamp(str(step.get("timestamp") or ""))
     metrics = step.get("metrics") or {}
@@ -418,6 +585,7 @@ def trajectory_llm_call_event(episode_id: str, step: dict[str, Any], index: int)
         "latency_ms": 0,
         "episode_adjust": "episode_adjust=" in message,
         "routing_reason": "",
+        "route_context_summary": "",
         "message_chars": len(message),
     }
     return make_event(
@@ -528,11 +696,13 @@ def normalize_shell_path(path: str) -> str:
 
 
 def is_delivery_path(path: str) -> bool:
-    return path.startswith("/app/output")
+    return path.startswith("/app/output") or path == "output" or path.startswith("output/")
 
 
 def is_workspace_path(path: str) -> bool:
-    return path.startswith("/app/") and not path.startswith("/app/data/")
+    if path.startswith("/app/") and not path.startswith("/app/data/"):
+        return True
+    return not path.startswith("/") and not path.startswith("data/")
 
 
 def compact_text(value: Any, limit: int) -> str:
@@ -783,6 +953,8 @@ def annotate_progress_events(events: list[dict[str, Any]]) -> list[dict[str, Any
 def is_progress_event(event: dict[str, Any]) -> bool:
     kind = event.get("kind")
     observation = event.get("observation") or {}
+    if kind == "analysis_progress" and observation.get("analysis_progress"):
+        return True
     if kind == "test_passed" and as_int(observation.get("failed_count")) == 0:
         return True
     if kind == "verifier_result" and as_float(observation.get("reward")) > 0:
@@ -864,6 +1036,48 @@ def test_run_applies_to_current_target(state: dict[str, Any], event: dict[str, A
     }:
         return True
     return as_int(state.get("failure_frontier_size")) > 0
+
+
+def completion_readiness_from_events(events: list[dict[str, Any]]) -> str:
+    state: dict[str, Any] = {
+        "delivery_file_write_count": 0,
+        "delivery_progress_count": 0,
+        "implementation_progress_count": 0,
+        "completion_readiness": "none",
+        "failure_frontier_size": 0,
+    }
+    for event in sorted_events(events):
+        observation = event.get("observation") or {}
+        kind = event.get("kind")
+        if kind in ("file_written", "file_modified"):
+            delivery_progress = is_delivery_progress_event(event)
+            implementation_progress = is_implementation_progress_event(event)
+            if delivery_progress:
+                state["delivery_file_write_count"] += 1
+                state["delivery_progress_count"] += 1
+            if implementation_progress:
+                state["implementation_progress_count"] += 1
+            if delivery_progress or implementation_progress:
+                state["completion_readiness"] = "delivery_candidate"
+        elif kind == "test_run":
+            applies = test_run_applies_to_current_target(state, event)
+            outcome = str(observation.get("outcome") or "").strip().lower()
+            if outcome == "passed" and applies:
+                state["completion_readiness"] = "validation_passed"
+                state["failure_frontier_size"] = 0
+            elif outcome == "failed":
+                if applies:
+                    state["completion_readiness"] = "validation_failed"
+                state["failure_frontier_size"] = max(1, failure_frontier_size_from_observation(observation))
+        elif kind == "test_passed":
+            state["completion_readiness"] = "validation_passed"
+            state["failure_frontier_size"] = 0
+        elif kind == "test_failed":
+            state["completion_readiness"] = "validation_failed"
+            state["failure_frontier_size"] = max(1, failure_frontier_size_from_observation(observation))
+        elif kind == "verifier_result":
+            state["completion_readiness"] = "verifier_passed" if as_float(observation.get("reward")) > 0 else "verifier_failed"
+    return str(state["completion_readiness"])
 
 
 def failure_frontier_size_from_observation(observation: dict[str, Any]) -> int:
@@ -1037,6 +1251,7 @@ def summarize_outcome_window(events: list[dict[str, Any]]) -> dict[str, Any]:
             sorted(Counter((event.get("observation") or {}).get("outcome") or "unknown" for event in test_runs).items())
         ),
         "delivery_file_write_count": delivery_file_write_count(events),
+        "execution_stall_count": by_kind.get("execution_stall", 0),
         "changed_paths_summary": changed_paths[:12],
         "verifier_reward": verifier_rewards[-1] if verifier_rewards else None,
         "outcome_label": route_outcome_label(events, candidate_progress_count, progress_count, verifier_rewards),
@@ -1085,6 +1300,8 @@ def route_outcome_label(
         return "strong_progress"
     if candidate_progress_count:
         return "candidate_progress"
+    if any(event.get("kind") == "execution_stall" for event in events):
+        return "execution_stall"
     if any(event.get("kind") == "no_progress" for event in events):
         return "no_progress"
     if any((event.get("observation") or {}).get("outcome") == "failed" for event in events):
@@ -1147,6 +1364,103 @@ def next_agent_trace_after(
     return {}, None
 
 
+def replan_hypothesis_from_event(event: dict[str, Any]) -> str:
+    if event.get("kind") != "llm_call":
+        return ""
+    observation = event.get("observation") or {}
+    if observation.get("budget_action") in ("freeze_or_replan", "stop_trial"):
+        return ""
+    for key in ("replan_hypothesis", "route_context_summary"):
+        value = str(observation.get(key) or "").strip()
+        if value:
+            return " ".join(value.split())
+    return route_context_summary_from_reason(str(observation.get("routing_reason") or ""))
+
+
+def replan_hypothesis_state(
+    events: list[dict[str, Any]],
+    last_replan_index: int | None,
+    last_progress_index: int | None,
+) -> dict[str, Any]:
+    if last_replan_index is None:
+        return {
+            "replan_hypothesis_count": 0,
+            "last_replan_hypothesis_event_id": "",
+            "last_replan_hypothesis": "",
+            "replan_hypothesis_status": "none",
+            "llm_calls_since_replan_hypothesis": 0,
+            "exploration_since_replan_hypothesis": 0,
+        }
+
+    hypothesis_indexes = [
+        index
+        for index, event in enumerate(events[last_replan_index + 1 :], start=last_replan_index + 1)
+        if replan_hypothesis_from_event(event)
+    ]
+    if not hypothesis_indexes:
+        status = "pending"
+        if last_progress_index is not None and last_progress_index > last_replan_index:
+            status = "progressed"
+        return {
+            "replan_hypothesis_count": 0,
+            "last_replan_hypothesis_event_id": "",
+            "last_replan_hypothesis": "",
+            "replan_hypothesis_status": status,
+            "llm_calls_since_replan_hypothesis": 0,
+            "exploration_since_replan_hypothesis": 0,
+        }
+
+    first_hypothesis_index = hypothesis_indexes[0]
+    first_hypothesis = ""
+    hypothesis_count = 0
+    latest_hypothesis_index = first_hypothesis_index
+    latest_hypothesis = ""
+    for index in hypothesis_indexes:
+        hypothesis = replan_hypothesis_from_event(events[index])
+        if not hypothesis:
+            continue
+        if not latest_hypothesis:
+            first_hypothesis = hypothesis
+        if hypothesis != latest_hypothesis:
+            hypothesis_count += 1
+        latest_hypothesis = hypothesis
+        latest_hypothesis_index = index
+    events_since_hypothesis = events[first_hypothesis_index + 1 :]
+    progress_after_hypothesis = last_progress_index is not None and last_progress_index > first_hypothesis_index
+    negative_after_hypothesis = any(
+        event.get("kind") in ("no_progress", "run_exception", "test_failed")
+        or (
+            event.get("kind") == "test_run"
+            and (event.get("observation") or {}).get("outcome") == "failed"
+        )
+        or (
+            event.get("kind") == "verifier_result"
+            and as_float((event.get("observation") or {}).get("reward")) <= 0
+        )
+        for event in events_since_hypothesis
+    )
+    status = "open"
+    if progress_after_hypothesis:
+        status = "progressed"
+    elif negative_after_hypothesis:
+        status = "stale"
+
+    return {
+        "replan_hypothesis_count": hypothesis_count,
+        "last_replan_hypothesis_event_id": events[latest_hypothesis_index].get("event_id", ""),
+        "last_replan_hypothesis": latest_hypothesis or first_hypothesis,
+        "replan_hypothesis_status": status,
+        "llm_calls_since_replan_hypothesis": sum(
+            1 for event in events_since_hypothesis if event.get("kind") == "llm_call"
+        ),
+        "exploration_since_replan_hypothesis": sum(
+            1
+            for event in events_since_hypothesis
+            if (event.get("observation") or {}).get("progress_tier") == "exploration"
+        ),
+    }
+
+
 def reduce_state(events: list[dict[str, Any]], rules: dict[str, Any]) -> dict[str, Any]:
     events = sorted_events(events)
     llm_events = [event for event in events if event.get("kind") == "llm_call"]
@@ -1155,14 +1469,20 @@ def reduce_state(events: list[dict[str, Any]], rules: dict[str, Any]) -> dict[st
     budget_actions = Counter((event.get("observation") or {}).get("budget_action") or "" for event in llm_events)
     progress_events = [event for event in events if is_progress_event(event)]
     candidate_progress_events = [event for event in events if is_candidate_progress_event(event)]
+    execution_stall_events = [event for event in events if event.get("kind") == "execution_stall"]
     tier_counts = progress_tier_counts(events)
     last_event = events[-1] if events else {}
+    last_llm_event = llm_events[-1] if llm_events else {}
     window_size = window_size_from_rules(rules)
     recent_events = events[-window_size:] if window_size else events
+    has_granular_progress = any(
+        event.get("source") != "agent_patch" and is_any_progress_signal(event)
+        for event in events
+    )
     progress_indexes = [
         index
         for index, event in enumerate(events)
-        if is_any_progress_signal(event)
+        if is_any_progress_signal(event) and not (has_granular_progress and event.get("source") == "agent_patch")
     ]
     last_progress_index = progress_indexes[-1] if progress_indexes else None
     events_since_progress = events[last_progress_index + 1 :] if last_progress_index is not None else events
@@ -1186,18 +1506,43 @@ def reduce_state(events: list[dict[str, Any]], rules: dict[str, Any]) -> dict[st
         for event in llm_since_progress
         if is_length_pressure_event(event)
     ]
-    return {
+    execution_stalls_since_progress = [
+        event for event in events_since_progress if event.get("kind") == "execution_stall"
+    ]
+    hypothesis_state = replan_hypothesis_state(events, last_replan_index, last_progress_index)
+    completion_readiness = completion_readiness_from_events(events)
+    delivery_writes = delivery_file_write_count(events)
+    no_progress_window = no_progress_window_state(events_since_progress, recent_events, rules)
+    last_llm_observation = last_llm_event.get("observation") or {}
+    state = {
         "event_count": len(events),
         "llm_call_count": len(llm_events),
         "tool_call_count": sum(1 for event in events if event.get("kind") == "tool_call"),
+        "execution_stall_count": len(execution_stall_events),
+        "execution_stalls_since_progress": len(execution_stalls_since_progress),
         "file_write_count": sum(1 for event in events if event.get("kind") == "file_written"),
+        "delivery_file_write_count": delivery_writes,
         "test_run_count": sum(1 for event in events if event.get("kind") == "test_run"),
         "cost_usd": round(sum(as_float((event.get("observation") or {}).get("cost_usd")) for event in llm_events), 8),
         "outcomes": dict(sorted(outcomes.items())),
         "models": dict(sorted(models.items())),
         "budget_actions": dict(sorted((k, v) for k, v in budget_actions.items() if k)),
+        "last_budget_action": last_llm_observation.get("budget_action") or "",
+        "last_finish_reason": str(last_llm_observation.get("finish_reason") or "").strip().lower(),
+        "recent_delivery_floor_attempts": recent_rule_call_count(recent_events, "episode_delivery_candidate_floor"),
+        "analysis_application_attempts_since_progress": recent_rule_call_count(
+            events_since_progress,
+            "episode_analysis_progress_application",
+        ),
+        "analysis_application_recoveries_since_progress": recent_rule_call_count(
+            events_since_progress,
+            "episode_analysis_progress_application_recovery",
+        ),
+        "completion_readiness": completion_readiness,
         "progress_event_count": len(progress_events),
         "candidate_progress_event_count": len(candidate_progress_events),
+        "strong_progress_count": tier_counts["strong"],
+        "strong_progress_event_count": tier_counts["strong"],
         "exploration_event_count": tier_counts["exploration"],
         "implementation_progress_event_count": tier_counts["implementation"],
         "validation_progress_event_count": tier_counts["validation"],
@@ -1211,6 +1556,7 @@ def reduce_state(events: list[dict[str, Any]], rules: dict[str, Any]) -> dict[st
         "exploration_since_replan": sum(
             1 for event in events_since_replan if (event.get("observation") or {}).get("progress_tier") == "exploration"
         ),
+        **hypothesis_state,
         "no_progress_event_count": sum(1 for event in events if event.get("kind") == "no_progress"),
         "events_since_progress": len(events_since_progress),
         "llm_calls_since_progress": len(llm_since_progress),
@@ -1218,10 +1564,12 @@ def reduce_state(events: list[dict[str, Any]], rules: dict[str, Any]) -> dict[st
         "last_progress_event_id": events[last_progress_index]["event_id"] if last_progress_index is not None else "",
         "last_progress_kind": events[last_progress_index]["kind"] if last_progress_index is not None else "",
         "recent_window": recent_window_state(recent_events),
-        "no_progress_window": no_progress_window_state(events_since_progress, recent_events, rules),
+        "no_progress_window": no_progress_window,
         "last_event_id": last_event.get("event_id", ""),
         "last_event_kind": last_event.get("kind", ""),
     }
+    state.update(next_capability_state(state))
+    return state
 
 
 def recent_window_state(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1233,6 +1581,7 @@ def recent_window_state(events: list[dict[str, Any]]) -> dict[str, Any]:
         "event_count": len(events),
         "llm_call_count": len(llm_events),
         "tool_call_count": sum(1 for event in events if event.get("kind") == "tool_call"),
+        "execution_stall_count": sum(1 for event in events if event.get("kind") == "execution_stall"),
         "file_write_count": len(file_writes),
         "delivery_file_write_count": sum(
             1 for event in file_writes if (event.get("observation") or {}).get("delivery_target")
@@ -1263,7 +1612,7 @@ def no_progress_window_state(
     recent = recent_window_state(recent_events)
     llm_since_progress = [event for event in events_since_progress if event.get("kind") == "llm_call"]
     length_since_progress = sum(1 for event in llm_since_progress if is_length_pressure_event(event))
-    recent_pressure = recent["length_pressure_count"] + recent["error_count"]
+    recent_pressure = recent["length_pressure_count"] + recent["error_count"] + recent["execution_stall_count"]
     recent_progress = recent["candidate_progress_count"] + recent["strong_progress_count"]
     severity = "none"
     if len(llm_since_progress) >= agent_threshold:
@@ -1284,6 +1633,178 @@ def no_progress_window_state(
     }
 
 
+def delivery_candidate_needs_delivery(state: dict[str, Any]) -> bool:
+    if str(state.get("completion_readiness") or "none") != "delivery_candidate":
+        return False
+    if as_int(state.get("delivery_file_write_count")) > 0 or as_int(state.get("delivery_progress_event_count")) > 0:
+        return False
+    if as_int(state.get("validation_progress_event_count")) > 0 or as_int(state.get("test_run_count")) > 0:
+        return False
+    if as_int(state.get("implementation_progress_event_count")) < DELIVERY_CANDIDATE_PROGRESS_THRESHOLD:
+        return False
+    return (
+        as_int(state.get("llm_calls_since_progress")) >= DELIVERY_CANDIDATE_IDLE_CALL_THRESHOLD
+        or as_int(state.get("exploration_since_progress")) >= DELIVERY_CANDIDATE_IDLE_CALL_THRESHOLD
+        or as_int(state.get("length_pressure_since_progress")) >= 2
+    )
+
+
+def delivery_candidate_floor_exhausted(state: dict[str, Any]) -> bool:
+    return delivery_candidate_needs_delivery(state) and (
+        as_int(state.get("recent_delivery_floor_attempts")) >= DELIVERY_CANDIDATE_FLOOR_ATTEMPT_LIMIT
+    )
+
+
+def recent_rule_call_count(events: list[dict[str, Any]], rule_id: str) -> int:
+    return sum(
+        1
+        for event in events
+        if event.get("kind") == "llm_call"
+        and routing_reason_has_rule_id(
+            str((event.get("observation") or {}).get("routing_reason") or ""),
+            rule_id,
+        )
+    )
+
+
+def routing_reason_has_rule_id(reason: str, rule_id: str) -> bool:
+    if not rule_id:
+        return False
+    return re.search(rf"\brule_id={re.escape(rule_id)}(?:[\s;,]|$)", reason) is not None
+
+
+def replan_hypothesis_needs_application(state: dict[str, Any]) -> bool:
+    if not state.get("last_replan_event_id") or not state.get("last_replan_hypothesis"):
+        return False
+    if state.get("last_budget_action") == "hypothesis_apply":
+        return False
+    if str(state.get("replan_hypothesis_status") or "none") not in {"open", "stale"}:
+        return False
+    return as_int(state.get("candidate_progress_event_count")) == 0 and as_int(state.get("strong_progress_count")) == 0
+
+
+def hypothesis_apply_length_needs_recovery(state: dict[str, Any]) -> bool:
+    if state.get("last_budget_action") != "hypothesis_apply":
+        return False
+    if str(state.get("last_finish_reason") or "").strip().lower() != "length":
+        return False
+    return as_int(state.get("candidate_progress_event_count")) == 0 and as_int(state.get("strong_progress_count")) == 0
+
+
+def execution_stall_needs_recovery(state: dict[str, Any]) -> bool:
+    return as_int(state.get("execution_stalls_since_progress")) >= 2
+
+
+def analysis_progress_application_exhausted(state: dict[str, Any]) -> bool:
+    if state.get("last_progress_kind") != "analysis_progress":
+        return False
+    return (
+        as_int(state.get("analysis_application_attempts_since_progress"))
+        >= ANALYSIS_PROGRESS_APPLICATION_ATTEMPT_LIMIT
+        and as_int(state.get("analysis_application_recoveries_since_progress")) == 0
+    )
+
+
+def analysis_progress_recovery_awaiting_outcome(state: dict[str, Any]) -> bool:
+    if state.get("last_progress_kind") != "analysis_progress":
+        return False
+    return (
+        as_int(state.get("analysis_application_attempts_since_progress"))
+        >= ANALYSIS_PROGRESS_APPLICATION_ATTEMPT_LIMIT
+        and as_int(state.get("analysis_application_recoveries_since_progress")) > 0
+    )
+
+
+def next_capability_state(state: dict[str, Any]) -> dict[str, str]:
+    readiness = str(state.get("completion_readiness") or "none")
+    if readiness in {"verifier_failed", "validation_failed"}:
+        reason = "verifier_failed_current_delivery" if readiness == "verifier_failed" else "validation_failed_current_delivery"
+        return {
+            "next_min_capability": "premium_recover",
+            "next_budget_action_hint": "premium_recover",
+            "next_capability_reason": reason,
+        }
+    if readiness in {"verifier_passed", "validation_passed"}:
+        reason = "verifier_passed_current_delivery" if readiness == "verifier_passed" else "validation_passed_assess_hidden_gap"
+        return {
+            "next_min_capability": "premium_assess",
+            "next_budget_action_hint": "premium_reason",
+            "next_capability_reason": reason,
+        }
+    if hypothesis_apply_length_needs_recovery(state):
+        return {
+            "next_min_capability": "premium_recover",
+            "next_budget_action_hint": "premium_recover",
+            "next_capability_reason": "hypothesis_apply_length_truncated",
+        }
+    if execution_stall_needs_recovery(state):
+        return {
+            "next_min_capability": "premium_recover",
+            "next_budget_action_hint": "premium_recover",
+            "next_capability_reason": "execution_stall_needs_recovery",
+        }
+    if analysis_progress_application_exhausted(state):
+        return {
+            "next_min_capability": "premium_recover",
+            "next_budget_action_hint": "premium_recover",
+            "next_capability_reason": "analysis_progress_application_exhausted",
+        }
+    if delivery_candidate_needs_delivery(state):
+        if delivery_candidate_floor_exhausted(state):
+            return {
+                "next_min_capability": "premium_recover",
+                "next_budget_action_hint": "premium_recover",
+                "next_capability_reason": "delivery_candidate_floor_exhausted",
+            }
+        return {
+            "next_min_capability": "cheap_execute",
+            "next_budget_action_hint": "cheap_execute",
+            "next_capability_reason": "delivery_candidate_needs_delivery",
+        }
+    if replan_hypothesis_needs_application(state):
+        return {
+            "next_min_capability": "cheap_execute",
+            "next_budget_action_hint": "hypothesis_apply",
+            "next_capability_reason": "replan_hypothesis_needs_validation",
+        }
+    severity = str((state.get("no_progress_window") or {}).get("severity") or "none")
+    if severity in {"stale", "blocked"} or bool((state.get("no_progress_window") or {}).get("active")) and severity != "watch":
+        return {
+            "next_min_capability": "premium_recover",
+            "next_budget_action_hint": "premium_recover",
+            "next_capability_reason": f"episode_no_progress_{severity}",
+        }
+    if readiness == "delivery_candidate":
+        return {
+            "next_min_capability": "cheap_execute",
+            "next_budget_action_hint": "cheap_execute",
+            "next_capability_reason": "target_changed_needs_validation",
+        }
+    if analysis_progress_recovery_awaiting_outcome(state):
+        return {
+            "next_min_capability": "cheap_probe",
+            "next_budget_action_hint": "cheap_probe",
+            "next_capability_reason": "analysis_progress_recovery_awaiting_outcome",
+        }
+    if state.get("last_progress_kind") == "analysis_progress":
+        return {
+            "next_min_capability": "cheap_execute",
+            "next_budget_action_hint": "cheap_execute",
+            "next_capability_reason": "analysis_progress_needs_application",
+        }
+    if severity == "watch":
+        return {
+            "next_min_capability": "cheap_probe",
+            "next_budget_action_hint": "cheap_probe",
+            "next_capability_reason": "watching_output_pressure",
+        }
+    return {
+        "next_min_capability": "cheap_probe",
+        "next_budget_action_hint": "cheap_probe",
+        "next_capability_reason": "no_blocking_outcome",
+    }
+
+
 def is_length_pressure_event(event: dict[str, Any]) -> bool:
     observation = event.get("observation") or {}
     return event.get("kind") == "llm_call" and (
@@ -1298,6 +1819,7 @@ def build_summary(
     traces: list[dict[str, Any]],
     events: list[dict[str, Any]],
     cutoff_check: dict[str, Any],
+    rules: dict[str, Any],
 ) -> dict[str, Any]:
     by_kind = Counter(event["kind"] for event in events)
     llm_events = [event for event in events if event["kind"] == "llm_call"]
@@ -1317,6 +1839,7 @@ def build_summary(
     agent_call_count = len(llm_events)
     length_count = outcomes.get("length_truncated", 0)
     route_outcomes = cutoff_check.get("route_outcomes") or []
+    reduced_state = reduce_state(events, rules)
     return {
         "schema_version": "episode-summary-v1",
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1364,11 +1887,27 @@ def build_summary(
         "implementation_progress_event_count": tier_counts["implementation"],
         "validation_progress_event_count": tier_counts["validation"],
         "delivery_progress_event_count": tier_counts["delivery"],
+        "completion_readiness": reduced_state["completion_readiness"],
+        "next_min_capability": reduced_state["next_min_capability"],
+        "next_budget_action_hint": reduced_state["next_budget_action_hint"],
+        "next_capability_reason": reduced_state["next_capability_reason"],
+        "last_budget_action": reduced_state["last_budget_action"],
+        "last_finish_reason": reduced_state["last_finish_reason"],
+        "recent_delivery_floor_attempts": reduced_state["recent_delivery_floor_attempts"],
+        "llm_calls_since_progress": reduced_state["llm_calls_since_progress"],
+        "exploration_since_progress": reduced_state["exploration_since_progress"],
+        "length_pressure_since_progress": reduced_state["length_pressure_since_progress"],
         "replan_count": sum(
             1
             for event in llm_events
             if (event.get("observation") or {}).get("budget_action") == "freeze_or_replan"
         ),
+        "replan_hypothesis_count": reduced_state["replan_hypothesis_count"],
+        "last_replan_hypothesis_event_id": reduced_state["last_replan_hypothesis_event_id"],
+        "last_replan_hypothesis": reduced_state["last_replan_hypothesis"],
+        "replan_hypothesis_status": reduced_state["replan_hypothesis_status"],
+        "llm_calls_since_replan_hypothesis": reduced_state["llm_calls_since_replan_hypothesis"],
+        "exploration_since_replan_hypothesis": reduced_state["exploration_since_replan_hypothesis"],
         "no_progress_turn_count": by_kind.get("no_progress", 0),
         "route_outcome_count": len(route_outcomes),
         "route_outcome_labels": dict(

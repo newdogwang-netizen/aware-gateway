@@ -41,6 +41,7 @@ VALID_BUDGET_ACTIONS = {
     "premium_recover",
     "completion_guardrail",
     "freeze_or_replan",
+    "hypothesis_apply",
 }
 
 
@@ -261,6 +262,10 @@ Decision principles:
 - If no_progress is present and there is no newer progress event, avoid blind budget expansion. Choose freeze_or_replan or premium_recover only if the reason names a new strategy.
 - If state shows repeated length_truncated without progress, decide whether the bottleneck is output room or wrong direction. More tokens alone is not a plan.
 - If last_replan_event_id is present and llm_calls_since_replan is growing without implementation/delivery/validation progress, prefer stopping expansion or recovery only with a new concrete pivot.
+- If replan_hypothesis_status is open, prefer hypothesis_apply: validate, implement, or explicitly abandon last_replan_hypothesis; avoid broad exploration that does not test it.
+- If next_capability_reason is hypothesis_apply_length_truncated, prefer premium_recover for one concise recovery turn that keeps the same hypothesis and restores a valid command or deliverable.
+- If next_capability_reason is delivery_candidate_needs_delivery, prefer cheap_execute and convert the current candidate into the required deliverable or run one direct validation check instead of continuing broad analysis.
+- If next_capability_reason is delivery_candidate_floor_exhausted, do not keep cheap-looping; use premium_recover to resolve the delivery gap or stop expansion.
 {variant_guidance}
 
 Episode summary:
@@ -278,7 +283,7 @@ Relevant visible evidence refs you may cite:
 Return JSON only:
 {{
   "model": "z-ai/glm-5.3-flash | anthropic/claude-opus-5",
-  "budget_action": "cheap_probe | cheap_execute | premium_reason | premium_recover | completion_guardrail | freeze_or_replan",
+  "budget_action": "cheap_probe | cheap_execute | hypothesis_apply | premium_reason | premium_recover | completion_guardrail | freeze_or_replan",
   "progress_state": "unknown | no_progress | candidate_progress | validation_progress | ready_for_completion",
   "critical_path": true,
   "evidence_refs": ["exactly one ref copied exactly from Relevant visible evidence refs"],
@@ -409,7 +414,15 @@ def row_base(sample: dict[str, Any]) -> dict[str, Any]:
         "state_llm_call_count": state.get("llm_call_count", 0),
         "state_tool_call_count": state.get("tool_call_count", 0),
         "state_file_write_count": state.get("file_write_count", 0),
+        "state_delivery_file_write_count": state.get("delivery_file_write_count", 0),
         "state_test_run_count": state.get("test_run_count", 0),
+        "state_completion_readiness": state.get("completion_readiness", "none"),
+        "state_next_min_capability": state.get("next_min_capability", "unknown"),
+        "state_next_budget_action_hint": state.get("next_budget_action_hint", ""),
+        "state_next_capability_reason": state.get("next_capability_reason", ""),
+        "state_last_budget_action": state.get("last_budget_action", ""),
+        "state_last_finish_reason": state.get("last_finish_reason", ""),
+        "state_recent_delivery_floor_attempts": state.get("recent_delivery_floor_attempts", 0),
         "state_progress_event_count": state.get("progress_event_count", 0),
         "state_candidate_progress_event_count": state.get("candidate_progress_event_count", 0),
         "state_exploration_event_count": state.get("exploration_event_count", 0),
@@ -421,6 +434,12 @@ def row_base(sample: dict[str, Any]) -> dict[str, Any]:
         "state_last_replan_event_id": state.get("last_replan_event_id", ""),
         "state_llm_calls_since_replan": state.get("llm_calls_since_replan", 0),
         "state_exploration_since_replan": state.get("exploration_since_replan", 0),
+        "state_replan_hypothesis_count": state.get("replan_hypothesis_count", 0),
+        "state_last_replan_hypothesis_event_id": state.get("last_replan_hypothesis_event_id", ""),
+        "state_last_replan_hypothesis": state.get("last_replan_hypothesis", ""),
+        "state_replan_hypothesis_status": state.get("replan_hypothesis_status", "none"),
+        "state_llm_calls_since_replan_hypothesis": state.get("llm_calls_since_replan_hypothesis", 0),
+        "state_exploration_since_replan_hypothesis": state.get("exploration_since_replan_hypothesis", 0),
         "state_no_progress_event_count": state.get("no_progress_event_count", 0),
         "state_events_since_progress": state.get("events_since_progress", 0),
         "state_llm_calls_since_progress": state.get("llm_calls_since_progress", 0),

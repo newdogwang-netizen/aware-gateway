@@ -760,6 +760,277 @@ Route instruction partially helped: the later trace produced a concrete protocol
 Next issue is not another threshold tweak; it is capturing and scoring the replan hypothesis as an explicit event, then validating whether that hypothesis changes delivery outcome.
 ```
 
+#### 2026-09-10 replan hypothesis projection checkpoint
+
+上一条 canary 暴露了一个更具体的问题：
+
+```text
+gateway 已经会喊停并要求 replan，
+但 episode state 只知道“发生过 replan”，不知道“replan 之后形成了什么假设”。
+```
+
+这会导致两个坏处：
+
+- stop gate 只能说“replan 后没有进展”，不能说明是哪条假设没有落地。
+- 后续 router prompt 只能看到 `last_replan_event_id`，不能要求下一步围绕某个具体假设做验证或实现 pivot。
+
+本轮补丁：
+
+- 在线 `Record()` 把 `routing_reason` 和解析出的 `route_context_summary` 投影进 `llm_call` event observation。
+- reducer 在 `freeze_or_replan` 后打开 `replan_hypothesis` 窗口。
+- replan 后下一条带 `ctx="..."` 的 router context summary 会被记录为 `last_replan_hypothesis`。
+- hypothesis 状态分为 `pending`、`open`、`stale`、`progressed`。
+- 当 hypothesis 处于 `open` 时，`next_min_capability=cheap_execute`、`next_capability_reason=replan_hypothesis_needs_validation`，要求下一步做窄验证/实现，而不是继续 broad probe。
+- 如果 post-replan stop gate 已到阈值，但刚出现一个还没有被任何后续调用验证过的 `open` hypothesis，gateway 会放行一次验证机会；这一轮仍没有进展才停止。
+- 如果后续出现 implementation/validation/delivery/strong progress，hypothesis 关闭为 `progressed`；如果出现 no-progress/异常/失败验证，则标为 `stale`。
+
+回归约束：
+
+```text
+go test ./plugins/smartrouter
+- replan 后从 routing_reason ctx 捕获 hypothesis
+- open hypothesis 会把 cheap_probe floor 到 cheap_execute
+- progress 出现后 replan window 清空，hypothesis 标记 progressed
+
+python3 -m unittest tests.test_extract_episode_outcomes
+- offline reduce_state 捕获 replan_hypothesis
+- stale/open/progressed 状态可复原
+```
+
+真实 `shadow-relay` canary 重新抽取：
+
+```text
+artifact = /mnt/data2/aware-gateway-runs/aware-v4-20260910T120642Z/rsi-extract-canary-shadow-relay-hypothesis
+event_count = 34
+replan_count = 1
+replan_hypothesis_count = 1
+last_replan_hypothesis = LCG predecessor matches repeated capture seed; protocol synthesis now needed
+replan_hypothesis_status = stale
+llm_calls_since_replan_hypothesis = 1
+exploration_since_replan_hypothesis = 0
+future_evidence_leakage = 0
+```
+
+验收判断：
+
+```text
+Replan hypothesis projection accepted.
+它解决的是“重规划内容可审计、可进入下一轮状态”的问题。
+它还没有证明质量提升，因为同一条 canary 的最终 reward 仍为 0。
+下一步要验证：open hypothesis -> cheap_execute validation floor 是否能减少无效探索，并在真实任务上带来更多 implementation/validation/delivery progress。
+```
+
+#### 2026-09-10 delivery-candidate floor checkpoint
+
+把 replan hypothesis 投影合入后，又跑了一条真实 `shadow-relay` canary：
+
+```text
+artifact = /mnt/data2/aware-gateway-runs/aware-v4-20260910T122919Z
+extract = /mnt/data2/aware-gateway-runs/aware-v4-20260910T122919Z/rsi-extract-canary-shadow-relay-delivery-floor-v3
+failure_kind = gateway_cost_stop_gate
+reward = 0.0
+duration_seconds = 839.98
+total_cost_usd = 3.27950441
+agent_cost_usd = 3.17667241
+decision_cost_usd = 0.102832
+agent_call_count = 29
+decision_call_count = 12
+length_finish_count = 12
+length_finish_rate = 41.38%
+delivery_file_write_count = 0
+validation_progress_event_count = 0
+delivery_progress_event_count = 0
+implementation_progress_event_count = 10
+llm_calls_since_progress = 8
+exploration_since_progress = 4
+length_pressure_since_progress = 4
+next_capability_reason = delivery_candidate_needs_delivery
+```
+
+真实模型和动作分布：
+
+| 维度 | 次数 | 成本 | length |
+|------|------|------|--------|
+| Flash | 16 | `$0.0260` | 4 |
+| Opus | 12 | `$3.1507` | 8 |
+| `cheap_probe` | 10 | `$0.0153` | 2 |
+| `cheap_execute` | 6 | `$0.0107` | 2 |
+| `premium_reason` | 5 | `$1.1707` | 2 |
+| `premium_recover` | 7 | `$1.9799` | 6 |
+
+归因：
+
+```text
+这条 canary 比上一条 early-stop 有进步：
+它不再停在纯 exploration，而是写出了多个 /app/work 中间产物，
+并在 LCG / C2 payload / VM semantics 上形成了可审计的中间假设。
+
+但它仍然没有完成任务：
+候选解散落在 /app/work，0 次写入 delivery 目标，0 次当前交付验证。
+后半段 7 次 premium_recover 中 6 次被 length 截断，
+相当于用最贵模型给越来越长的上下文续命。
+```
+
+这说明新问题不是“要不要再多给 Opus”，而是：
+
+```text
+Episode 已经能识别 implementation progress，
+但还缺一个从 implementation candidate 推向 delivery/validation 的动作。
+```
+
+本轮补丁：
+
+- 新增 `delivery_candidate_needs_delivery` 派生状态。
+- 条件只看通用 Episode 事实，不看任务名或关键词：
+  - `completion_readiness=delivery_candidate`
+  - `implementation_progress_count >= 6`
+  - `delivery_file_write_count = 0`
+  - `validation_progress_count = 0`
+  - `test_run_count = 0`
+  - 且最近已有至少 `3` 次调用/探索空转，或至少 `2` 次 length pressure。
+- `delivery_candidate_needs_delivery` 在 no-progress recovery 之前生效，避免立刻进入昂贵的 blind premium recovery。
+- safe-control 本地返回 `cheap_execute`，不调用 semantic judge。
+- 该路由会注入 agent instruction：停止 broad exploration；如果事实已足够，立即写/更新 required final deliverable；否则只跑一个能直接关闭 delivery/validation 缺口的窄检查。
+- 离线 extractor/replay 同步输出 `completion_readiness`、`next_min_capability`、`next_budget_action_hint`、`next_capability_reason`。
+- 离线归因修复：当 trajectory 已有细粒度 file/write 事件时，Harbor collect hook 生成的 `agent.patch` 不再刷新 `last_progress`，避免把试验结束后的聚合 patch 误算成新进展。
+
+验收判断：
+
+```text
+Replan hypothesis projection accepted.
+Delivery-candidate floor implemented, not yet quality-accepted.
+
+下一条真实 canary 应该验证：
+1. 是否出现 episode_delivery_candidate_floor；
+2. delivery_file_write_count 是否从 0 变为 >0；
+3. premium_recover 调用和 length 截断是否下降；
+4. reward 是否接近或达到 best-known pass 样本。
+```
+
+#### 2026-09-10 outcome-aware online control checkpoint
+
+上一条 canary 说明了 `delivery_candidate_needs_delivery` 的方向是对的，但仍然不够：
+
+```text
+候选产物可以被识别出来，
+但 router 还不能稳定地区分“已经得到关键分析结论”与“还在泛泛探索”。
+```
+
+这会让 agent 在已经解出中间事实之后继续读文件、打印长日志或重复续写分析，最终把
+premium recovery 用在越来越长的上下文上。新的目标不是继续堆关键词，而是把“分析进展”
+也放进 Episode 状态，并要求下一轮把它转成交付动作。
+
+本轮补丁：
+
+- 新增 `analysis_progress` 事件：从 agent analysis 和工具输出中识别已经验证的任务事实、解码产物、候选答案。
+- 新增 `execution_stall` 事件：识别 heredoc 残留、交互式命令卡住、KeyboardInterrupt 等执行层卡死。
+- 新增 `hypothesis_apply` budget action：replan 形成明确假设后，下一轮必须验证、实现或放弃这个假设，而不是继续宽泛探索。
+- 新增 `episode_replan_hypothesis_apply`：对 open/stale hypothesis 本地 floor 到 `hypothesis_apply`。
+- 新增 `episode_hypothesis_apply_length_recovery`：如果 hypothesis apply 被截断，下一轮只允许一次 premium recovery 来修复同一条假设，不重新发散。
+- 新增 `episode_analysis_progress_application`：检测到新的 `analysis_progress` 后，本地路由 `cheap_execute`，要求把事实转成交付、验证或最小可执行检查。
+- 新增 `episode_analysis_progress_application_recovery`：同一条分析进展连续 3 次 cheap application 仍未落地时，只升级一次 premium recovery。
+- 新增 `episode_execution_stall_recovery`：连续执行层 stall 时，用 premium recovery 生成一个非交互、短输出、可落地的命令或交付动作。
+- 修复 rule id 前缀匹配：`episode_analysis_progress_application` 不再误匹配
+  `episode_analysis_progress_application_recovery`。
+- 调整 safe-control 优先级：紧急状态控制先于 premium cooldown；普通 no-progress recovery 仍受 cooldown 约束，避免重新退化成 all-premium。
+
+确定性验证：
+
+```text
+go test ./plugins/smartrouter                         passed
+python3 -m unittest tests.test_extract_episode_outcomes passed
+make test-scripts                                      passed
+make test-short GO=/usr/local/go/bin/go                passed
+make build GO=/usr/local/go/bin/go                     passed
+safe-control probe                                     271/271
+```
+
+真实 `shadow-relay` canary：
+
+| artifact | reward | total cost | agent cost | decision cost | agent calls | decision calls | duration |
+|----------|--------|------------|------------|---------------|-------------|----------------|----------|
+| `/mnt/data2/aware-gateway-runs/aware-v4-20260910T152950Z` | `1.0` | `$1.4194` | `$1.3971` | `$0.0223` | 23 | 3 | `463.0s` |
+
+路由动作：
+
+```text
+cheap_execute:11
+cheap_probe:6
+completion_guardrail:1
+freeze_or_replan:1
+premium_reason:1
+premium_recover:3
+```
+
+safe-control 命中：
+
+```text
+episode_analysis_progress_application:10
+episode_analysis_progress_application_recovery:2
+episode_long_exploration_replan:1
+episode_no_progress_recovery:1
+file_read_search_cheap:3
+fixed_format_output_cheap:1
+premium_cooldown:1
+```
+
+离线 strict extract：
+
+```text
+episode events = 80
+llm_call = 23
+tool_call = 40
+analysis_progress = 7
+file_written = 4
+file_modified = 1
+test_run = 1
+test_passed = 1
+verifier_result = 1
+future_evidence_leakage = 0
+completion_readiness = verifier_passed
+next_capability_reason = verifier_passed_current_delivery
+```
+
+与 `shadow-relay` 历史锚点对比：
+
+| sample | reward | cost | agent calls | 备注 |
+|--------|--------|------|-------------|------|
+| A1 best-known pass | 1.0 | `$2.2468` | 22 | 历史成功锚点 |
+| A4 pass | 1.0 | `$3.4808` | 44 | 预算机制能工作但截断多 |
+| A5 stopped | 0 | `$7.0576` | 59 | 成本失控样本 |
+| 本轮 online control | 1.0 | `$1.4194` | 23 | Episode 状态闭环首次跑通 |
+
+本轮判断：
+
+```text
+Online outcome-aware control accepted for shadow-relay canary.
+Budget policy effectiveness accepted only for this representative task.
+Issue #1 remains open.
+```
+
+接受的部分：
+
+- 成功跑通 `Route -> Tool/Event -> State -> Next Action -> Delivery -> Verifier` 闭环。
+- 成本低于 A1/A4 两条历史成功锚点，且没有退化成 all-premium。
+- decision model 调用降到 3 次，主要决策由可审计的 safe-control / Episode 状态接管。
+- `finish_reason=stop` 没有被当成完成；最终完成来自 `/app/output` 交付写入、8/8 verifier 通过和 reward `1.0`。
+
+仍未接受的部分：
+
+- 这只是 `shadow-relay` 单条成功 canary，不能证明跨任务泛化。
+- `analysis_progress` 仍有启发式成分，需要在更多任务上验证是否会误把“漂亮分析”当成真实推进。
+- native live tool event hook 还没有接进 agent runtime，目前 Harbor 仍依赖 artifact watcher。
+- policy 还没有经过每任务至少 3 次的重复验收。
+
+下一步不再沿 `shadow-relay` 继续手调阈值。应进入小规模泛化验证：
+
+```text
+1. 选择 1 个短数据/算法任务作为 holdout；
+2. 使用同一套 Episode 控制，不引入任务名特例；
+3. 每条任务先跑 1 次 screening；
+4. 如果 reward 不回退且成本不失控，再做每任务 3 次 acceptance。
+```
+
 ### Step 5: 小规模 Harbor pilot
 
 只跑通过公开 leaderboard 或本地已知可解的任务。
@@ -948,6 +1219,17 @@ Online Episode State Query        done for GET /v1/episode-state
 State Backfill                    done for persisted traces/events -> online projection
 Deterministic Runtime Probe       done for event ingest -> state query -> recovery route -> local stop gates, replan gate, and tiered progress
 Long-exploration Replan Control   done for freeze_or_replan and post-replan early stop
+Replan Hypothesis Projection      done for pending/open/stale/progressed hypothesis state
+Hypothesis Apply Action           done for state-driven hypothesis validation/application floor
+Hypothesis Apply Length Recovery  done for one bounded premium recovery after truncated apply
+Delivery Candidate Floor          done for implementation-heavy trajectories without delivery/validation
+Delivery Candidate Recovery Floor done for exhausted cheap delivery attempts
+Analysis Progress Projection      done for verified facts, decoded artifacts, and candidate answers
+Analysis Progress Application     done for cheap_execute after new analysis_progress
+Analysis Application Recovery     done for one premium_recover after 3 failed application attempts
+Execution Stall Projection        done for heredoc residue, interrupted commands, and execution dead ends
+Execution Stall Recovery          done for premium_recover after repeated stalls
+Shadow-relay Online Canary        passed reward=1.0 cost=$1.4194 agent_calls=23
 ```
 
 RSI R1 完整结束后，aware-gateway 应达到：
@@ -966,15 +1248,16 @@ Route-to-Outcome Feedback         partial for extractor/replay windows and compa
 Next-step Capability Estimate     partial via deterministic state hint, not yet acceptance-tuned
 Capability Floor Control          partial; hard verifier/no-progress and post-delivery validation assess floors enforced, delivery floors now local
 Gateway Stop Gate                 partial; local abort/replan paths enforced, latest canaries stop no-effective-progress/cost before wall-clock cap
+Analysis-to-Delivery Control      partial; shadow-relay passed, needs holdout tasks
 Online State Inspection           done for current in-memory projection
 Restart State Rebuild             partial for audit trace/event backfill
 Runtime Probe Acceptance          done for deterministic local gateway/mocks
 C2 No-progress Budget Freeze      implemented; needs matched Harbor pilot acceptance
 C3 Repeated-failure Recovery      implemented; needs matched Harbor pilot acceptance
-Delivery Feedback                 partial via completion readiness, stale-proof invalidation, guardrail evidence, and local delivery floor routing
-Outcome-aware Screening Pilot     harness done for P2; needs matched Harbor pilot data
+Delivery Feedback                 partial via completion readiness, stale-proof invalidation, guardrail evidence, local delivery floor routing, and one successful verifier-passed canary
+Outcome-aware Screening Pilot     done for shadow-relay; needs at least one holdout task
 Outcome-aware Acceptance          gate implemented; still needs at least 3 runs per accepted task class
-Budget Policy Effectiveness       accepted or explicitly rejected
+Budget Policy Effectiveness       accepted only for shadow-relay screening, not globally
 Automatic Tool Event Capture      partial via Harbor artifact watcher; native hook not started
 Command-level Event Adapter       done for local command wrapping
 Issue #1                          remains open until native live events and acceptance gates close the loop

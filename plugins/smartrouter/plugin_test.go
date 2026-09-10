@@ -387,6 +387,23 @@ func TestSafeControlDoesNotTreatImplementationProtocolAsFixedFormatOnly(t *testi
 	}
 }
 
+func TestParseRequestDetectsToolObservationContext(t *testing.T) {
+	parsed := parseRequest([]byte(`{
+		"model": "auto",
+		"messages": [
+			{"role": "system", "content": "You are a terminal coding agent."},
+			{"role": "assistant", "content": "I will inspect the file."},
+			{"role": "user", "content": "New Terminal Output:\nexit code 0\nroot@task:/app# python3 solve.py\ncandidate result"}
+		]
+	}`))
+	if parsed == nil {
+		t.Fatal("parseRequest returned nil")
+	}
+	if !parsed.HasToolObservation {
+		t.Fatal("HasToolObservation = false, want true for terminal output context")
+	}
+}
+
 func TestTaskCompletionConfirmationRoutesToStrongestConfiguredModel(t *testing.T) {
 	decisionServerCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1498,6 +1515,160 @@ func TestEpisodeDeliveryFloorPreemptsPremiumCooldown(t *testing.T) {
 	}
 	if strings.Contains(decision.Reason, "rule_id=premium_cooldown") {
 		t.Fatalf("reason = %q, delivery floor should preempt premium cooldown", decision.Reason)
+	}
+}
+
+func TestEpisodeDeliveryCandidateFloorForcesCheapDeliveryTurn(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 8}
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionCheapExecute: {MaxTokens: 1536, TimeoutMs: 60000},
+		},
+	}
+
+	episodeID := "episode-delivery-candidate-floor"
+	now := time.Now()
+	for i := 0; i < defaultDeliveryCandidateProgressThreshold; i++ {
+		if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+			EventID:   fmt.Sprintf("event-implementation-%d", i+1),
+			EpisodeID: episodeID,
+			Timestamp: now.Add(time.Duration(i) * time.Millisecond),
+			Kind:      "file_written",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"workspace_target": true,
+				"path_count":       1,
+			},
+		}); err != nil {
+			t.Fatalf("RecordEpisodeEvent implementation %d returned error: %v", i+1, err)
+		}
+	}
+	for i := 0; i < defaultDeliveryCandidateIdleCallThreshold; i++ {
+		if err := router.Record(&plugin.AuditRecord{
+			TraceID:      fmt.Sprintf("trace-idle-%d", i+1),
+			Timestamp:    now.Add(time.Duration(100+i) * time.Millisecond),
+			SessionID:    episodeID,
+			Pool:         "openrouter",
+			RoutedModel:  "z-ai/glm-5.3-flash",
+			Status:       200,
+			FinishReason: "stop",
+			BudgetAction: budgetActionCheapProbe,
+			TotalTokens:  1000,
+			Cost:         0.01,
+			LatencyMs:    1000,
+		}); err != nil {
+			t.Fatalf("Record idle LLM %d returned error: %v", i+1, err)
+		}
+	}
+
+	states, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: episodeID})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates returned error: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	state := states[0].State
+	if got := state["next_min_capability"]; got != nextMinCapabilityCheapExecute {
+		t.Fatalf("next min capability = %#v, want cheap_execute", got)
+	}
+	if got := state["next_capability_reason"]; got != "delivery_candidate_needs_delivery" {
+		t.Fatalf("next reason = %#v, want delivery_candidate_needs_delivery", got)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", episodeID)
+	req.Header.Set("X-Session-ID", episodeID)
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue with the next bounded step."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local delivery candidate floor")
+	}
+	if decision == nil || decision.Model != "z-ai/glm-5.3-flash" {
+		t.Fatalf("decision = %#v, want Flash cheap execution", decision)
+	}
+	if decision.BudgetAction != budgetActionCheapExecute {
+		t.Fatalf("budget action = %q, want %s", decision.BudgetAction, budgetActionCheapExecute)
+	}
+	if decision.AgentInstruction != deliveryCandidateAgentInstruction {
+		t.Fatalf("agent instruction = %q, want delivery candidate instruction", decision.AgentInstruction)
+	}
+	for _, want := range []string{
+		"rule_id=episode_delivery_candidate_floor",
+		"capability_floor status=local",
+		"expected=cheap_execute",
+		"reason=delivery_candidate_needs_delivery",
+		"implementation_progress=6",
+		"delivery_file_writes=0",
+		"route_max_tokens=1536",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+
+	for i := 0; i < defaultDeliveryCandidateFloorAttemptLimit; i++ {
+		if err := router.Record(&plugin.AuditRecord{
+			TraceID:       fmt.Sprintf("trace-delivery-floor-%d", i+1),
+			Timestamp:     now.Add(time.Duration(200+i) * time.Millisecond),
+			SessionID:     episodeID,
+			EpisodeID:     episodeID,
+			Pool:          "openrouter",
+			RoutedModel:   "z-ai/glm-5.3-flash",
+			Status:        200,
+			FinishReason:  "stop",
+			BudgetAction:  budgetActionCheapExecute,
+			RoutingReason: decision.Reason,
+			TotalTokens:   1000,
+			Cost:          0.01,
+			LatencyMs:     1000,
+		}); err != nil {
+			t.Fatalf("Record delivery floor LLM %d returned error: %v", i+1, err)
+		}
+	}
+
+	snapshot := router.episodeSnapshot(req)
+	if got := snapshot.NextMinCapability; got != nextMinCapabilityPremiumRecover {
+		t.Fatalf("exhausted next min capability = %#v, want premium_recover", got)
+	}
+	if got := snapshot.NextCapabilityReason; got != "delivery_candidate_floor_exhausted" {
+		t.Fatalf("exhausted next reason = %#v, want delivery_candidate_floor_exhausted", got)
+	}
+	decision, err = router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route exhausted returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local delivery candidate recovery floor")
+	}
+	if decision == nil || decision.Model != "anthropic/claude-opus-5" {
+		t.Fatalf("decision = %#v, want Opus recovery", decision)
+	}
+	if decision.BudgetAction != budgetActionPremiumRecover {
+		t.Fatalf("budget action = %q, want %s", decision.BudgetAction, budgetActionPremiumRecover)
+	}
+	for _, want := range []string{
+		"rule_id=episode_delivery_candidate_recovery_floor",
+		"expected=premium_recover",
+		"reason=delivery_candidate_floor_exhausted",
+		"recent_delivery_floor_attempts=2",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("exhausted reason = %q, want %q", decision.Reason, want)
+		}
 	}
 }
 
@@ -2893,6 +3064,7 @@ func TestEpisodeBlockedPremiumRecoveryWithoutProgressStopsTrial(t *testing.T) {
 	router := newTestSmartRouter(server.URL)
 	enableSafeControl(router)
 	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	staleAt := time.Now().Add(-defaultPendingRouteOutcomeGrace - time.Minute)
 	for i := 1; i <= defaultEpisodeNoProgressAgentCallThreshold; i++ {
 		action := budgetActionCheapExecute
 		if i == defaultEpisodeNoProgressAgentCallThreshold {
@@ -2901,7 +3073,7 @@ func TestEpisodeBlockedPremiumRecoveryWithoutProgressStopsTrial(t *testing.T) {
 		if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
 			EventID:   fmt.Sprintf("event-blocked-stop-llm-%d", i),
 			EpisodeID: "episode-blocked-stop",
-			Timestamp: time.Now(),
+			Timestamp: staleAt.Add(time.Duration(i) * time.Millisecond),
 			Kind:      "llm_call",
 			Source:    "unit-test",
 			Observation: map[string]any{
@@ -3003,11 +3175,12 @@ func TestEpisodeAgentCallNoEffectiveProgressStopsTrial(t *testing.T) {
 	enableSafeControl(router)
 	router.cfg.SafeControl.StopAgentCallThreshold = 25
 	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	staleAt := time.Now().Add(-defaultPendingRouteOutcomeGrace - time.Minute)
 	for i := 1; i <= 26; i++ {
 		if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
 			EventID:   fmt.Sprintf("event-agent-call-stop-llm-%d", i),
 			EpisodeID: "episode-agent-call-stop",
-			Timestamp: time.Now(),
+			Timestamp: staleAt.Add(time.Duration(i) * time.Millisecond),
 			Kind:      "llm_call",
 			Source:    "unit-test",
 			Observation: map[string]any{
@@ -3224,12 +3397,13 @@ func TestEpisodePostReplanNoProgressStopsTrial(t *testing.T) {
 	router.cfg.SafeControl.LongExplorationCallThreshold = 100
 	router.cfg.SafeControl.PostReplanNoProgressCallLimit = 2
 	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	staleAt := time.Now().Add(-defaultPendingRouteOutcomeGrace - time.Minute)
 
 	for i, event := range []*plugin.EpisodeEvent{
 		{
 			EventID:   "event-replan-llm",
 			EpisodeID: "episode-replan-stop",
-			Timestamp: time.Now(),
+			Timestamp: staleAt,
 			Kind:      "llm_call",
 			Source:    "unit-test",
 			Observation: map[string]any{
@@ -3245,7 +3419,7 @@ func TestEpisodePostReplanNoProgressStopsTrial(t *testing.T) {
 		{
 			EventID:   "event-after-replan-llm-1",
 			EpisodeID: "episode-replan-stop",
-			Timestamp: time.Now(),
+			Timestamp: staleAt.Add(time.Second),
 			Kind:      "llm_call",
 			Source:    "unit-test",
 			Observation: map[string]any{
@@ -3261,7 +3435,7 @@ func TestEpisodePostReplanNoProgressStopsTrial(t *testing.T) {
 		{
 			EventID:   "event-after-replan-tool",
 			EpisodeID: "episode-replan-stop",
-			Timestamp: time.Now(),
+			Timestamp: staleAt.Add(2 * time.Second),
 			Kind:      "tool_call",
 			Source:    "unit-test",
 			Observation: map[string]any{
@@ -3271,7 +3445,7 @@ func TestEpisodePostReplanNoProgressStopsTrial(t *testing.T) {
 		{
 			EventID:   "event-after-replan-llm-2",
 			EpisodeID: "episode-replan-stop",
-			Timestamp: time.Now(),
+			Timestamp: staleAt.Add(3 * time.Second),
 			Kind:      "llm_call",
 			Source:    "unit-test",
 			Observation: map[string]any{
@@ -3316,6 +3490,610 @@ func TestEpisodePostReplanNoProgressStopsTrial(t *testing.T) {
 		"post_replan_no_progress_call_limit=2",
 		"candidate_progress=0",
 		"strong_progress=0",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+}
+
+func TestPostReplanStopAllowsFreshHypothesisValidationTurn(t *testing.T) {
+	cfg := SafeControlConfig{PostReplanNoProgressCallLimit: 3}
+	fresh := EpisodeSnapshot{
+		ID:                          "episode-fresh-hypothesis",
+		LastReplanEventID:           "event-replan",
+		LLMCallsSinceReplan:         3,
+		LastReplanHypothesisEventID: "event-hypothesis",
+		LastReplanHypothesis:        "LCG predecessor matches repeated seed",
+		ReplanHypothesisStatus:      replanHypothesisOpen,
+		NoProgressSeverity:          "watch",
+	}
+	if shouldStopPostReplanNoProgress(fresh, cfg) {
+		t.Fatal("fresh open hypothesis stopped immediately; want one validation turn")
+	}
+	afterOneUnproductiveCall := fresh
+	afterOneUnproductiveCall.LLMCallsSinceHypothesis = 1
+	afterOneUnproductiveCall.LastBudgetAction = budgetActionHypothesisApply
+	if !shouldStopPostReplanNoProgress(afterOneUnproductiveCall, cfg) {
+		t.Fatal("post-hypothesis no-progress call did not stop; want stop after validation chance")
+	}
+}
+
+func TestPostReplanStopWaitsForFreshPendingRouteOutcome(t *testing.T) {
+	cfg := SafeControlConfig{PostReplanNoProgressCallLimit: 3}
+	snapshot := EpisodeSnapshot{
+		ID:                          "episode-pending-route-outcome",
+		LastReplanEventID:           "event-replan",
+		LLMCallsSinceReplan:         4,
+		LastReplanHypothesisEventID: "event-hypothesis",
+		LastReplanHypothesis:        "LCG recurrence should be delivered",
+		ReplanHypothesisStatus:      replanHypothesisStale,
+		LastBudgetAction:            budgetActionHypothesisApply,
+		LastFinishReason:            "stop",
+		LastRouteTraceID:            "trace-pending-apply",
+		LastRouteOutcomeLabel:       routeOutcomePending,
+		NoProgressSeverity:          "watch",
+		RecentEvents: []EpisodeEvent{
+			{
+				ID:           "trace-pending-apply",
+				Kind:         "llm_call",
+				BudgetAction: budgetActionHypothesisApply,
+				FinishReason: "stop",
+				Timestamp:    time.Now(),
+			},
+		},
+	}
+	if shouldStopPostReplanNoProgress(snapshot, cfg) {
+		t.Fatal("fresh pending route outcome stopped immediately; want grace for event projection")
+	}
+
+	snapshot.RecentEvents[0].Timestamp = time.Now().Add(-defaultPendingRouteOutcomeGrace - time.Second)
+	if !shouldStopPostReplanNoProgress(snapshot, cfg) {
+		t.Fatal("old pending route outcome did not stop; want stop after grace expires")
+	}
+	if !pendingRouteOutcomeAwaitingProjection(snapshot, &parsedRequest{HasToolObservation: true}) {
+		t.Fatal("pending route with tool observation was not held for projection")
+	}
+}
+
+func TestPostReplanStopAllowsBoundedNonNegativeToolExploration(t *testing.T) {
+	cfg := SafeControlConfig{
+		PostReplanNoProgressCallLimit: 3,
+		LongExplorationThreshold:      12,
+	}
+	snapshot := EpisodeSnapshot{
+		ID:                          "episode-post-replan-tool-call",
+		LastReplanEventID:           "event-replan",
+		LLMCallsSinceReplan:         3,
+		ExplorationSinceReplan:      4,
+		LastReplanHypothesisEventID: "event-hypothesis",
+		LastReplanHypothesis:        "Decode the C2 body before final delivery",
+		ReplanHypothesisStatus:      replanHypothesisStale,
+		LastBudgetAction:            budgetActionHypothesisApply,
+		LastRouteTraceID:            "trace-hypothesis-apply",
+		LastRouteOutcomeLabel:       routeOutcomeToolCall,
+		LastRouteOutcomeEventCount:  2,
+		NoProgressSeverity:          "watch",
+	}
+	if shouldStopPostReplanNoProgress(snapshot, cfg) {
+		t.Fatal("non-negative tool exploration stopped too early; want bounded continuation")
+	}
+
+	snapshot.ExplorationSinceReplan = 12
+	if !shouldStopPostReplanNoProgress(snapshot, cfg) {
+		t.Fatal("post-replan tool exploration did not stop after exploration budget was exhausted")
+	}
+}
+
+func TestEpisodeAnalysisProgressResetsReplanWindow(t *testing.T) {
+	router := newTestSmartRouter("")
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	now := time.Now()
+	for _, event := range []*plugin.EpisodeEvent{
+		{
+			EventID:   "event-analysis-replan",
+			EpisodeID: "episode-analysis-progress",
+			Timestamp: now,
+			Kind:      "llm_call",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":       "response_completed",
+				"budget_action": budgetActionFreezeOrReplan,
+				"model":         "anthropic/claude-opus-5",
+				"finish_reason": "stop",
+				"status":        200,
+				"total_tokens":  100,
+			},
+		},
+		{
+			EventID:   "event-analysis-fact",
+			EpisodeID: "episode-analysis-progress",
+			Timestamp: now.Add(time.Second),
+			Kind:      "analysis_progress",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"analysis_progress": true,
+				"analysis_signals":  []string{"verified_task_fact"},
+				"analysis_summary":  "LCG recurrence matches all domains exactly",
+			},
+		},
+	} {
+		if err := router.RecordEpisodeEvent(event); err != nil {
+			t.Fatalf("RecordEpisodeEvent %s returned error: %v", event.EventID, err)
+		}
+	}
+
+	states, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: "episode-analysis-progress"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates returned error: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	state := states[0].State
+	if got := state["strong_progress_count"]; got != 1 {
+		t.Fatalf("strong progress count = %#v, want 1", got)
+	}
+	if got := state["last_progress_kind"]; got != "analysis_progress" {
+		t.Fatalf("last progress kind = %#v, want analysis_progress", got)
+	}
+	if got := state["last_replan_event_id"]; got != "" {
+		t.Fatalf("last replan event = %#v, want cleared after analysis progress", got)
+	}
+	if got := state["last_route_outcome_label"]; got != routeOutcomeAnalysisProgress {
+		t.Fatalf("last route outcome = %#v, want analysis_progress", got)
+	}
+	if got := state["next_min_capability"]; got != nextMinCapabilityCheapExecute {
+		t.Fatalf("next min capability = %#v, want cheap_execute", got)
+	}
+	if got := state["next_capability_reason"]; got != "analysis_progress_needs_application" {
+		t.Fatalf("next capability reason = %#v, want analysis_progress_needs_application", got)
+	}
+}
+
+func TestEpisodeAnalysisProgressApplicationRoutesLocally(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionCheapExecute: {MaxTokens: 1536, TimeoutMs: 60000},
+		},
+	}
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	episodeID := "episode-analysis-application"
+	sessionID := episodeID + "__agent"
+	if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+		EventID:   "event-analysis-application",
+		EpisodeID: episodeID,
+		SessionID: sessionID,
+		Timestamp: time.Now(),
+		Kind:      "analysis_progress",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"analysis_progress": true,
+			"analysis_signals":  []string{"decoded_or_recovered_artifact"},
+			"analysis_summary":  "payload decoded and now needs one direct application command",
+		},
+	}); err != nil {
+		t.Fatalf("RecordEpisodeEvent returned error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", sessionID)
+	req.Header.Set("X-Episode-ID", episodeID)
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"continue"}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local analysis-progress application")
+	}
+	if decision == nil || decision.Model != "z-ai/glm-5.3-flash" || decision.BudgetAction != budgetActionCheapExecute {
+		t.Fatalf("Route = %#v, want Flash cheap_execute", decision)
+	}
+	if decision.AgentInstruction != analysisProgressApplicationAgentInstruction {
+		t.Fatalf("agent instruction = %q, want analysis progress application instruction", decision.AgentInstruction)
+	}
+	for _, want := range []string{
+		"rule_id=episode_analysis_progress_application",
+		"reason=analysis_progress_needs_application",
+		"strong_progress=1",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+}
+
+func TestEpisodeAnalysisProgressApplicationExhaustionRoutesPremiumRecovery(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionPremiumRecover: {MaxTokens: 4096, TimeoutMs: 180000},
+		},
+	}
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 16}
+	episodeID := "episode-analysis-application-exhausted"
+	sessionID := episodeID + "__agent"
+	now := time.Now()
+	if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+		EventID:   "event-analysis-progress",
+		EpisodeID: episodeID,
+		Timestamp: now,
+		Kind:      "analysis_progress",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"analysis_progress": true,
+			"analysis_signals":  []string{"verified_task_fact"},
+			"analysis_summary":  "decoded facts are ready to apply",
+		},
+		SessionID: sessionID,
+	}); err != nil {
+		t.Fatalf("RecordEpisodeEvent returned error: %v", err)
+	}
+
+	for i := 0; i < defaultAnalysisProgressApplicationAttemptLimit; i++ {
+		if err := router.Record(&plugin.AuditRecord{
+			TraceID:       fmt.Sprintf("trace-analysis-application-%d", i+1),
+			Timestamp:     now.Add(time.Duration(i+1) * time.Second),
+			SessionID:     sessionID,
+			EpisodeID:     episodeID,
+			Pool:          "openrouter",
+			RoutedModel:   "z-ai/glm-5.3-flash",
+			Status:        200,
+			FinishReason:  "stop",
+			BudgetAction:  budgetActionCheapExecute,
+			RoutingReason: "smart-router safe-control: decision_source=rule rule_id=episode_analysis_progress_application action=cheap_execute",
+			TotalTokens:   1000,
+			Cost:          0.01,
+			LatencyMs:     1000,
+		}); err != nil {
+			t.Fatalf("Record application LLM %d returned error: %v", i+1, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", sessionID)
+	req.Header.Set("X-Episode-ID", episodeID)
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"continue"}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local analysis-application recovery")
+	}
+	if decision == nil || decision.Model != "anthropic/claude-opus-5" || decision.BudgetAction != budgetActionPremiumRecover {
+		t.Fatalf("Route = %#v, want Opus premium recovery", decision)
+	}
+	if decision.AgentInstruction != analysisProgressApplicationRecoveryAgentInstruction {
+		t.Fatalf("agent instruction = %q, want analysis application recovery instruction", decision.AgentInstruction)
+	}
+	for _, want := range []string{
+		"rule_id=episode_analysis_progress_application_recovery",
+		"analysis_apply_attempts_since_progress=3",
+		"reason=analysis_progress_application_exhausted",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+
+	if err := router.Record(&plugin.AuditRecord{
+		TraceID:       "trace-analysis-application-recovery-1",
+		Timestamp:     now.Add(10 * time.Second),
+		SessionID:     sessionID,
+		EpisodeID:     episodeID,
+		Pool:          "openrouter",
+		RoutedModel:   "anthropic/claude-opus-5",
+		Status:        200,
+		FinishReason:  "stop",
+		BudgetAction:  budgetActionPremiumRecover,
+		RoutingReason: decision.Reason,
+		TotalTokens:   1000,
+		Cost:          0.10,
+		LatencyMs:     1000,
+	}); err != nil {
+		t.Fatalf("Record recovery LLM returned error: %v", err)
+	}
+
+	snapshot := router.episodeSnapshot(req)
+	if snapshot.AnalysisApplicationAttemptsSinceProgress != defaultAnalysisProgressApplicationAttemptLimit {
+		t.Fatalf(
+			"analysis application attempts = %d, want %d",
+			snapshot.AnalysisApplicationAttemptsSinceProgress,
+			defaultAnalysisProgressApplicationAttemptLimit,
+		)
+	}
+	if snapshot.AnalysisApplicationRecoveriesSinceProgress != 1 {
+		t.Fatalf("analysis application recoveries = %d, want 1", snapshot.AnalysisApplicationRecoveriesSinceProgress)
+	}
+	if snapshot.NextCapabilityReason != "analysis_progress_recovery_awaiting_outcome" {
+		t.Fatalf("next reason after one recovery = %q, want awaiting outcome", snapshot.NextCapabilityReason)
+	}
+}
+
+func TestRoutingReasonHasRuleIDMatchesExactRule(t *testing.T) {
+	reason := "smart-router safe-control: rule_id=episode_analysis_progress_application_recovery action=premium_recover"
+	if routingReasonHasRuleID(reason, "episode_analysis_progress_application") {
+		t.Fatal("application rule matched recovery rule prefix; want exact rule_id matching")
+	}
+	if !routingReasonHasRuleID(reason, "episode_analysis_progress_application_recovery") {
+		t.Fatal("recovery rule did not match exact rule_id")
+	}
+}
+
+func TestEpisodeExecutionStallRoutesToPremiumRecovery(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionPremiumRecover: {MaxTokens: 4096, TimeoutMs: 180000},
+		},
+	}
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 8}
+	episodeID := "episode-execution-stall"
+	sessionID := episodeID + "__agent"
+	now := time.Now()
+	events := []*plugin.EpisodeEvent{
+		{
+			EventID:   "event-analysis-progress",
+			EpisodeID: episodeID,
+			Timestamp: now,
+			Kind:      "analysis_progress",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"analysis_progress": true,
+				"analysis_signals":  []string{"verified_task_fact"},
+			},
+			SessionID: sessionID,
+		},
+		{
+			EventID:   "event-llm-1",
+			EpisodeID: episodeID,
+			Timestamp: now.Add(time.Second),
+			Kind:      "llm_call",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":       "response_completed",
+				"budget_action": budgetActionCheapProbe,
+				"model":         "z-ai/glm-5.3-flash",
+				"finish_reason": "stop",
+				"status":        200,
+				"trace_id":      "trace-stall-1",
+			},
+			SessionID: sessionID,
+		},
+		{
+			EventID:   "event-stall-1",
+			EpisodeID: episodeID,
+			Timestamp: now.Add(2 * time.Second),
+			Kind:      "execution_stall",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"stall":         true,
+				"stall_signals": []string{"heredoc_prompt_residue"},
+			},
+			SessionID: sessionID,
+		},
+		{
+			EventID:   "event-llm-2",
+			EpisodeID: episodeID,
+			Timestamp: now.Add(3 * time.Second),
+			Kind:      "llm_call",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":       "response_completed",
+				"budget_action": budgetActionCheapProbe,
+				"model":         "z-ai/glm-5.3-flash",
+				"finish_reason": "stop",
+				"status":        200,
+				"trace_id":      "trace-stall-2",
+			},
+			SessionID: sessionID,
+		},
+		{
+			EventID:   "event-stall-2",
+			EpisodeID: episodeID,
+			Timestamp: now.Add(4 * time.Second),
+			Kind:      "execution_stall",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"stall":         true,
+				"stall_signals": []string{"interrupted_command"},
+			},
+			SessionID: sessionID,
+		},
+	}
+	for _, event := range events {
+		if err := router.RecordEpisodeEvent(event); err != nil {
+			t.Fatalf("RecordEpisodeEvent %s returned error: %v", event.EventID, err)
+		}
+	}
+
+	states, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: episodeID})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates returned error: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	state := states[0].State
+	if got := state["execution_stall_count"]; got != 2 {
+		t.Fatalf("execution stall count = %#v, want 2", got)
+	}
+	if got := state["execution_stalls_since_progress"]; got != 2 {
+		t.Fatalf("execution stalls since progress = %#v, want 2", got)
+	}
+	if got := state["last_route_outcome_label"]; got != routeOutcomeExecutionStall {
+		t.Fatalf("last route outcome = %#v, want execution_stall", got)
+	}
+	if got := state["next_capability_reason"]; got != "execution_stall_needs_recovery" {
+		t.Fatalf("next capability reason = %#v, want execution_stall_needs_recovery", got)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", sessionID)
+	req.Header.Set("X-Episode-ID", episodeID)
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"continue from the latest terminal output"}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local execution-stall recovery")
+	}
+	if decision == nil || decision.Model != "anthropic/claude-opus-5" || decision.BudgetAction != budgetActionPremiumRecover {
+		t.Fatalf("Route = %#v, want Opus premium recovery", decision)
+	}
+	if decision.AgentInstruction != executionStallRecoveryAgentInstruction {
+		t.Fatalf("agent instruction = %q, want execution stall recovery instruction", decision.AgentInstruction)
+	}
+	for _, want := range []string{
+		"rule_id=episode_execution_stall_recovery",
+		"execution_stalls_since_progress=2",
+		"last_route_outcome=execution_stall",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+}
+
+func TestEpisodeExecutionStallRecoveryPreemptsPremiumCooldown(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionPremiumRecover: {MaxTokens: 4096, TimeoutMs: 180000},
+		},
+	}
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 8}
+	episodeID := "episode-execution-stall-cooldown"
+	sessionID := episodeID + "__agent"
+	router.controlStates[sessionID] = &safeControlState{
+		ConsecutivePremium: 2,
+		CooldownRemaining:  1,
+	}
+
+	now := time.Now()
+	for _, event := range []*plugin.EpisodeEvent{
+		{
+			EventID:   "event-llm-1",
+			EpisodeID: episodeID,
+			Timestamp: now,
+			Kind:      "llm_call",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":       "response_completed",
+				"budget_action": budgetActionCheapProbe,
+				"model":         "z-ai/glm-5.3-flash",
+				"finish_reason": "stop",
+				"status":        200,
+				"trace_id":      "trace-stall-cooldown-1",
+			},
+			SessionID: sessionID,
+		},
+		{
+			EventID:   "event-stall-1",
+			EpisodeID: episodeID,
+			Timestamp: now.Add(time.Second),
+			Kind:      "execution_stall",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"stall":         true,
+				"stall_signals": []string{"parser_warning"},
+			},
+			SessionID: sessionID,
+		},
+		{
+			EventID:   "event-llm-2",
+			EpisodeID: episodeID,
+			Timestamp: now.Add(2 * time.Second),
+			Kind:      "llm_call",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":       "response_completed",
+				"budget_action": budgetActionHypothesisApply,
+				"model":         "z-ai/glm-5.3-flash",
+				"finish_reason": "stop",
+				"status":        200,
+				"trace_id":      "trace-stall-cooldown-2",
+			},
+			SessionID: sessionID,
+		},
+		{
+			EventID:   "event-stall-2",
+			EpisodeID: episodeID,
+			Timestamp: now.Add(3 * time.Second),
+			Kind:      "execution_stall",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"stall":         true,
+				"stall_signals": []string{"interrupted_command"},
+			},
+			SessionID: sessionID,
+		},
+	} {
+		if err := router.RecordEpisodeEvent(event); err != nil {
+			t.Fatalf("RecordEpisodeEvent %s returned error: %v", event.EventID, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", sessionID)
+	req.Header.Set("X-Episode-ID", episodeID)
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"continue from the latest terminal output"}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local execution-stall recovery")
+	}
+	if decision == nil || decision.Model != "anthropic/claude-opus-5" || decision.BudgetAction != budgetActionPremiumRecover {
+		t.Fatalf("Route = %#v, want Opus premium recovery", decision)
+	}
+	if strings.Contains(decision.Reason, "rule_id=premium_cooldown") {
+		t.Fatalf("reason = %q, execution-stall recovery should preempt premium cooldown", decision.Reason)
+	}
+	for _, want := range []string{
+		"rule_id=episode_execution_stall_recovery",
+		"execution_stalls_since_progress=2",
 	} {
 		if !strings.Contains(decision.Reason, want) {
 			t.Fatalf("reason = %q, want %q", decision.Reason, want)
@@ -3373,6 +4151,339 @@ func TestEpisodeReplanWindowClearsAfterEffectiveProgress(t *testing.T) {
 	}
 	if shouldStopPostReplanNoProgress(snapshot, SafeControlConfig{PostReplanNoProgressCallLimit: 1}) {
 		t.Fatal("shouldStopPostReplanNoProgress returned true after effective progress")
+	}
+}
+
+func TestEpisodeReplanHypothesisCapturedAndForcesValidationFloor(t *testing.T) {
+	var prompt string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]any
+		if err := json.Unmarshal(body, &req); err == nil {
+			if messages, ok := req["messages"].([]any); ok && len(messages) > 0 {
+				if message, ok := messages[0].(map[string]any); ok {
+					prompt, _ = message["content"].(string)
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"message": {"content": "{\"model\":\"z-ai/glm-5.3-flash\",\"turn_type\":\"mechanical_probe\",\"hypothesis_state\":\"stable\",\"critical_path\":false,\"recoverability\":\"easy\",\"budget_action\":\"cheap_probe\",\"context_summary\":\"continue broad inspection\",\"reason\":\"cheap probe\"}"}}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+		}`)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	router.cfg.CacheTTLSeconds = -1
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 6}
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{Enabled: true}
+	now := time.Now()
+
+	for _, record := range []*plugin.AuditRecord{
+		{
+			TraceID:       "trace-replan",
+			EpisodeID:     "episode-replan-hypothesis",
+			Timestamp:     now,
+			Status:        200,
+			Model:         "auto",
+			RoutedModel:   "anthropic/claude-opus-5",
+			BudgetAction:  budgetActionFreezeOrReplan,
+			FinishReason:  "stop",
+			RoutingReason: "smart-router safe-control: rule_id=episode_long_exploration_replan action=freeze_or_replan",
+		},
+		{
+			TraceID:       "trace-hypothesis",
+			EpisodeID:     "episode-replan-hypothesis",
+			Timestamp:     now.Add(time.Second),
+			Status:        200,
+			Model:         "auto",
+			RoutedModel:   "anthropic/claude-opus-5",
+			BudgetAction:  budgetActionPremiumReason,
+			FinishReason:  "stop",
+			RoutingReason: `smart-router: turn=critical_hypothesis state=forming critical=true recover=hard budget=premium_reason ctx="LCG predecessor matches repeated capture seed; protocol synthesis now needed" | New correlation may unlock protocol.`,
+		},
+		{
+			TraceID:       "trace-hypothesis-later",
+			EpisodeID:     "episode-replan-hypothesis",
+			Timestamp:     now.Add(2 * time.Second),
+			Status:        200,
+			Model:         "auto",
+			RoutedModel:   "z-ai/glm-5.3-flash",
+			BudgetAction:  budgetActionCheapProbe,
+			FinishReason:  "stop",
+			RoutingReason: `smart-router: turn=mechanical_probe state=stable critical=false recover=easy budget=cheap_probe ctx="Later wording updates hypothesis without resetting age" | Continue probe.`,
+		},
+	} {
+		if err := router.Record(record); err != nil {
+			t.Fatalf("Record %s returned error: %v", record.TraceID, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-replan-hypothesis")
+	req.Header.Set("X-Session-ID", "episode-replan-hypothesis")
+	snapshot := router.episodeSnapshot(req)
+	if snapshot.ReplanHypothesisCount != 2 {
+		t.Fatalf("replan hypothesis count = %d, want 2", snapshot.ReplanHypothesisCount)
+	}
+	if snapshot.LastReplanHypothesisEventID != "trace-hypothesis-later" {
+		t.Fatalf("hypothesis event = %q, want trace-hypothesis-later", snapshot.LastReplanHypothesisEventID)
+	}
+	if !strings.Contains(snapshot.LastReplanHypothesis, "Later wording") {
+		t.Fatalf("hypothesis = %q, want latest hypothesis wording", snapshot.LastReplanHypothesis)
+	}
+	if snapshot.ReplanHypothesisStatus != replanHypothesisStale {
+		t.Fatalf("hypothesis status = %q, want stale after no-progress route close", snapshot.ReplanHypothesisStatus)
+	}
+	if snapshot.NextMinCapability != nextMinCapabilityCheapExecute ||
+		snapshot.NextCapabilityReason != "replan_hypothesis_needs_validation" ||
+		snapshot.NextBudgetActionHint != budgetActionHypothesisApply {
+		t.Fatalf("next capability = %s/%s/%s, want cheap_execute/replan_hypothesis_needs_validation/hypothesis_apply", snapshot.NextMinCapability, snapshot.NextCapabilityReason, snapshot.NextBudgetActionHint)
+	}
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue from the current protocol hypothesis."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decision == nil || decision.Skip || decision.Abort {
+		t.Fatalf("decision = %#v, want routed decision", decision)
+	}
+	if decision.Model != "z-ai/glm-5.3-flash" {
+		t.Fatalf("model = %q, want cheapest validation model", decision.Model)
+	}
+	if decision.BudgetAction != budgetActionHypothesisApply {
+		t.Fatalf("budget action = %q, want hypothesis_apply floor", decision.BudgetAction)
+	}
+	if decision.AgentInstruction != hypothesisApplyAgentInstruction {
+		t.Fatalf("agent instruction = %q, want hypothesis apply instruction", decision.AgentInstruction)
+	}
+	for _, want := range []string{
+		"capability_floor status=forced",
+		"expected=cheap_execute",
+		"reason=replan_hypothesis_needs_validation",
+		"forced_budget_action=hypothesis_apply",
+		"budget_action=hypothesis_apply",
+		"route_max_tokens=4096",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+	if !strings.Contains(prompt, "replan_hypothesis status=stale") ||
+		!strings.Contains(prompt, "Later wording updates hypothesis without resetting age") {
+		t.Fatalf("prompt missing replan hypothesis state:\n%s", prompt)
+	}
+
+	if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+		EventID:   "event-hypothesis-progress",
+		EpisodeID: "episode-replan-hypothesis",
+		Timestamp: now.Add(3 * time.Second),
+		Kind:      "file_modified",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"workspace_target": true,
+			"path_count":       1,
+		},
+	}); err != nil {
+		t.Fatalf("RecordEpisodeEvent progress returned error: %v", err)
+	}
+	snapshot = router.episodeSnapshot(req)
+	if snapshot.LastReplanEventID != "" {
+		t.Fatalf("last replan = %q, want cleared after hypothesis progress", snapshot.LastReplanEventID)
+	}
+	if snapshot.ReplanHypothesisStatus != replanHypothesisProgressed {
+		t.Fatalf("hypothesis status = %q, want progressed", snapshot.ReplanHypothesisStatus)
+	}
+}
+
+func TestEpisodeReplanHypothesisApplyUsesLocalSafeControl(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 6}
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{Enabled: true}
+	now := time.Now()
+	for _, record := range []*plugin.AuditRecord{
+		{
+			TraceID:       "trace-replan-local",
+			EpisodeID:     "episode-replan-local",
+			Timestamp:     now,
+			Status:        200,
+			Model:         "auto",
+			RoutedModel:   "anthropic/claude-opus-5",
+			BudgetAction:  budgetActionFreezeOrReplan,
+			FinishReason:  "stop",
+			RoutingReason: "smart-router safe-control: rule_id=episode_long_exploration_replan action=freeze_or_replan",
+		},
+		{
+			TraceID:       "trace-hypothesis-local",
+			EpisodeID:     "episode-replan-local",
+			Timestamp:     now.Add(time.Second),
+			Status:        200,
+			Model:         "auto",
+			RoutedModel:   "z-ai/glm-5.3-flash",
+			BudgetAction:  budgetActionCheapExecute,
+			FinishReason:  "length",
+			RoutingReason: `smart-router: turn=validation state=stable critical=false recover=easy budget=cheap_execute ctx="LCG hypothesis stable; apply directly now" | Needs direct application.`,
+		},
+	} {
+		if err := router.Record(record); err != nil {
+			t.Fatalf("Record %s returned error: %v", record.TraceID, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-replan-local")
+	req.Header.Set("X-Session-ID", "episode-replan-local")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue after the current hypothesis."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local hypothesis-apply route")
+	}
+	if decision == nil || decision.Skip || decision.Abort {
+		t.Fatalf("decision = %#v, want routed decision", decision)
+	}
+	if decision.Model != "z-ai/glm-5.3-flash" {
+		t.Fatalf("model = %q, want cheap hypothesis application model", decision.Model)
+	}
+	if decision.BudgetAction != budgetActionHypothesisApply {
+		t.Fatalf("budget action = %q, want hypothesis_apply", decision.BudgetAction)
+	}
+	if decision.AgentInstruction != hypothesisApplyAgentInstruction {
+		t.Fatalf("agent instruction = %q, want hypothesis apply instruction", decision.AgentInstruction)
+	}
+	for _, want := range []string{
+		"rule_id=episode_replan_hypothesis_apply",
+		"action=hypothesis_apply",
+		"last_replan_hypothesis=LCG hypothesis stable",
+		"route_max_tokens=8192",
+		"episode_adjust=length_boost",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+}
+
+func TestEpisodeHypothesisApplyLengthRoutesPremiumRecoveryBeforeStop(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.SafeControl.PostReplanNoProgressCallLimit = 1
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 8}
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{Enabled: true}
+	now := time.Now()
+	records := []*plugin.AuditRecord{
+		{
+			TraceID:       "trace-replan-length-recovery",
+			EpisodeID:     "episode-hypothesis-length-recovery",
+			Timestamp:     now,
+			Status:        200,
+			Model:         "auto",
+			RoutedModel:   "anthropic/claude-opus-5",
+			BudgetAction:  budgetActionFreezeOrReplan,
+			FinishReason:  "stop",
+			RoutingReason: "smart-router safe-control: rule_id=episode_long_exploration_replan action=freeze_or_replan",
+		},
+		{
+			TraceID:       "trace-hypothesis-length-recovery",
+			EpisodeID:     "episode-hypothesis-length-recovery",
+			Timestamp:     now.Add(time.Second),
+			Status:        200,
+			Model:         "auto",
+			RoutedModel:   "anthropic/claude-opus-5",
+			BudgetAction:  budgetActionPremiumReason,
+			FinishReason:  "stop",
+			RoutingReason: `smart-router: turn=critical_hypothesis state=forming critical=true recover=medium budget=premium_reason ctx="Trace evidence must resolve VM branch opcode semantics" | VM semantics determine the core implementation direction`,
+		},
+		{
+			TraceID:       "trace-cheap-probe-length-recovery",
+			EpisodeID:     "episode-hypothesis-length-recovery",
+			Timestamp:     now.Add(2 * time.Second),
+			Status:        200,
+			Model:         "auto",
+			RoutedModel:   "z-ai/glm-5.3-flash",
+			BudgetAction:  budgetActionCheapProbe,
+			FinishReason:  "stop",
+			RoutingReason: "smart-router safe-control: rule_id=file_read_search_cheap action=cheap_probe",
+		},
+		{
+			TraceID:       "trace-hypothesis-apply-length",
+			EpisodeID:     "episode-hypothesis-length-recovery",
+			Timestamp:     now.Add(3 * time.Second),
+			Status:        200,
+			Model:         "auto",
+			RoutedModel:   "z-ai/glm-5.3-flash",
+			BudgetAction:  budgetActionHypothesisApply,
+			FinishReason:  "length",
+			RoutingReason: "smart-router safe-control: rule_id=episode_replan_hypothesis_apply action=hypothesis_apply",
+		},
+	}
+	for _, record := range records {
+		if err := router.Record(record); err != nil {
+			t.Fatalf("Record %s returned error: %v", record.TraceID, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-hypothesis-length-recovery")
+	req.Header.Set("X-Session-ID", "episode-hypothesis-length-recovery")
+	snapshot := router.episodeSnapshot(req)
+	if snapshot.NextMinCapability != nextMinCapabilityPremiumRecover ||
+		snapshot.NextCapabilityReason != "hypothesis_apply_length_truncated" ||
+		snapshot.NextBudgetActionHint != budgetActionPremiumRecover {
+		t.Fatalf("next capability = %s/%s/%s, want premium_recover/hypothesis_apply_length_truncated/premium_recover", snapshot.NextMinCapability, snapshot.NextCapabilityReason, snapshot.NextBudgetActionHint)
+	}
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue after the truncated hypothesis application."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local length recovery route")
+	}
+	if decision == nil || decision.Skip || decision.Abort {
+		t.Fatalf("decision = %#v, want routed premium recovery decision", decision)
+	}
+	if decision.Model != "anthropic/claude-opus-5" {
+		t.Fatalf("model = %q, want premium recovery model", decision.Model)
+	}
+	if decision.BudgetAction != budgetActionPremiumRecover {
+		t.Fatalf("budget action = %q, want premium_recover", decision.BudgetAction)
+	}
+	if decision.AgentInstruction != hypothesisApplyLengthRecoveryAgentInstruction {
+		t.Fatalf("agent instruction = %q, want hypothesis length recovery instruction", decision.AgentInstruction)
+	}
+	for _, want := range []string{
+		"rule_id=episode_hypothesis_apply_length_recovery",
+		"action=premium_recover",
+		"last_budget=hypothesis_apply",
+		"last_finish=length",
+		"last_replan_hypothesis=Trace evidence must resolve VM branch opcode semantics",
+		"route_max_tokens=8192",
+		"episode_adjust=length_boost",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
 	}
 }
 
@@ -3491,11 +4602,12 @@ func TestEpisodeLengthPressureWithoutFileOrTestProgressStopsTrial(t *testing.T) 
 	router := newTestSmartRouter(server.URL)
 	enableSafeControl(router)
 	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	staleAt := time.Now().Add(-defaultPendingRouteOutcomeGrace - time.Minute)
 	for i := 1; i <= 3; i++ {
 		if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
 			EventID:   fmt.Sprintf("event-length-pressure-stop-%d", i),
 			EpisodeID: "episode-length-pressure-stop",
-			Timestamp: time.Now(),
+			Timestamp: staleAt.Add(time.Duration(i) * time.Millisecond),
 			Kind:      "llm_call",
 			Source:    "unit-test",
 			Observation: map[string]any{

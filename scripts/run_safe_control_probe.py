@@ -26,6 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -35,6 +36,11 @@ from typing import Any
 CHEAP_MODEL = "z-ai/glm-5.3-flash"
 PREMIUM_MODEL = "anthropic/claude-opus-5"
 DECISION_MODEL = "openai/gpt-5.6-sol"
+
+
+def stale_probe_timestamp(offset_seconds: float = 0) -> str:
+    timestamp = datetime.now(timezone.utc) - timedelta(seconds=90) + timedelta(seconds=offset_seconds)
+    return timestamp.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 @dataclass
@@ -396,6 +402,9 @@ plugins:
         freeze_or_replan:
           max_tokens: 2048
           timeout_ms: 60000
+        hypothesis_apply:
+          max_tokens: 4096
+          timeout_ms: 90000
         completion_guardrail:
           max_tokens: 1024
           timeout_ms: 60000
@@ -517,6 +526,16 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     completion_session = f"{trial}__completion_ready_agent"
     completion_regress_episode = f"{trial}__completion_regress"
     completion_regress_session = f"{trial}__completion_regress_agent"
+    delivery_floor_episode = f"{trial}__delivery_candidate_floor"
+    delivery_floor_session = f"{trial}__delivery_candidate_floor_agent"
+    hypothesis_apply_episode = f"{trial}__hypothesis_apply"
+    hypothesis_apply_session = f"{trial}__hypothesis_apply_agent"
+    hypothesis_length_episode = f"{trial}__hypothesis_apply_length_recovery"
+    hypothesis_length_session = f"{trial}__hypothesis_apply_length_recovery_agent"
+    analysis_application_episode = f"{trial}__analysis_application_exhausted"
+    analysis_application_session = f"{trial}__analysis_application_exhausted_agent"
+    execution_stall_episode = f"{trial}__execution_stall_recovery"
+    execution_stall_session = f"{trial}__execution_stall_recovery_agent"
     capability_floor_episode = f"{trial}__capability_floor"
     capability_floor_session = f"{trial}__capability_floor_agent"
     stop_gate_episode = f"{trial}__stop_gate"
@@ -1200,6 +1219,818 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         ]
     )
 
+    delivery_floor_events: list[dict[str, Any]] = []
+    for index in range(1, 7):
+        event_id = f"{delivery_floor_episode}__implementation-{index}"
+        delivery_floor_events.append(
+            {
+                "event_id": event_id,
+                "episode_id": delivery_floor_episode,
+                "episode_operation": "continue",
+                "sequence": index,
+                "kind": "file_written",
+                "source": "safe-control-probe",
+                "observation": {
+                    "target_paths": [f"/app/work/candidate-{index}.txt"],
+                    "workspace_target": True,
+                    "delivery_target": False,
+                    "path_count": 1,
+                },
+                "evidence_refs": [f"probe:event:{event_id}"],
+                "session_id": delivery_floor_session,
+                "trial_name": trial,
+                "step_name": f"episode-delivery-floor-implementation-{index}",
+                "task_name": task,
+            }
+        )
+    for index in range(1, 4):
+        event_id = f"{delivery_floor_episode}__idle-{index}"
+        delivery_floor_events.append(
+            {
+                "event_id": event_id,
+                "episode_id": delivery_floor_episode,
+                "episode_operation": "continue",
+                "sequence": 6 + index,
+                "kind": "llm_call",
+                "source": "safe-control-probe",
+                "observation": {
+                    "outcome": "response_completed",
+                    "model": CHEAP_MODEL,
+                    "routed_model": CHEAP_MODEL,
+                    "budget_action": "cheap_probe",
+                    "finish_reason": "stop",
+                    "status": 200,
+                    "total_tokens": 100,
+                    "cost_usd": 0.001,
+                    "latency_ms": 1000,
+                },
+                "evidence_refs": [f"probe:event:{event_id}"],
+                "session_id": delivery_floor_session,
+                "trial_name": trial,
+                "step_name": f"episode-delivery-floor-idle-{index}",
+                "task_name": task,
+            }
+        )
+    delivery_floor_batch_response = post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {"events": delivery_floor_events},
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": delivery_floor_session,
+            "X-Episode-ID": delivery_floor_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-delivery-floor-injected-batch",
+            "X-Task-Name": task,
+        },
+    )
+    checks.extend(
+        [
+            check_equal("delivery-floor-batch-event-ingest-count", delivery_floor_batch_response.get("count"), 9),
+            check_equal("delivery-floor-batch-event-ingest-sinks", delivery_floor_batch_response.get("sinks"), 2),
+        ]
+    )
+
+    delivery_floor_state = fetch_episode_state(port, delivery_floor_episode)
+    delivery_floor_payload = delivery_floor_state.get("state") or {}
+    checks.extend(
+        [
+            check_equal("delivery-floor-state-version", delivery_floor_state.get("state_version"), 9),
+            check_equal("delivery-floor-readiness", delivery_floor_payload.get("completion_readiness"), "delivery_candidate"),
+            check_equal("delivery-floor-implementation-progress", delivery_floor_payload.get("implementation_progress_count"), 6),
+            check_equal("delivery-floor-delivery-writes", delivery_floor_payload.get("delivery_file_write_count"), 0),
+            check_equal("delivery-floor-validation-progress", delivery_floor_payload.get("validation_progress_count"), 0),
+            check_equal("delivery-floor-llm-since-progress", delivery_floor_payload.get("llm_calls_since_progress"), 3),
+            check_equal("delivery-floor-next-capability", delivery_floor_payload.get("next_min_capability"), "cheap_execute"),
+            check_equal(
+                "delivery-floor-next-reason",
+                delivery_floor_payload.get("next_capability_reason"),
+                "delivery_candidate_needs_delivery",
+            ),
+        ]
+    )
+
+    delivery_floor_step = "episode-delivery-candidate-floor-route"
+    delivery_floor_response = post_json(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Continue with the next bounded step."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": delivery_floor_session,
+            "X-Episode-ID": delivery_floor_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": delivery_floor_step,
+            "X-Task-Name": task,
+        },
+    )
+    delivery_floor_trace = wait_for_agent_trace(port, delivery_floor_session, delivery_floor_step)
+    delivery_floor_reason = str(delivery_floor_trace.get("routing_reason") or "")
+    checks.extend(
+        [
+            check_equal("delivery-floor-route-source", classify_source(delivery_floor_reason), "safe-control"),
+            check_equal(
+                "delivery-floor-route-model",
+                delivery_floor_trace.get("routed_model") or delivery_floor_response.get("model") or "",
+                CHEAP_MODEL,
+            ),
+            check_equal("delivery-floor-route-budget-action", delivery_floor_trace.get("route_budget_action") or "", "cheap_execute"),
+            check_contains("delivery-floor-route-rule", delivery_floor_reason, "rule_id=episode_delivery_candidate_floor"),
+            check_contains("delivery-floor-route-status", delivery_floor_reason, "capability_floor status=local"),
+            check_contains("delivery-floor-route-expected", delivery_floor_reason, "expected=cheap_execute"),
+            check_contains("delivery-floor-route-reason", delivery_floor_reason, "reason=delivery_candidate_needs_delivery"),
+            check_contains("delivery-floor-route-implementation", delivery_floor_reason, "implementation_progress=6"),
+            check_contains("delivery-floor-route-delivery", delivery_floor_reason, "delivery_file_writes=0"),
+        ]
+    )
+
+    delivery_exhausted_event_id = f"{delivery_floor_episode}__floor-attempt-2"
+    post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {
+            "event_id": delivery_exhausted_event_id,
+            "episode_id": delivery_floor_episode,
+            "episode_operation": "continue",
+            "sequence": 20,
+            "kind": "llm_call",
+            "source": "safe-control-probe",
+            "observation": {
+                "outcome": "response_completed",
+                "model": CHEAP_MODEL,
+                "routed_model": CHEAP_MODEL,
+                "budget_action": "cheap_execute",
+                "finish_reason": "stop",
+                "status": 200,
+                "total_tokens": 100,
+                "cost_usd": 0.001,
+                "latency_ms": 1000,
+                "routing_reason": delivery_floor_reason,
+            },
+            "evidence_refs": [f"probe:event:{delivery_exhausted_event_id}"],
+            "session_id": delivery_floor_session,
+            "trial_name": trial,
+            "step_name": "episode-delivery-floor-attempt-2",
+            "task_name": task,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": delivery_floor_session,
+            "X-Episode-ID": delivery_floor_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-delivery-floor-attempt-2",
+            "X-Task-Name": task,
+        },
+    )
+    delivery_exhausted_state = fetch_episode_state(port, delivery_floor_episode)
+    delivery_exhausted_payload = delivery_exhausted_state.get("state") or {}
+    checks.extend(
+        [
+            check_equal(
+                "delivery-exhausted-next-capability",
+                delivery_exhausted_payload.get("next_min_capability"),
+                "premium_recover",
+            ),
+            check_equal(
+                "delivery-exhausted-next-reason",
+                delivery_exhausted_payload.get("next_capability_reason"),
+                "delivery_candidate_floor_exhausted",
+            ),
+        ]
+    )
+
+    delivery_exhausted_step = "episode-delivery-candidate-recovery-floor-route"
+    delivery_exhausted_response = post_json(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Continue with the delivery gap unresolved."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": delivery_floor_session,
+            "X-Episode-ID": delivery_floor_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": delivery_exhausted_step,
+            "X-Task-Name": task,
+        },
+    )
+    delivery_exhausted_trace = wait_for_agent_trace(port, delivery_floor_session, delivery_exhausted_step)
+    delivery_exhausted_reason = str(delivery_exhausted_trace.get("routing_reason") or "")
+    checks.extend(
+        [
+            check_equal("delivery-exhausted-route-source", classify_source(delivery_exhausted_reason), "safe-control"),
+            check_equal(
+                "delivery-exhausted-route-model",
+                delivery_exhausted_trace.get("routed_model") or delivery_exhausted_response.get("model") or "",
+                PREMIUM_MODEL,
+            ),
+            check_equal(
+                "delivery-exhausted-route-budget-action",
+                delivery_exhausted_trace.get("route_budget_action") or "",
+                "premium_recover",
+            ),
+            check_contains(
+                "delivery-exhausted-route-rule",
+                delivery_exhausted_reason,
+                "rule_id=episode_delivery_candidate_recovery_floor",
+            ),
+            check_contains(
+                "delivery-exhausted-route-reason",
+                delivery_exhausted_reason,
+                "reason=delivery_candidate_floor_exhausted",
+            ),
+            check_contains(
+                "delivery-exhausted-route-attempts",
+                delivery_exhausted_reason,
+                "recent_delivery_floor_attempts=2",
+            ),
+        ]
+    )
+
+    hypothesis_apply_events: list[dict[str, Any]] = []
+    for index, action in enumerate(["freeze_or_replan", "cheap_execute", "cheap_probe", "cheap_probe"], start=1):
+        event_id = f"{hypothesis_apply_episode}__llm-{index}"
+        observation: dict[str, Any] = {
+            "outcome": "response_completed",
+            "model": PREMIUM_MODEL if action == "freeze_or_replan" else CHEAP_MODEL,
+            "routed_model": PREMIUM_MODEL if action == "freeze_or_replan" else CHEAP_MODEL,
+            "budget_action": action,
+            "finish_reason": "stop",
+            "status": 200,
+            "total_tokens": 100,
+            "cost_usd": 0.001,
+            "latency_ms": 1000,
+        }
+        if index == 2:
+            observation["finish_reason"] = "length"
+            observation["outcome"] = "length_truncated"
+            observation["route_context_summary"] = "LCG hypothesis stable; apply directly now"
+            observation[
+                "routing_reason"
+            ] = 'smart-router: turn=validation state=stable budget=cheap_execute ctx="LCG hypothesis stable; apply directly now"'
+        elif index > 2:
+            observation["route_context_summary"] = "Later wording updates hypothesis without resetting age"
+        hypothesis_apply_events.append(
+            {
+                "event_id": event_id,
+                "episode_id": hypothesis_apply_episode,
+                "episode_operation": "continue",
+                "sequence": index,
+                "kind": "llm_call",
+                "source": "safe-control-probe",
+                "observation": observation,
+                "evidence_refs": [f"probe:event:{event_id}"],
+                "session_id": hypothesis_apply_session,
+                "trial_name": trial,
+                "step_name": f"episode-hypothesis-apply-llm-{index:02d}",
+                "task_name": task,
+            }
+        )
+    hypothesis_apply_batch_response = post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {"events": hypothesis_apply_events},
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": hypothesis_apply_session,
+            "X-Episode-ID": hypothesis_apply_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-hypothesis-apply-injected-batch",
+            "X-Task-Name": task,
+        },
+    )
+    checks.extend(
+        [
+            check_equal("hypothesis-apply-batch-event-ingest-count", hypothesis_apply_batch_response.get("count"), 4),
+            check_equal("hypothesis-apply-batch-event-ingest-sinks", hypothesis_apply_batch_response.get("sinks"), 2),
+        ]
+    )
+
+    hypothesis_apply_state = fetch_episode_state(port, hypothesis_apply_episode)
+    hypothesis_apply_payload = hypothesis_apply_state.get("state") or {}
+    checks.extend(
+        [
+            check_equal("hypothesis-apply-replan-count", hypothesis_apply_payload.get("replan_count"), 1),
+            check_equal("hypothesis-apply-hypothesis-count", hypothesis_apply_payload.get("replan_hypothesis_count"), 2),
+            check_equal(
+                "hypothesis-apply-hypothesis-event",
+                hypothesis_apply_payload.get("last_replan_hypothesis_event_id"),
+                f"{hypothesis_apply_episode}__llm-3",
+            ),
+            check_equal("hypothesis-apply-status", hypothesis_apply_payload.get("replan_hypothesis_status"), "stale"),
+            check_equal("hypothesis-apply-llm-since-replan", hypothesis_apply_payload.get("llm_calls_since_replan"), 3),
+            check_equal("hypothesis-apply-next-capability", hypothesis_apply_payload.get("next_min_capability"), "cheap_execute"),
+            check_equal(
+                "hypothesis-apply-next-budget",
+                hypothesis_apply_payload.get("next_budget_action_hint"),
+                "hypothesis_apply",
+            ),
+            check_equal(
+                "hypothesis-apply-next-reason",
+                hypothesis_apply_payload.get("next_capability_reason"),
+                "replan_hypothesis_needs_validation",
+            ),
+        ]
+    )
+
+    hypothesis_apply_step = "episode-replan-hypothesis-apply-route"
+    hypothesis_apply_response = post_json(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Continue after the current hypothesis."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": hypothesis_apply_session,
+            "X-Episode-ID": hypothesis_apply_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": hypothesis_apply_step,
+            "X-Task-Name": task,
+        },
+    )
+    hypothesis_apply_trace = wait_for_agent_trace(port, hypothesis_apply_session, hypothesis_apply_step)
+    hypothesis_apply_reason = str(hypothesis_apply_trace.get("routing_reason") or "")
+    checks.extend(
+        [
+            check_equal("hypothesis-apply-route-source", classify_source(hypothesis_apply_reason), "safe-control"),
+            check_equal(
+                "hypothesis-apply-route-model",
+                hypothesis_apply_trace.get("routed_model") or hypothesis_apply_response.get("model") or "",
+                CHEAP_MODEL,
+            ),
+            check_equal(
+                "hypothesis-apply-route-budget-action",
+                hypothesis_apply_trace.get("route_budget_action") or "",
+                "hypothesis_apply",
+            ),
+            check_contains("hypothesis-apply-route-rule", hypothesis_apply_reason, "rule_id=episode_replan_hypothesis_apply"),
+            check_contains("hypothesis-apply-route-action", hypothesis_apply_reason, "action=hypothesis_apply"),
+            check_contains("hypothesis-apply-route-status", hypothesis_apply_reason, "replan_hypothesis_status=stale"),
+            check_contains("hypothesis-apply-route-hypothesis", hypothesis_apply_reason, "last_replan_hypothesis=Later wording updates"),
+            check_contains("hypothesis-apply-route-budget", hypothesis_apply_reason, "route_max_tokens=4096"),
+        ]
+    )
+
+    hypothesis_length_events: list[dict[str, Any]] = []
+    for index, action in enumerate(
+        ["freeze_or_replan", "premium_reason", "cheap_probe", "hypothesis_apply"],
+        start=1,
+    ):
+        event_id = f"{hypothesis_length_episode}__llm-{index}"
+        model = PREMIUM_MODEL if action in {"freeze_or_replan", "premium_reason"} else CHEAP_MODEL
+        observation: dict[str, Any] = {
+            "outcome": "response_completed",
+            "model": model,
+            "routed_model": model,
+            "budget_action": action,
+            "finish_reason": "stop",
+            "status": 200,
+            "total_tokens": 100,
+            "cost_usd": 0.001,
+            "latency_ms": 1000,
+        }
+        if action == "freeze_or_replan":
+            observation["routing_reason"] = (
+                "smart-router safe-control: rule_id=episode_long_exploration_replan action=freeze_or_replan"
+            )
+        elif action == "premium_reason":
+            observation["route_context_summary"] = "Trace evidence must resolve VM branch opcode semantics"
+            observation["routing_reason"] = (
+                'smart-router: turn=critical_hypothesis state=forming budget=premium_reason '
+                'ctx="Trace evidence must resolve VM branch opcode semantics"'
+            )
+        elif action == "hypothesis_apply":
+            observation["finish_reason"] = "length"
+            observation["outcome"] = "length_truncated"
+            observation["routing_reason"] = (
+                "smart-router safe-control: rule_id=episode_replan_hypothesis_apply action=hypothesis_apply"
+            )
+        hypothesis_length_events.append(
+            {
+                "event_id": event_id,
+                "episode_id": hypothesis_length_episode,
+                "episode_operation": "continue",
+                "sequence": index,
+                "kind": "llm_call",
+                "source": "safe-control-probe",
+                "observation": observation,
+                "evidence_refs": [f"probe:event:{event_id}"],
+                "session_id": hypothesis_length_session,
+                "trial_name": trial,
+                "step_name": f"episode-hypothesis-length-llm-{index:02d}",
+                "task_name": task,
+            }
+        )
+    hypothesis_length_batch_response = post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {"events": hypothesis_length_events},
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": hypothesis_length_session,
+            "X-Episode-ID": hypothesis_length_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-hypothesis-length-injected-batch",
+            "X-Task-Name": task,
+        },
+    )
+    checks.extend(
+        [
+            check_equal(
+                "hypothesis-length-batch-event-ingest-count",
+                hypothesis_length_batch_response.get("count"),
+                4,
+            ),
+            check_equal(
+                "hypothesis-length-batch-event-ingest-sinks",
+                hypothesis_length_batch_response.get("sinks"),
+                2,
+            ),
+        ]
+    )
+
+    hypothesis_length_state = fetch_episode_state(port, hypothesis_length_episode)
+    hypothesis_length_payload = hypothesis_length_state.get("state") or {}
+    checks.extend(
+        [
+            check_equal(
+                "hypothesis-length-next-capability",
+                hypothesis_length_payload.get("next_min_capability"),
+                "premium_recover",
+            ),
+            check_equal(
+                "hypothesis-length-next-budget",
+                hypothesis_length_payload.get("next_budget_action_hint"),
+                "premium_recover",
+            ),
+            check_equal(
+                "hypothesis-length-next-reason",
+                hypothesis_length_payload.get("next_capability_reason"),
+                "hypothesis_apply_length_truncated",
+            ),
+            check_equal("hypothesis-length-last-budget", hypothesis_length_payload.get("last_budget_action"), "hypothesis_apply"),
+            check_equal("hypothesis-length-last-finish", hypothesis_length_payload.get("last_finish_reason"), "length"),
+        ]
+    )
+
+    hypothesis_length_step = "episode-hypothesis-apply-length-recovery-route"
+    hypothesis_length_response = post_json(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Continue after the truncated hypothesis application."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": hypothesis_length_session,
+            "X-Episode-ID": hypothesis_length_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": hypothesis_length_step,
+            "X-Task-Name": task,
+        },
+    )
+    hypothesis_length_trace = wait_for_agent_trace(port, hypothesis_length_session, hypothesis_length_step)
+    hypothesis_length_reason = str(hypothesis_length_trace.get("routing_reason") or "")
+    checks.extend(
+        [
+            check_equal("hypothesis-length-route-source", classify_source(hypothesis_length_reason), "safe-control"),
+            check_equal(
+                "hypothesis-length-route-model",
+                hypothesis_length_trace.get("routed_model") or hypothesis_length_response.get("model") or "",
+                PREMIUM_MODEL,
+            ),
+            check_equal(
+                "hypothesis-length-route-budget-action",
+                hypothesis_length_trace.get("route_budget_action") or "",
+                "premium_recover",
+            ),
+            check_contains(
+                "hypothesis-length-route-rule",
+                hypothesis_length_reason,
+                "rule_id=episode_hypothesis_apply_length_recovery",
+            ),
+            check_contains("hypothesis-length-route-last-budget", hypothesis_length_reason, "last_budget=hypothesis_apply"),
+            check_contains("hypothesis-length-route-last-finish", hypothesis_length_reason, "last_finish=length"),
+            check_contains(
+                "hypothesis-length-route-hypothesis",
+                hypothesis_length_reason,
+                "last_replan_hypothesis=Trace evidence must resolve VM branch opcode semantics",
+            ),
+            check_contains("hypothesis-length-route-budget", hypothesis_length_reason, "route_max_tokens=8192"),
+            check_contains("hypothesis-length-route-adjust", hypothesis_length_reason, "episode_adjust=length_boost"),
+        ]
+    )
+
+    analysis_application_events: list[dict[str, Any]] = [
+        {
+            "event_id": f"{analysis_application_episode}__analysis-progress",
+            "episode_id": analysis_application_episode,
+            "episode_operation": "continue",
+            "sequence": 1,
+            "kind": "analysis_progress",
+            "source": "safe-control-probe",
+            "observation": {
+                "analysis_progress": True,
+                "analysis_signals": ["verified_task_fact"],
+                "analysis_summary": "Verified facts are ready for direct application.",
+            },
+            "evidence_refs": [f"probe:event:{analysis_application_episode}__analysis-progress"],
+            "session_id": analysis_application_session,
+            "trial_name": trial,
+            "step_name": "episode-analysis-application-progress",
+            "task_name": task,
+        }
+    ]
+    for index in range(1, 4):
+        event_id = f"{analysis_application_episode}__application-{index}"
+        analysis_application_events.append(
+            {
+                "event_id": event_id,
+                "episode_id": analysis_application_episode,
+                "episode_operation": "continue",
+                "sequence": index + 1,
+                "kind": "llm_call",
+                "source": "safe-control-probe",
+                "observation": {
+                    "outcome": "response_completed",
+                    "model": CHEAP_MODEL,
+                    "routed_model": CHEAP_MODEL,
+                    "budget_action": "cheap_execute",
+                    "finish_reason": "stop",
+                    "status": 200,
+                    "total_tokens": 1000,
+                    "cost_usd": 0.0001,
+                    "latency_ms": 1000,
+                    "routing_reason": (
+                        "smart-router safe-control: "
+                        "rule_id=episode_analysis_progress_application action=cheap_execute"
+                    ),
+                },
+                "evidence_refs": [f"probe:event:{event_id}"],
+                "session_id": analysis_application_session,
+                "trial_name": trial,
+                "step_name": f"episode-analysis-application-llm-{index:02d}",
+                "task_name": task,
+            }
+        )
+    analysis_application_batch_response = post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {"events": analysis_application_events},
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": analysis_application_session,
+            "X-Episode-ID": analysis_application_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-analysis-application-injected-batch",
+            "X-Task-Name": task,
+        },
+    )
+    checks.extend(
+        [
+            check_equal("analysis-application-batch-event-ingest-count", analysis_application_batch_response.get("count"), 4),
+            check_equal("analysis-application-batch-event-ingest-sinks", analysis_application_batch_response.get("sinks"), 2),
+        ]
+    )
+    analysis_application_state = fetch_episode_state(port, analysis_application_episode)
+    analysis_application_payload = analysis_application_state.get("state") or {}
+    checks.extend(
+        [
+            check_equal(
+                "analysis-application-attempts",
+                analysis_application_payload.get("analysis_application_attempts_since_progress"),
+                3,
+            ),
+            check_equal(
+                "analysis-application-recoveries-before-route",
+                analysis_application_payload.get("analysis_application_recoveries_since_progress"),
+                0,
+            ),
+            check_equal(
+                "analysis-application-next-reason",
+                analysis_application_payload.get("next_capability_reason"),
+                "analysis_progress_application_exhausted",
+            ),
+        ]
+    )
+    analysis_application_step = "episode-analysis-application-recovery-route"
+    analysis_application_response = post_json(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Continue after the application attempts."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": analysis_application_session,
+            "X-Episode-ID": analysis_application_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": analysis_application_step,
+            "X-Task-Name": task,
+        },
+    )
+    analysis_application_trace = wait_for_agent_trace(port, analysis_application_session, analysis_application_step)
+    analysis_application_reason = str(analysis_application_trace.get("routing_reason") or "")
+    checks.extend(
+        [
+            check_equal("analysis-application-route-source", classify_source(analysis_application_reason), "safe-control"),
+            check_equal(
+                "analysis-application-route-model",
+                analysis_application_trace.get("routed_model") or analysis_application_response.get("model") or "",
+                PREMIUM_MODEL,
+            ),
+            check_equal(
+                "analysis-application-route-budget-action",
+                analysis_application_trace.get("route_budget_action") or "",
+                "premium_recover",
+            ),
+            check_contains(
+                "analysis-application-route-rule",
+                analysis_application_reason,
+                "rule_id=episode_analysis_progress_application_recovery",
+            ),
+            check_contains(
+                "analysis-application-route-reason",
+                analysis_application_reason,
+                "reason=analysis_progress_application_exhausted",
+            ),
+        ]
+    )
+    analysis_application_after_route = fetch_episode_state(port, analysis_application_episode)
+    analysis_application_after_payload = analysis_application_after_route.get("state") or {}
+    checks.extend(
+        [
+            check_equal(
+                "analysis-application-recoveries-after-route",
+                analysis_application_after_payload.get("analysis_application_recoveries_since_progress"),
+                1,
+            ),
+            check_equal(
+                "analysis-application-after-route-next-reason",
+                analysis_application_after_payload.get("next_capability_reason"),
+                "analysis_progress_recovery_awaiting_outcome",
+            ),
+        ]
+    )
+
+    execution_stall_events: list[dict[str, Any]] = []
+    for index in range(1, 3):
+        llm_event_id = f"{execution_stall_episode}__llm-{index}"
+        stall_event_id = f"{execution_stall_episode}__stall-{index}"
+        execution_stall_events.extend(
+            [
+                {
+                    "event_id": llm_event_id,
+                    "episode_id": execution_stall_episode,
+                    "episode_operation": "continue",
+                    "sequence": index * 2 - 1,
+                    "kind": "llm_call",
+                    "source": "safe-control-probe",
+                    "observation": {
+                        "outcome": "response_completed",
+                        "model": CHEAP_MODEL,
+                        "routed_model": CHEAP_MODEL,
+                        "budget_action": "cheap_probe",
+                        "finish_reason": "stop",
+                        "status": 200,
+                        "total_tokens": 1000,
+                        "cost_usd": 0.0001,
+                        "latency_ms": 1000,
+                        "trace_id": f"trace-execution-stall-{index}",
+                    },
+                    "evidence_refs": [f"probe:event:{llm_event_id}"],
+                    "session_id": execution_stall_session,
+                    "trial_name": trial,
+                    "step_name": f"episode-execution-stall-llm-{index:02d}",
+                    "task_name": task,
+                },
+                {
+                    "event_id": stall_event_id,
+                    "episode_id": execution_stall_episode,
+                    "episode_operation": "continue",
+                    "sequence": index * 2,
+                    "kind": "execution_stall",
+                    "source": "safe-control-probe",
+                    "observation": {
+                        "stall": True,
+                        "stall_signals": ["parser_warning" if index == 1 else "interrupted_command"],
+                    },
+                    "evidence_refs": [f"probe:event:{stall_event_id}"],
+                    "session_id": execution_stall_session,
+                    "trial_name": trial,
+                    "step_name": f"episode-execution-stall-event-{index:02d}",
+                    "task_name": task,
+                },
+            ]
+        )
+    execution_stall_batch_response = post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {"events": execution_stall_events},
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": execution_stall_session,
+            "X-Episode-ID": execution_stall_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-execution-stall-injected-batch",
+            "X-Task-Name": task,
+        },
+    )
+    checks.extend(
+        [
+            check_equal("execution-stall-batch-event-ingest-count", execution_stall_batch_response.get("count"), 4),
+            check_equal("execution-stall-batch-event-ingest-sinks", execution_stall_batch_response.get("sinks"), 2),
+        ]
+    )
+    execution_stall_state = fetch_episode_state(port, execution_stall_episode)
+    execution_stall_payload = execution_stall_state.get("state") or {}
+    checks.extend(
+        [
+            check_equal("execution-stall-count", execution_stall_payload.get("execution_stall_count"), 2),
+            check_equal(
+                "execution-stalls-since-progress",
+                execution_stall_payload.get("execution_stalls_since_progress"),
+                2,
+            ),
+            check_equal(
+                "execution-stall-next-reason",
+                execution_stall_payload.get("next_capability_reason"),
+                "execution_stall_needs_recovery",
+            ),
+        ]
+    )
+    execution_stall_step = "episode-execution-stall-recovery-route"
+    execution_stall_response = post_json(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Continue after the stuck terminal output."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": execution_stall_session,
+            "X-Episode-ID": execution_stall_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": execution_stall_step,
+            "X-Task-Name": task,
+        },
+    )
+    execution_stall_trace = wait_for_agent_trace(port, execution_stall_session, execution_stall_step)
+    execution_stall_reason = str(execution_stall_trace.get("routing_reason") or "")
+    checks.extend(
+        [
+            check_equal("execution-stall-route-source", classify_source(execution_stall_reason), "safe-control"),
+            check_equal(
+                "execution-stall-route-model",
+                execution_stall_trace.get("routed_model") or execution_stall_response.get("model") or "",
+                PREMIUM_MODEL,
+            ),
+            check_equal(
+                "execution-stall-route-budget-action",
+                execution_stall_trace.get("route_budget_action") or "",
+                "premium_recover",
+            ),
+            check_contains(
+                "execution-stall-route-rule",
+                execution_stall_reason,
+                "rule_id=episode_execution_stall_recovery",
+            ),
+            check_contains(
+                "execution-stall-route-count",
+                execution_stall_reason,
+                "execution_stalls_since_progress=2",
+            ),
+        ]
+    )
+
     capability_floor_event_id = f"{capability_floor_episode}__verifier-failed"
     post_json(
         f"http://127.0.0.1:{port}/v1/episode-events",
@@ -1303,6 +2134,7 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
                 "sequence": index,
                 "kind": "llm_call",
                 "source": "safe-control-probe",
+                "timestamp": stale_probe_timestamp(index / 1000),
                 "observation": {
                     "outcome": "response_completed",
                     "model": PREMIUM_MODEL if action == "premium_recover" else CHEAP_MODEL,
@@ -1403,6 +2235,7 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
                 "sequence": index,
                 "kind": "llm_call",
                 "source": "safe-control-probe",
+                "timestamp": stale_probe_timestamp(index / 1000),
                 "observation": {
                     "outcome": "response_completed",
                     "model": CHEAP_MODEL,
@@ -1607,6 +2440,7 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
                 "sequence": index,
                 "kind": "llm_call",
                 "source": "safe-control-probe",
+                "timestamp": stale_probe_timestamp(index),
                 "observation": {
                     "outcome": "response_completed",
                     "model": PREMIUM_MODEL if action == "freeze_or_replan" else CHEAP_MODEL,
@@ -1866,6 +2700,7 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
                 "sequence": index,
                 "kind": "llm_call",
                 "source": "safe-control-probe",
+                "timestamp": stale_probe_timestamp(index),
                 "observation": {
                     "outcome": "length_truncated",
                     "model": CHEAP_MODEL,
@@ -1948,6 +2783,10 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         "completion_session_id": completion_session,
         "completion_regress_episode_id": completion_regress_episode,
         "completion_regress_session_id": completion_regress_session,
+        "analysis_application_episode_id": analysis_application_episode,
+        "analysis_application_session_id": analysis_application_session,
+        "execution_stall_episode_id": execution_stall_episode,
+        "execution_stall_session_id": execution_stall_session,
         "capability_floor_episode_id": capability_floor_episode,
         "capability_floor_session_id": capability_floor_session,
         "stop_gate_episode_id": stop_gate_episode,
@@ -1963,6 +2802,9 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         "state_after_duplicate": state_after_duplicate,
         "state_after_route": state_after_route,
         "state_after_route_outcome": state_after_route_outcome,
+        "analysis_application_state": analysis_application_state,
+        "analysis_application_after_route": analysis_application_after_route,
+        "execution_stall_state": execution_stall_state,
         "route_trace": route_trace,
         "failure_state": failure_state,
         "first_failure_route_trace": first_failure_trace,
@@ -1972,6 +2814,8 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         "completion_route_trace": completion_trace,
         "completion_regress_state": completion_regress_state,
         "completion_regress_route_trace": completion_regress_trace,
+        "delivery_exhausted_state": delivery_exhausted_state,
+        "delivery_exhausted_route_trace": delivery_exhausted_trace,
         "capability_floor_state": capability_floor_state,
         "capability_floor_route_trace": capability_floor_trace,
         "stop_gate_state": stop_gate_state,
