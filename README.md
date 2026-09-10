@@ -314,6 +314,9 @@ plugins:
       premium_cooldown_after: 2
       premium_cooldown_turns: 1
       cheap_probe_burst_limit: 3
+      stop_cost_usd: 4.0
+      stop_agent_call_threshold: 50
+      stop_length_pressure_threshold: 3
     budgeted_route:
       enabled: true
       profiles:
@@ -361,7 +364,12 @@ decision model. It routes file reads/search, known test execution, and ordinary
 fixed-format replies to the cheapest configured model; it upgrades repeated
 identical failures and contradicted core hypotheses to the strongest configured
 model; it inserts a short cheap cooldown after consecutive premium calls; and
-it returns to the prompt router after too many consecutive cheap probes.
+it returns to the prompt router after too many consecutive cheap probes. It can
+also stop locally before another upstream call when provider metadata is
+incomplete, cost has crossed the trial gate before verifier proximity, length
+pressure repeats without file/test progress, or a blocked episode has already
+spent a premium recovery turn without observable progress. These stops are
+audited with `route_budget_action=stop_trial` and a specific `error_kind`.
 Requests outside those rules continue through the prompt-based smart-router.
 With `budgeted_route.enabled`, the router also attaches a route action profile
 to each decision. The gateway rewrites `max_tokens`, shortens the upstream

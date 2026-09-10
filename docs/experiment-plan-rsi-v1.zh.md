@@ -45,7 +45,7 @@ replay screening 和重复 pilot acceptance 后，才允许进入 canary。
 - 最小 Episode 投影
 - `finish_reason=length` 动态预算反馈
 - `stale/blocked` no-progress 状态触发本地 recovery 路由
-- blocked episode 在 premium recovery 后仍无可观察进展时触发本地 stop gate
+- provider incomplete、成本超线、length pressure 和 blocked recovery 的本地 stop gate
 
 A5 说明了新的主要矛盾：
 
@@ -667,11 +667,15 @@ premium_recover + no_progress: stop or replan gate
 provider incomplete: stop and classify separately
 ```
 
-当前 online runtime 已实现第一条可执行的 stop gate：当 episode 已进入
-`no_progress=blocked`，且上一轮 route 是 `premium_recover`，并且上一轮 route
-仍处于 `pending` 或 `no_progress`，网关直接返回本地 `409`，不会再请求上游模型。
-对应 trace 记录 `pool=local`、`route_budget_action=stop_trial`、
-`error_kind=gateway_stop_gate` 和完整 episode evidence。
+当前 online runtime 已实现 4 条可执行 stop gate：
+
+- `provider_incomplete`：上一轮 provider 返回 2xx 但缺少 finish/tokens 元数据，下一轮本地停止并分类为 `gateway_provider_incomplete_stop_gate`。
+- `cost_without_verifier`：episode 成本超过 `stop_cost_usd`，但还没有 validation/verifier 近端证据，下一轮本地停止并分类为 `gateway_cost_stop_gate`。
+- `length_pressure_without_progress`：连续 length pressure 超过阈值，但还没有 file/test 进展，下一轮本地停止并分类为 `gateway_length_pressure_stop_gate`。
+- `blocked_premium_recover_no_progress`：episode 已进入 `no_progress=blocked`，上一轮 route 是 `premium_recover`，且上一轮 route 仍处于 `pending` 或 `no_progress`，下一轮本地停止并分类为 `gateway_stop_gate`。
+
+这些本地停止都会返回 HTTP `409`，不会请求上游模型。对应 trace 记录
+`pool=local`、`route_budget_action=stop_trial`、具体 `error_kind` 和完整 episode evidence。
 
 这些 gate 不是为了省时间，而是为了避免把坏策略误跑成“长尾样本”。
 
@@ -764,10 +768,10 @@ Implicit Pending Route Closure    done for pending route -> no_progress when nex
 Recent Route Outcome History      done for compact route -> outcome memory in state/prompt
 Next Minimum Capability Hint      done for state-derived router prompt guidance
 Capability Floor Enforcement      done for hard recovery and post-delivery validation assess floors, advisory otherwise
-Gateway Stop Gate                 done for blocked premium_recover without observable progress
+Gateway Stop Gate                 done for provider_incomplete/cost/length_pressure/blocked_recovery local aborts
 Online Episode State Query        done for GET /v1/episode-state
 State Backfill                    done for persisted traces/events -> online projection
-Deterministic Runtime Probe       done for event ingest -> state query -> recovery route -> local stop gate
+Deterministic Runtime Probe       done for event ingest -> state query -> recovery route -> 4 local stop gates
 ```
 
 RSI R1 完整结束后，aware-gateway 应达到：
@@ -785,7 +789,7 @@ Event-driven State Controller     partial for no-progress recovery
 Route-to-Outcome Feedback         partial for extractor/replay windows and compact online route history
 Next-step Capability Estimate     partial via deterministic state hint, not yet acceptance-tuned
 Capability Floor Control          partial; hard verifier/no-progress and post-delivery validation assess floors enforced, delivery floors now local
-Gateway Stop Gate                 partial; blocked premium_recover no-progress path enforced, broader cost/verifier stop lines still pending
+Gateway Stop Gate                 partial; four local abort paths enforced, acceptance thresholds still need matched pilot tuning
 Online State Inspection           done for current in-memory projection
 Restart State Rebuild             partial for audit trace/event backfill
 Runtime Probe Acceptance          done for deterministic local gateway/mocks

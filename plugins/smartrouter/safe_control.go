@@ -10,21 +10,27 @@ import (
 )
 
 const (
-	defaultRepeatedErrorThreshold = 2
-	defaultPremiumCooldownAfter   = 2
-	defaultPremiumCooldownTurns   = 1
-	defaultCheapProbeBurstLimit   = 3
+	defaultRepeatedErrorThreshold      = 2
+	defaultPremiumCooldownAfter        = 2
+	defaultPremiumCooldownTurns        = 1
+	defaultCheapProbeBurstLimit        = 3
+	defaultStopCostUSD                 = 4.0
+	defaultStopAgentCallThreshold      = defaultEpisodeNoProgressAgentCallThreshold
+	defaultStopLengthPressureThreshold = 3
 )
 
 // SafeControlConfig enables a local high-confidence routing layer before the
 // semantic decision model. It is intentionally conservative: unmatched requests
 // continue through the existing prompt-based smart-router.
 type SafeControlConfig struct {
-	Enabled                bool `yaml:"enabled" json:"enabled"`
-	RepeatedErrorThreshold int  `yaml:"repeated_error_threshold" json:"repeated_error_threshold"`
-	PremiumCooldownAfter   int  `yaml:"premium_cooldown_after" json:"premium_cooldown_after"`
-	PremiumCooldownTurns   int  `yaml:"premium_cooldown_turns" json:"premium_cooldown_turns"`
-	CheapProbeBurstLimit   int  `yaml:"cheap_probe_burst_limit" json:"cheap_probe_burst_limit"`
+	Enabled                     bool    `yaml:"enabled" json:"enabled"`
+	RepeatedErrorThreshold      int     `yaml:"repeated_error_threshold" json:"repeated_error_threshold"`
+	PremiumCooldownAfter        int     `yaml:"premium_cooldown_after" json:"premium_cooldown_after"`
+	PremiumCooldownTurns        int     `yaml:"premium_cooldown_turns" json:"premium_cooldown_turns"`
+	CheapProbeBurstLimit        int     `yaml:"cheap_probe_burst_limit" json:"cheap_probe_burst_limit"`
+	StopCostUSD                 float64 `yaml:"stop_cost_usd" json:"stop_cost_usd"`
+	StopAgentCallThreshold      int     `yaml:"stop_agent_call_threshold" json:"stop_agent_call_threshold"`
+	StopLengthPressureThreshold int     `yaml:"stop_length_pressure_threshold" json:"stop_length_pressure_threshold"`
 }
 
 type safeControlState struct {
@@ -56,7 +62,7 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 	obs := s.observeSafeControlState(req, parsed)
 	message := normalizeForRules(parsed.LatestUserMsg)
 
-	if decision, history, ok := s.episodeStopGateDecision(req); ok {
+	if decision, history, ok := s.episodeStopGateDecision(req, cfg); ok {
 		return decision, history, true
 	}
 
@@ -174,21 +180,91 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 	return nil, nil, false
 }
 
-func (s *SmartRouter) episodeStopGateDecision(req *http.Request) (*plugin.RoutingDecision, *DecisionResponse, bool) {
+func (s *SmartRouter) episodeStopGateDecision(req *http.Request, cfg SafeControlConfig) (*plugin.RoutingDecision, *DecisionResponse, bool) {
 	episodeCfg := s.episodeConfig()
 	if !episodeCfg.Enabled {
 		return nil, nil, false
 	}
 	snapshot := s.episodeSnapshot(req)
-	if !shouldStopBlockedPremiumNoProgress(snapshot) {
+	if snapshot.ID == "" {
 		return nil, nil, false
 	}
 
-	criticalPath := true
+	if shouldStopProviderIncomplete(snapshot) {
+		return s.localStopGateRoute(
+			req,
+			"episode_provider_incomplete_stop_gate",
+			"gateway_provider_incomplete_stop_gate",
+			"aware-gateway stop gate: provider returned incomplete LLM metadata",
+			0.98,
+			episodeProviderIncompleteEvidence(snapshot),
+			"provider incomplete; classify separately before continuing",
+			"stop trial after provider incomplete response",
+		)
+	}
+
+	if shouldStopCostWithoutVerifier(snapshot, cfg) {
+		return s.localStopGateRoute(
+			req,
+			"episode_cost_without_verifier_stop_gate",
+			"gateway_cost_stop_gate",
+			"aware-gateway stop gate: cost threshold exceeded before verifier proximity",
+			0.96,
+			episodeCostStopEvidence(snapshot, cfg),
+			"cost threshold exceeded without verifier proximity",
+			"stop trial before spending past cost gate",
+		)
+	}
+
+	if shouldStopBlockedPremiumNoProgress(snapshot) {
+		return s.localStopGateRoute(
+			req,
+			"episode_blocked_stop_gate",
+			"gateway_stop_gate",
+			"aware-gateway stop gate: blocked episode after premium recovery without observable progress",
+			0.97,
+			episodeBlockedStopEvidence(snapshot),
+			"blocked episode after premium recovery without observable progress",
+			"stop trial before spending another upstream call",
+		)
+	}
+
+	if shouldStopAgentCallNoProgress(snapshot, cfg) {
+		return s.localStopGateRoute(
+			req,
+			"episode_agent_call_no_progress_stop_gate",
+			"gateway_no_progress_stop_gate",
+			"aware-gateway stop gate: agent call threshold exceeded without progress",
+			0.95,
+			episodeAgentCallStopEvidence(snapshot, cfg),
+			"agent call threshold exceeded without progress",
+			"stop trial after too many no-progress agent calls",
+		)
+	}
+
+	if shouldStopLengthPressureWithoutProgress(snapshot, cfg) {
+		return s.localStopGateRoute(
+			req,
+			"episode_length_pressure_stop_gate",
+			"gateway_length_pressure_stop_gate",
+			"aware-gateway stop gate: repeated length pressure without file or test progress",
+			0.94,
+			episodeLengthPressureStopEvidence(snapshot, cfg),
+			"repeated length pressure without file or test progress",
+			"stop trial after repeated length pressure without progress",
+		)
+	}
+
+	return nil, nil, false
+}
+
+func (s *SmartRouter) localStopGateRoute(req *http.Request, ruleID, abortKind, abortMessage string, confidence float64, evidence []string, summary, shortReason string) (*plugin.RoutingDecision, *DecisionResponse, bool) {
 	reason := fmt.Sprintf(
-		"smart-router safe-control: decision_source=rule rule_id=episode_blocked_stop_gate action=%s confidence=0.97 evidence=%s",
+		"smart-router safe-control: decision_source=rule rule_id=%s action=%s confidence=%.2f evidence=%s",
+		ruleID,
 		budgetActionStopTrial,
-		strings.Join(episodeStopGateEvidence(snapshot), "; "),
+		confidence,
+		strings.Join(evidence, "; "),
 	)
 	routing := &plugin.RoutingDecision{
 		Pool:         "local",
@@ -196,26 +272,24 @@ func (s *SmartRouter) episodeStopGateDecision(req *http.Request) (*plugin.Routin
 		BudgetAction: budgetActionStopTrial,
 		Abort:        true,
 		AbortStatus:  http.StatusConflict,
-		AbortKind:    "gateway_stop_gate",
-		AbortMessage: "aware-gateway stop gate: blocked episode after premium recovery without observable progress",
+		AbortKind:    abortKind,
+		AbortMessage: abortMessage,
 	}
+	criticalPath := true
 	history := &DecisionResponse{
 		TurnType:        "stop_gate",
 		HypothesisState: "blocked",
 		CriticalPath:    &criticalPath,
 		Recoverability:  "hard",
 		BudgetAction:    budgetActionStopTrial,
-		ContextSummary:  "blocked episode after premium recovery without observable progress",
-		Reason:          "stop trial before spending another upstream call",
+		ContextSummary:  summary,
+		Reason:          shortReason,
 	}
 	s.attachEpisodeMetadata(req, routing, "continue")
 	return routing, history, true
 }
 
 func shouldStopBlockedPremiumNoProgress(snapshot EpisodeSnapshot) bool {
-	if snapshot.ID == "" {
-		return false
-	}
 	if valueOrDefault(snapshot.NoProgressSeverity, "none") != "blocked" {
 		return false
 	}
@@ -226,7 +300,65 @@ func shouldStopBlockedPremiumNoProgress(snapshot EpisodeSnapshot) bool {
 	return label == routeOutcomePending || label == routeOutcomeNoProgress
 }
 
-func episodeStopGateEvidence(snapshot EpisodeSnapshot) []string {
+func shouldStopProviderIncomplete(snapshot EpisodeSnapshot) bool {
+	event, ok := latestLLMEvent(snapshot)
+	return ok && event.Outcome == "provider_incomplete"
+}
+
+func shouldStopCostWithoutVerifier(snapshot EpisodeSnapshot, cfg SafeControlConfig) bool {
+	if cfg.StopCostUSD <= 0 || snapshot.TotalCost <= cfg.StopCostUSD {
+		return false
+	}
+	return !episodeCloseToVerifier(snapshot)
+}
+
+func shouldStopAgentCallNoProgress(snapshot EpisodeSnapshot, cfg SafeControlConfig) bool {
+	threshold := cfg.StopAgentCallThreshold
+	if threshold <= 0 {
+		return false
+	}
+	if snapshot.CallCount <= threshold {
+		return false
+	}
+	if valueOrDefault(snapshot.NoProgressSeverity, "none") != "blocked" {
+		return false
+	}
+	return !episodeCloseToVerifier(snapshot)
+}
+
+func shouldStopLengthPressureWithoutProgress(snapshot EpisodeSnapshot, cfg SafeControlConfig) bool {
+	threshold := cfg.StopLengthPressureThreshold
+	if threshold <= 0 || snapshot.LengthPressureSinceProgress < threshold {
+		return false
+	}
+	if snapshot.FileWriteCount > 0 || snapshot.TestRunCount > 0 || snapshot.TestPassedCount > 0 || snapshot.TestFailedCount > 0 {
+		return false
+	}
+	return !episodeCloseToVerifier(snapshot)
+}
+
+func latestLLMEvent(snapshot EpisodeSnapshot) (EpisodeEvent, bool) {
+	for index := len(snapshot.RecentEvents) - 1; index >= 0; index-- {
+		event := snapshot.RecentEvents[index]
+		if event.Kind == "llm_call" {
+			return event, true
+		}
+	}
+	return EpisodeEvent{}, false
+}
+
+func episodeCloseToVerifier(snapshot EpisodeSnapshot) bool {
+	switch valueOrDefault(snapshot.CompletionReadiness, completionReadinessNone) {
+	case completionReadinessValidationPassed,
+		completionReadinessVerifierFailed,
+		completionReadinessVerifierPassed:
+		return true
+	default:
+		return snapshot.VerifierReward > 0 || (snapshot.DeliveryFileWriteCount > 0 && snapshot.TestPassedCount > 0)
+	}
+}
+
+func episodeBlockedStopEvidence(snapshot EpisodeSnapshot) []string {
 	return []string{
 		fmt.Sprintf("episode_id=%s", snapshot.ID),
 		fmt.Sprintf("state_version=%d", snapshot.Version),
@@ -238,6 +370,69 @@ func episodeStopGateEvidence(snapshot EpisodeSnapshot) []string {
 		"last_route_trace=" + valueOrUnknown(snapshot.LastRouteTraceID),
 		"last_route_outcome=" + routeOutcomeLabelForSnapshot(snapshot),
 		fmt.Sprintf("last_route_outcome_events=%d", snapshot.LastRouteOutcomeEventCount),
+		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
+	}
+}
+
+func episodeProviderIncompleteEvidence(snapshot EpisodeSnapshot) []string {
+	event, _ := latestLLMEvent(snapshot)
+	return []string{
+		fmt.Sprintf("episode_id=%s", snapshot.ID),
+		fmt.Sprintf("state_version=%d", snapshot.Version),
+		fmt.Sprintf("call_count=%d", snapshot.CallCount),
+		fmt.Sprintf("total_cost=$%.4f", snapshot.TotalCost),
+		"last_event=" + valueOrUnknown(event.ID),
+		"last_outcome=" + valueOrUnknown(event.Outcome),
+		"last_model=" + valueOrUnknown(snapshot.LastModel),
+		"last_budget=" + valueOrUnknown(snapshot.LastBudgetAction),
+		"last_finish=" + valueOrUnknown(snapshot.LastFinishReason),
+		"last_route_outcome=" + routeOutcomeLabelForSnapshot(snapshot),
+	}
+}
+
+func episodeCostStopEvidence(snapshot EpisodeSnapshot, cfg SafeControlConfig) []string {
+	return []string{
+		fmt.Sprintf("episode_id=%s", snapshot.ID),
+		fmt.Sprintf("state_version=%d", snapshot.Version),
+		fmt.Sprintf("total_cost=$%.4f", snapshot.TotalCost),
+		fmt.Sprintf("stop_cost_usd=$%.4f", cfg.StopCostUSD),
+		fmt.Sprintf("call_count=%d", snapshot.CallCount),
+		"completion_readiness=" + valueOrDefault(snapshot.CompletionReadiness, completionReadinessNone),
+		fmt.Sprintf("delivery_file_writes=%d", snapshot.DeliveryFileWriteCount),
+		fmt.Sprintf("test_passed=%d", snapshot.TestPassedCount),
+		fmt.Sprintf("verifier_reward=%.3f", snapshot.VerifierReward),
+		"no_progress=" + valueOrDefault(snapshot.NoProgressSeverity, "none"),
+		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
+	}
+}
+
+func episodeAgentCallStopEvidence(snapshot EpisodeSnapshot, cfg SafeControlConfig) []string {
+	return []string{
+		fmt.Sprintf("episode_id=%s", snapshot.ID),
+		fmt.Sprintf("state_version=%d", snapshot.Version),
+		fmt.Sprintf("call_count=%d", snapshot.CallCount),
+		fmt.Sprintf("stop_agent_call_threshold=%d", cfg.StopAgentCallThreshold),
+		"no_progress=" + valueOrDefault(snapshot.NoProgressSeverity, "none"),
+		fmt.Sprintf("llm_since_progress=%d", snapshot.LLMCallsSinceProgress),
+		fmt.Sprintf("events_since_progress=%d", snapshot.EventsSinceProgress),
+		fmt.Sprintf("length_since_progress=%d", snapshot.LengthPressureSinceProgress),
+		"last_budget=" + valueOrUnknown(snapshot.LastBudgetAction),
+		"last_route_outcome=" + routeOutcomeLabelForSnapshot(snapshot),
+		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
+	}
+}
+
+func episodeLengthPressureStopEvidence(snapshot EpisodeSnapshot, cfg SafeControlConfig) []string {
+	return []string{
+		fmt.Sprintf("episode_id=%s", snapshot.ID),
+		fmt.Sprintf("state_version=%d", snapshot.Version),
+		fmt.Sprintf("length_since_progress=%d", snapshot.LengthPressureSinceProgress),
+		fmt.Sprintf("stop_length_pressure_threshold=%d", cfg.StopLengthPressureThreshold),
+		fmt.Sprintf("recent_length=%d", snapshot.RecentLengthFinishes),
+		fmt.Sprintf("length_streak=%d", snapshot.ConsecutiveLengthFinishes),
+		fmt.Sprintf("file_writes=%d", snapshot.FileWriteCount),
+		fmt.Sprintf("test_runs=%d", snapshot.TestRunCount),
+		"last_budget=" + valueOrUnknown(snapshot.LastBudgetAction),
 		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
 	}
 }
@@ -456,6 +651,15 @@ func (s *SmartRouter) safeControlConfig() SafeControlConfig {
 	}
 	if cfg.CheapProbeBurstLimit <= 0 {
 		cfg.CheapProbeBurstLimit = defaultCheapProbeBurstLimit
+	}
+	if cfg.StopCostUSD <= 0 {
+		cfg.StopCostUSD = defaultStopCostUSD
+	}
+	if cfg.StopAgentCallThreshold <= 0 {
+		cfg.StopAgentCallThreshold = defaultStopAgentCallThreshold
+	}
+	if cfg.StopLengthPressureThreshold <= 0 {
+		cfg.StopLengthPressureThreshold = defaultStopLengthPressureThreshold
 	}
 	return cfg
 }

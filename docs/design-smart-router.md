@@ -149,6 +149,9 @@ plugins:
       premium_cooldown_after: 2
       premium_cooldown_turns: 1
       cheap_probe_burst_limit: 3
+      stop_cost_usd: 4.0
+      stop_agent_call_threshold: 50
+      stop_length_pressure_threshold: 3
     budgeted_route:
       enabled: true
       profiles:
@@ -254,7 +257,9 @@ prompt and handles only narrow cases:
 - Upgrade repeated identical task errors and contradicted core hypotheses to
   the strongest configured model.
 - Apply a short cheap-model cooldown after consecutive premium calls.
-- Stop locally when an episode is already blocked and the previous premium
+- Stop locally for hard trial-stop signals: provider incomplete metadata,
+  cost above threshold before verifier proximity, repeated length pressure
+  without file/test progress, or a blocked episode whose previous premium
   recovery route produced no observable progress.
 - Send control back to the semantic router after too many consecutive cheap
   probes, so local rules cannot delay early direction-setting work forever.
@@ -351,11 +356,12 @@ episode reaches `no_progress=stale` or `no_progress=blocked`, it bypasses the
 semantic judge and routes the next ambiguous or otherwise cheap-looking turn to
 `premium_recover` with evidence such as state version, length pressure,
 LLM calls since progress, and last progress kind in the routing reason.
-If that recovery has already happened and the next route sees the episode still
-blocked with the previous route outcome `pending` or `no_progress`, the gateway
-returns a local HTTP 409 stop-gate response instead of proxying another model
-call. The route remains auditable as `pool=local`,
-`route_budget_action=stop_trial`, and `error_kind=gateway_stop_gate`.
+If a hard stop line has fired, the gateway returns a local HTTP 409 stop-gate
+response instead of proxying another model call. The route remains auditable as
+`pool=local` and `route_budget_action=stop_trial`; the `error_kind` identifies
+which stop fired, for example `gateway_stop_gate`,
+`gateway_cost_stop_gate`, `gateway_length_pressure_stop_gate`, or
+`gateway_provider_incomplete_stop_gate`.
 It also watches failed test events: when the same normalized failure
 fingerprint repeats without the failure frontier shrinking, the router can make
 one local `episode_repeated_failure_recovery` decision and then hand later

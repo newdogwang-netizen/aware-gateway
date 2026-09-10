@@ -2810,6 +2810,172 @@ func TestEpisodeBlockedPremiumRecoveryWithoutProgressStopsTrial(t *testing.T) {
 	}
 }
 
+func TestEpisodeProviderIncompleteStopsTrial(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	if err := router.Record(&plugin.AuditRecord{
+		TraceID:     "trace-provider-incomplete",
+		Timestamp:   time.Now(),
+		SessionID:   "episode-provider-incomplete",
+		Pool:        "openrouter",
+		RoutedModel: "z-ai/glm-5.3-flash",
+		Status:      200,
+	}); err != nil {
+		t.Fatalf("Record returned error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "episode-provider-incomplete")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue after provider timeout."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local provider-incomplete stop")
+	}
+	if decision == nil || !decision.Abort {
+		t.Fatalf("decision = %#v, want local abort", decision)
+	}
+	if decision.AbortKind != "gateway_provider_incomplete_stop_gate" {
+		t.Fatalf("abort kind = %q, want gateway_provider_incomplete_stop_gate", decision.AbortKind)
+	}
+	for _, want := range []string{
+		"rule_id=episode_provider_incomplete_stop_gate",
+		"action=stop_trial",
+		"last_outcome=provider_incomplete",
+		"last_event=trace-provider-incomplete",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+}
+
+func TestEpisodeCostWithoutVerifierStopsTrial(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	if err := router.Record(&plugin.AuditRecord{
+		TraceID:      "trace-cost-stop",
+		Timestamp:    time.Now(),
+		SessionID:    "episode-cost-stop",
+		Pool:         "openrouter",
+		RoutedModel:  "anthropic/claude-opus-5",
+		Status:       200,
+		FinishReason: "stop",
+		BudgetAction: budgetActionPremiumReason,
+		TotalTokens:  1000,
+		Cost:         4.01,
+	}); err != nil {
+		t.Fatalf("Record returned error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "episode-cost-stop")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue solving."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local cost stop")
+	}
+	if decision == nil || !decision.Abort {
+		t.Fatalf("decision = %#v, want local abort", decision)
+	}
+	if decision.AbortKind != "gateway_cost_stop_gate" {
+		t.Fatalf("abort kind = %q, want gateway_cost_stop_gate", decision.AbortKind)
+	}
+	for _, want := range []string{
+		"rule_id=episode_cost_without_verifier_stop_gate",
+		"total_cost=$4.0100",
+		"stop_cost_usd=$4.0000",
+		"completion_readiness=none",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+}
+
+func TestEpisodeLengthPressureWithoutFileOrTestProgressStopsTrial(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 5}
+	for i := 1; i <= 3; i++ {
+		if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+			EventID:   fmt.Sprintf("event-length-pressure-stop-%d", i),
+			EpisodeID: "episode-length-pressure-stop",
+			Timestamp: time.Now(),
+			Kind:      "llm_call",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":       "length_truncated",
+				"budget_action": budgetActionCheapExecute,
+				"model":         "z-ai/glm-5.3-flash",
+				"finish_reason": "length",
+				"status":        200,
+				"total_tokens":  1000,
+				"cost_usd":      0.01,
+			},
+		}); err != nil {
+			t.Fatalf("RecordEpisodeEvent %d returned error: %v", i, err)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-length-pressure-stop")
+	req.Header.Set("X-Session-ID", "episode-length-pressure-stop")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue after truncation."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local length-pressure stop")
+	}
+	if decision == nil || !decision.Abort {
+		t.Fatalf("decision = %#v, want local abort", decision)
+	}
+	if decision.AbortKind != "gateway_length_pressure_stop_gate" {
+		t.Fatalf("abort kind = %q, want gateway_length_pressure_stop_gate", decision.AbortKind)
+	}
+	for _, want := range []string{
+		"rule_id=episode_length_pressure_stop_gate",
+		"length_since_progress=3",
+		"stop_length_pressure_threshold=3",
+		"file_writes=0",
+		"test_runs=0",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+}
+
 func TestEpisodeNoProgressRecoveryHonorsPremiumCooldown(t *testing.T) {
 	decisionServerCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

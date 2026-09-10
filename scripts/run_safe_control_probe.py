@@ -372,6 +372,9 @@ plugins:
       premium_cooldown_after: 2
       premium_cooldown_turns: 1
       cheap_probe_burst_limit: 3
+      stop_cost_usd: 4.0
+      stop_agent_call_threshold: 50
+      stop_length_pressure_threshold: 3
     budgeted_route:
       enabled: true
       profiles:
@@ -512,6 +515,12 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     capability_floor_session = f"{trial}__capability_floor_agent"
     stop_gate_episode = f"{trial}__stop_gate"
     stop_gate_session = f"{trial}__stop_gate_agent"
+    provider_incomplete_episode = f"{trial}__provider_incomplete_stop"
+    provider_incomplete_session = f"{trial}__provider_incomplete_stop_agent"
+    cost_stop_episode = f"{trial}__cost_stop"
+    cost_stop_session = f"{trial}__cost_stop_agent"
+    length_stop_episode = f"{trial}__length_pressure_stop"
+    length_stop_session = f"{trial}__length_pressure_stop_agent"
     task = "phase2-safe-control-probe"
     checks: list[dict[str, Any]] = []
 
@@ -1370,6 +1379,248 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         ]
     )
 
+    provider_incomplete_event_id = f"{provider_incomplete_episode}__llm-provider-incomplete"
+    post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {
+            "event_id": provider_incomplete_event_id,
+            "episode_id": provider_incomplete_episode,
+            "episode_operation": "continue",
+            "sequence": 1,
+            "kind": "llm_call",
+            "source": "safe-control-probe",
+            "observation": {
+                "outcome": "provider_incomplete",
+                "model": CHEAP_MODEL,
+                "routed_model": CHEAP_MODEL,
+                "budget_action": "cheap_execute",
+                "status": 200,
+                "total_tokens": 0,
+                "cost_usd": 0,
+                "latency_ms": 60000,
+            },
+            "evidence_refs": [f"probe:event:{provider_incomplete_event_id}"],
+            "session_id": provider_incomplete_session,
+            "trial_name": trial,
+            "step_name": "episode-provider-incomplete-injected",
+            "task_name": task,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": provider_incomplete_session,
+            "X-Episode-ID": provider_incomplete_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-provider-incomplete-injected",
+            "X-Task-Name": task,
+        },
+    )
+    provider_incomplete_step = "episode-provider-incomplete-stop-route"
+    provider_incomplete_status, provider_incomplete_response = post_json_status(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Continue after provider returned an incomplete response."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": provider_incomplete_session,
+            "X-Episode-ID": provider_incomplete_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": provider_incomplete_step,
+            "X-Task-Name": task,
+        },
+    )
+    provider_incomplete_trace = wait_for_agent_trace(port, provider_incomplete_session, provider_incomplete_step)
+    provider_incomplete_reason = str(provider_incomplete_trace.get("routing_reason") or "")
+    provider_incomplete_error = provider_incomplete_response.get("error") or {}
+    checks.extend(
+        [
+            check_equal("provider-incomplete-stop-status", provider_incomplete_status, 409),
+            check_equal(
+                "provider-incomplete-stop-response-type",
+                provider_incomplete_error.get("type"),
+                "gateway_provider_incomplete_stop_gate",
+            ),
+            check_equal(
+                "provider-incomplete-stop-error-kind",
+                provider_incomplete_trace.get("error_kind"),
+                "gateway_provider_incomplete_stop_gate",
+            ),
+            check_equal(
+                "provider-incomplete-stop-budget-action",
+                provider_incomplete_trace.get("route_budget_action") or "",
+                "stop_trial",
+            ),
+            check_contains(
+                "provider-incomplete-stop-rule",
+                provider_incomplete_reason,
+                "rule_id=episode_provider_incomplete_stop_gate",
+            ),
+            check_contains("provider-incomplete-stop-outcome", provider_incomplete_reason, "last_outcome=provider_incomplete"),
+        ]
+    )
+
+    cost_stop_event_id = f"{cost_stop_episode}__llm-cost-threshold"
+    post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {
+            "event_id": cost_stop_event_id,
+            "episode_id": cost_stop_episode,
+            "episode_operation": "continue",
+            "sequence": 1,
+            "kind": "llm_call",
+            "source": "safe-control-probe",
+            "observation": {
+                "outcome": "response_completed",
+                "model": PREMIUM_MODEL,
+                "routed_model": PREMIUM_MODEL,
+                "budget_action": "premium_reason",
+                "finish_reason": "stop",
+                "status": 200,
+                "total_tokens": 1000,
+                "cost_usd": 4.01,
+                "latency_ms": 1000,
+            },
+            "evidence_refs": [f"probe:event:{cost_stop_event_id}"],
+            "session_id": cost_stop_session,
+            "trial_name": trial,
+            "step_name": "episode-cost-stop-injected",
+            "task_name": task,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": cost_stop_session,
+            "X-Episode-ID": cost_stop_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-cost-stop-injected",
+            "X-Task-Name": task,
+        },
+    )
+    cost_stop_step = "episode-cost-stop-route"
+    cost_stop_status, cost_stop_response = post_json_status(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Continue after the expensive attempt."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": cost_stop_session,
+            "X-Episode-ID": cost_stop_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": cost_stop_step,
+            "X-Task-Name": task,
+        },
+    )
+    cost_stop_trace = wait_for_agent_trace(port, cost_stop_session, cost_stop_step)
+    cost_stop_reason = str(cost_stop_trace.get("routing_reason") or "")
+    cost_stop_error = cost_stop_response.get("error") or {}
+    checks.extend(
+        [
+            check_equal("cost-stop-status", cost_stop_status, 409),
+            check_equal("cost-stop-response-type", cost_stop_error.get("type"), "gateway_cost_stop_gate"),
+            check_equal("cost-stop-error-kind", cost_stop_trace.get("error_kind"), "gateway_cost_stop_gate"),
+            check_equal("cost-stop-budget-action", cost_stop_trace.get("route_budget_action") or "", "stop_trial"),
+            check_contains("cost-stop-rule", cost_stop_reason, "rule_id=episode_cost_without_verifier_stop_gate"),
+            check_contains("cost-stop-total-cost", cost_stop_reason, "total_cost=$4.0100"),
+            check_contains("cost-stop-threshold", cost_stop_reason, "stop_cost_usd=$4.0000"),
+            check_contains("cost-stop-readiness", cost_stop_reason, "completion_readiness=none"),
+        ]
+    )
+
+    length_stop_events: list[dict[str, Any]] = []
+    for index in range(1, 4):
+        event_id = f"{length_stop_episode}__llm-length-{index}"
+        length_stop_events.append(
+            {
+                "event_id": event_id,
+                "episode_id": length_stop_episode,
+                "episode_operation": "continue",
+                "sequence": index,
+                "kind": "llm_call",
+                "source": "safe-control-probe",
+                "observation": {
+                    "outcome": "length_truncated",
+                    "model": CHEAP_MODEL,
+                    "routed_model": CHEAP_MODEL,
+                    "budget_action": "cheap_execute",
+                    "finish_reason": "length",
+                    "status": 200,
+                    "total_tokens": 1536,
+                    "cost_usd": 0.0001,
+                    "latency_ms": 60000,
+                },
+                "evidence_refs": [f"probe:event:{event_id}"],
+                "session_id": length_stop_session,
+                "trial_name": trial,
+                "step_name": f"episode-length-stop-llm-{index}",
+                "task_name": task,
+            }
+        )
+    post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {"events": length_stop_events},
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": length_stop_session,
+            "X-Episode-ID": length_stop_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-length-stop-injected-batch",
+            "X-Task-Name": task,
+        },
+    )
+    length_stop_step = "episode-length-pressure-stop-route"
+    length_stop_status, length_stop_response = post_json_status(
+        f"http://127.0.0.1:{port}/v1/chat/completions",
+        {
+            "model": "auto",
+            "messages": [
+                {"role": "system", "content": "You are a terminal coding agent."},
+                {"role": "user", "content": "Continue after repeated truncation."},
+            ],
+            "temperature": 0,
+            "max_tokens": 32,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": length_stop_session,
+            "X-Episode-ID": length_stop_episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": length_stop_step,
+            "X-Task-Name": task,
+        },
+    )
+    length_stop_trace = wait_for_agent_trace(port, length_stop_session, length_stop_step)
+    length_stop_reason = str(length_stop_trace.get("routing_reason") or "")
+    length_stop_error = length_stop_response.get("error") or {}
+    checks.extend(
+        [
+            check_equal("length-stop-status", length_stop_status, 409),
+            check_equal("length-stop-response-type", length_stop_error.get("type"), "gateway_length_pressure_stop_gate"),
+            check_equal(
+                "length-stop-error-kind",
+                length_stop_trace.get("error_kind"),
+                "gateway_length_pressure_stop_gate",
+            ),
+            check_equal("length-stop-budget-action", length_stop_trace.get("route_budget_action") or "", "stop_trial"),
+            check_contains("length-stop-rule", length_stop_reason, "rule_id=episode_length_pressure_stop_gate"),
+            check_contains("length-stop-pressure", length_stop_reason, "length_since_progress=3"),
+            check_contains("length-stop-threshold", length_stop_reason, "stop_length_pressure_threshold=3"),
+            check_contains("length-stop-file-writes", length_stop_reason, "file_writes=0"),
+            check_contains("length-stop-test-runs", length_stop_reason, "test_runs=0"),
+        ]
+    )
+
     return {
         "name": "episode-runtime-state-controller",
         "episode_id": episode,
@@ -1384,6 +1635,12 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         "capability_floor_session_id": capability_floor_session,
         "stop_gate_episode_id": stop_gate_episode,
         "stop_gate_session_id": stop_gate_session,
+        "provider_incomplete_episode_id": provider_incomplete_episode,
+        "provider_incomplete_session_id": provider_incomplete_session,
+        "cost_stop_episode_id": cost_stop_episode,
+        "cost_stop_session_id": cost_stop_session,
+        "length_stop_episode_id": length_stop_episode,
+        "length_stop_session_id": length_stop_session,
         "checks": checks,
         "state_before_route": state_before,
         "state_after_duplicate": state_after_duplicate,
@@ -1402,6 +1659,9 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         "capability_floor_route_trace": capability_floor_trace,
         "stop_gate_state": stop_gate_state,
         "stop_gate_route_trace": stop_trace,
+        "provider_incomplete_stop_route_trace": provider_incomplete_trace,
+        "cost_stop_route_trace": cost_stop_trace,
+        "length_stop_route_trace": length_stop_trace,
     }
 
 
