@@ -346,6 +346,10 @@ The gateway fills missing `schema_version`, `event_id`, `timestamp`,
 `certainty`, and `extractor_version` defaults. The audit SQLite plugin stores
 these rows in `episode_events`; `GET /v1/episode-events?episode_id=...` returns
 them for replay and visualization.
+`GET /v1/episode-state?episode_id=...` returns the current online state
+projection exposed by smart-router. This gives experiment tooling a direct way
+to inspect the reducer output that routing decisions are using, without
+reconstructing it from raw events on every read.
 
 The first online adapter is command-based:
 
@@ -375,7 +379,8 @@ state rebuilding:
 
 `route_budget_action` is recorded as route metadata even when budget rewriting
 is disabled. With the audit SQLite store enabled, `/v1/traces?episode_id=...`
-can fetch one task line directly.
+can fetch one task line directly; `/v1/episode-state?episode_id=...` shows the
+latest in-memory projection for that same task line.
 
 This is not the full Issue #1 runtime. It does not yet identify nested task
 lines with a semantic resolver or automatically capture every shell/tool call.

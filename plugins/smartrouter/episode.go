@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -723,6 +724,14 @@ func renderEpisodeStateJSON(snapshot EpisodeSnapshot) string {
 	if snapshot.ID == "" {
 		return ""
 	}
+	encoded, err := json.Marshal(episodeStatePayload(snapshot))
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func episodeStatePayload(snapshot EpisodeSnapshot) map[string]any {
 	payload := map[string]any{
 		"episode_id":                     snapshot.ID,
 		"state_version":                  snapshot.Version,
@@ -772,11 +781,53 @@ func renderEpisodeStateJSON(snapshot EpisodeSnapshot) string {
 		}
 		payload["recent_events"] = recent
 	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return ""
+	return payload
+}
+
+func (s *SmartRouter) QueryEpisodeStates(filter plugin.EpisodeStateFilter) ([]plugin.EpisodeStateEntry, error) {
+	cfg := s.episodeConfig()
+	if !cfg.Enabled {
+		return nil, nil
 	}
-	return string(encoded)
+
+	s.episodeMu.Lock()
+	defer s.episodeMu.Unlock()
+	if len(s.episodes) == 0 {
+		return nil, nil
+	}
+
+	if filter.EpisodeID != "" {
+		state := s.episodes[filter.EpisodeID]
+		if state == nil {
+			return nil, nil
+		}
+		snapshot := snapshotFromEpisodeState(state)
+		return []plugin.EpisodeStateEntry{episodeStateEntry(snapshot, s.Name())}, nil
+	}
+
+	keys := make([]string, 0, len(s.episodes))
+	for key := range s.episodes {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	limit := filter.Limit
+	if limit <= 0 || limit > len(keys) {
+		limit = len(keys)
+	}
+	out := make([]plugin.EpisodeStateEntry, 0, limit)
+	for _, key := range keys[:limit] {
+		out = append(out, episodeStateEntry(snapshotFromEpisodeState(s.episodes[key]), s.Name()))
+	}
+	return out, nil
+}
+
+func episodeStateEntry(snapshot EpisodeSnapshot, source string) plugin.EpisodeStateEntry {
+	return plugin.EpisodeStateEntry{
+		EpisodeID:    snapshot.ID,
+		StateVersion: snapshot.Version,
+		Source:       source,
+		State:        episodeStatePayload(snapshot),
+	}
 }
 
 func episodeKeyFromRequest(req *http.Request) string {

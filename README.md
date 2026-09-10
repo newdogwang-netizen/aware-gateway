@@ -403,6 +403,12 @@ posting each deterministic event id once. V4 experiments can enable it with:
 AWARE_V4_EPISODE_WATCHER=1 scripts/run_v4_matrix.sh pilot
 ```
 
+Inspect the router's current online projection for one task line:
+
+```bash
+curl -s 'http://localhost:12026/v1/episode-state?episode_id=trial-abc__agent'
+```
+
 ## Project Structure
 
 ```

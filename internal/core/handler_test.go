@@ -588,6 +588,59 @@ func TestEpisodeEventEndpointIngestsAndQueriesEvents(t *testing.T) {
 	}
 }
 
+func TestEpisodeStateEndpointQueriesCurrentProjection(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := &config.Config{}
+	store := &capturingEpisodeStateStore{
+		states: []plugin.EpisodeStateEntry{
+			{
+				EpisodeID:    "episode-state-api",
+				StateVersion: 3,
+				Source:       "unit-test",
+				State: map[string]any{
+					"episode_id":           "episode-state-api",
+					"state_version":        3,
+					"test_run_count":       2,
+					"no_progress_severity": "stale",
+				},
+			},
+		},
+	}
+	reg := plugin.NewRegistry(logger)
+	if err := reg.Register(store); err != nil {
+		t.Fatalf("register state store: %v", err)
+	}
+	if err := reg.Init(&plugin.Context{Config: cfg, Logger: logger}); err != nil {
+		t.Fatalf("init registry: %v", err)
+	}
+
+	router := BuildRouter(cfg, MapPoolProvider{}, reg, logger)
+	req := httptest.NewRequest(http.MethodGet, "/v1/episode-state?episode_id=episode-state-api", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Count  int                        `json:"count"`
+		States []plugin.EpisodeStateEntry `json:"states"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode state response: %v", err)
+	}
+	if payload.Count != 1 || len(payload.States) != 1 {
+		t.Fatalf("state payload = %#v, want one state", payload)
+	}
+	state := payload.States[0]
+	if state.EpisodeID != "episode-state-api" || state.StateVersion != 3 {
+		t.Fatalf("state = %#v, want episode-state-api version 3", state)
+	}
+	if got := state.State["no_progress_severity"]; got != "stale" {
+		t.Fatalf("no_progress_severity = %#v, want stale", got)
+	}
+}
+
 func TestEnsureStreamUsageAddsIncludeUsage(t *testing.T) {
 	body := []byte(`{
 		"model": "auto",
@@ -847,6 +900,30 @@ func (s *capturingEpisodeEventStore) QueryEpisodeEvents(filter plugin.EpisodeEve
 			continue
 		}
 		out = append(out, event)
+		if filter.Limit > 0 && len(out) >= filter.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+type capturingEpisodeStateStore struct {
+	states []plugin.EpisodeStateEntry
+}
+
+func (s *capturingEpisodeStateStore) Name() string { return "capturing-episode-state" }
+
+func (s *capturingEpisodeStateStore) Init(*plugin.Context) error { return nil }
+
+func (s *capturingEpisodeStateStore) Close() error { return nil }
+
+func (s *capturingEpisodeStateStore) QueryEpisodeStates(filter plugin.EpisodeStateFilter) ([]plugin.EpisodeStateEntry, error) {
+	var out []plugin.EpisodeStateEntry
+	for _, state := range s.states {
+		if filter.EpisodeID != "" && state.EpisodeID != filter.EpisodeID {
+			continue
+		}
+		out = append(out, state)
 		if filter.Limit > 0 && len(out) >= filter.Limit {
 			break
 		}

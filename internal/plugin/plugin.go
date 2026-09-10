@@ -182,6 +182,22 @@ type EpisodeEventFilter struct {
 	Limit     int
 }
 
+// EpisodeStateFilter holds query parameters for online episode state lookup.
+type EpisodeStateFilter struct {
+	EpisodeID string
+	Limit     int
+}
+
+// EpisodeStateEntry is a compact, queryable state projection for one task
+// episode. State is intentionally extensible because reducer dimensions evolve
+// as policy experiments add new signals.
+type EpisodeStateEntry struct {
+	EpisodeID    string         `json:"episode_id"`
+	StateVersion int            `json:"state_version"`
+	Source       string         `json:"source"`
+	State        map[string]any `json:"state"`
+}
+
 // TraceQueryer is an optional interface that AuditSink plugins can implement
 // to support the /v1/traces endpoint.
 type TraceQueryer interface {
@@ -192,4 +208,10 @@ type TraceQueryer interface {
 // explicit outcome/progress events.
 type EpisodeEventQueryer interface {
 	QueryEpisodeEvents(filter EpisodeEventFilter) ([]EpisodeEvent, error)
+}
+
+// EpisodeStateQueryer is an optional interface for plugins that can expose the
+// current reduced task episode state.
+type EpisodeStateQueryer interface {
+	QueryEpisodeStates(filter EpisodeStateFilter) ([]EpisodeStateEntry, error)
 }

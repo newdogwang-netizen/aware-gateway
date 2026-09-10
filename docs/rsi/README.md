@@ -79,6 +79,15 @@ activity from progress before a full offline extraction pass. Explicit event
 projection is idempotent by `event_id`; repeated sidecar retries do not advance
 the in-memory state twice.
 
+The current online projection is queryable:
+
+```bash
+curl -s 'http://localhost:12026/v1/episode-state?episode_id=trial-abc__agent'
+```
+
+This is a runtime inspection surface for the state the router is using; offline
+replay still reads `episode-events.jsonl` and applies its own cutoff reducer.
+
 For local runners, `scripts/run_episode_command.py` wraps a command and posts
 the detected events automatically:
 

@@ -1188,6 +1188,53 @@ func TestRecordEpisodeEventDedupesEventIDsBeforeProjection(t *testing.T) {
 	}
 }
 
+func TestQueryEpisodeStatesReturnsCurrentProjection(t *testing.T) {
+	router := newTestSmartRouter("")
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true}
+	if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+		EventID:   "event-query-test-run",
+		EpisodeID: "episode-query",
+		Timestamp: time.Now(),
+		Kind:      "test_run",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"outcome": "passed",
+			"command": "go test ./...",
+		},
+	}); err != nil {
+		t.Fatalf("RecordEpisodeEvent returned error: %v", err)
+	}
+
+	states, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: "episode-query"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates returned error: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	state := states[0]
+	if state.EpisodeID != "episode-query" || state.Source != "smart-router" {
+		t.Fatalf("state identity = %#v, want episode-query from smart-router", state)
+	}
+	if state.StateVersion != 1 {
+		t.Fatalf("state version = %d, want 1", state.StateVersion)
+	}
+	if got := state.State["test_run_count"]; got != 1 {
+		t.Fatalf("test_run_count = %#v, want 1", got)
+	}
+	if got := state.State["last_progress_kind"]; got != "test_run" {
+		t.Fatalf("last_progress_kind = %#v, want test_run", got)
+	}
+
+	allStates, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates all returned error: %v", err)
+	}
+	if len(allStates) != 1 || allStates[0].EpisodeID != "episode-query" {
+		t.Fatalf("all states = %#v, want episode-query", allStates)
+	}
+}
+
 func TestEpisodeNoProgressStateRoutesPremiumRecoveryWithoutDecisionModel(t *testing.T) {
 	decisionServerCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
