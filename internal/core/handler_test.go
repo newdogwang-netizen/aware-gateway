@@ -518,6 +518,76 @@ func TestStripInternalRequestFieldsKeepsOtherExtraBodyFields(t *testing.T) {
 	}
 }
 
+func TestEpisodeEventEndpointIngestsAndQueriesEvents(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := &config.Config{}
+	store := &capturingEpisodeEventStore{}
+	reg := plugin.NewRegistry(logger)
+	if err := reg.Register(store); err != nil {
+		t.Fatalf("register event store: %v", err)
+	}
+	if err := reg.Init(&plugin.Context{Config: cfg, Logger: logger}); err != nil {
+		t.Fatalf("init registry: %v", err)
+	}
+
+	router := BuildRouter(cfg, MapPoolProvider{}, reg, logger)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/episode-events",
+		bytes.NewBufferString(`{
+			"kind": "test_run",
+			"source": "unit-test",
+			"observation": {"outcome": "passed", "command": "go test ./..."},
+			"evidence_refs": ["stdout"]
+		}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Episode-ID", "episode-api")
+	req.Header.Set("X-Session-ID", "trial-api__agent")
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(store.events) != 1 {
+		t.Fatalf("stored events = %d, want 1", len(store.events))
+	}
+	if store.events[0].EventID == "" {
+		t.Fatal("event id was not generated")
+	}
+	if store.events[0].EpisodeID != "episode-api" {
+		t.Fatalf("episode id = %q, want episode-api", store.events[0].EpisodeID)
+	}
+	if store.events[0].SessionID != "trial-api__agent" {
+		t.Fatalf("session id = %q, want trial-api__agent", store.events[0].SessionID)
+	}
+	if store.events[0].Timestamp.IsZero() {
+		t.Fatal("timestamp was not generated")
+	}
+
+	queryReq := httptest.NewRequest(http.MethodGet, "/v1/episode-events?episode_id=episode-api&kind=test_run", nil)
+	queryRec := httptest.NewRecorder()
+	router.ServeHTTP(queryRec, queryReq)
+	if queryRec.Code != http.StatusOK {
+		t.Fatalf("query status = %d, body = %s", queryRec.Code, queryRec.Body.String())
+	}
+	var payload struct {
+		Count  int                   `json:"count"`
+		Events []plugin.EpisodeEvent `json:"events"`
+	}
+	if err := json.Unmarshal(queryRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode query response: %v", err)
+	}
+	if payload.Count != 1 || len(payload.Events) != 1 {
+		t.Fatalf("query payload = %#v, want one event", payload)
+	}
+	if payload.Events[0].EventID != store.events[0].EventID {
+		t.Fatalf("query event id = %q, want %q", payload.Events[0].EventID, store.events[0].EventID)
+	}
+}
+
 func TestEnsureStreamUsageAddsIncludeUsage(t *testing.T) {
 	body := []byte(`{
 		"model": "auto",
@@ -742,4 +812,44 @@ func (s *capturingAuditSink) Record(record *plugin.AuditRecord) error {
 	copyRecord := *record
 	s.records = append(s.records, &copyRecord)
 	return nil
+}
+
+type capturingEpisodeEventStore struct {
+	events []plugin.EpisodeEvent
+}
+
+func (s *capturingEpisodeEventStore) Name() string { return "capturing-episode-events" }
+
+func (s *capturingEpisodeEventStore) Init(*plugin.Context) error { return nil }
+
+func (s *capturingEpisodeEventStore) Close() error { return nil }
+
+func (s *capturingEpisodeEventStore) RecordEpisodeEvent(event *plugin.EpisodeEvent) error {
+	copyEvent := *event
+	if event.Observation != nil {
+		copyEvent.Observation = make(map[string]any, len(event.Observation))
+		for key, value := range event.Observation {
+			copyEvent.Observation[key] = value
+		}
+	}
+	copyEvent.EvidenceRefs = append([]string(nil), event.EvidenceRefs...)
+	s.events = append(s.events, copyEvent)
+	return nil
+}
+
+func (s *capturingEpisodeEventStore) QueryEpisodeEvents(filter plugin.EpisodeEventFilter) ([]plugin.EpisodeEvent, error) {
+	var out []plugin.EpisodeEvent
+	for _, event := range s.events {
+		if filter.EpisodeID != "" && event.EpisodeID != filter.EpisodeID {
+			continue
+		}
+		if filter.Kind != "" && event.Kind != filter.Kind {
+			continue
+		}
+		out = append(out, event)
+		if filter.Limit > 0 && len(out) >= filter.Limit {
+			break
+		}
+	}
+	return out, nil
 }

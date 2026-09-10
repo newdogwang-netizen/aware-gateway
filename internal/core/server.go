@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
@@ -108,6 +109,8 @@ func BuildRouter(
 	r.Get("/v1/traces", traceQueryHandler(reg))
 	r.Get("/v1/traces/{trial}", traceQueryHandler(reg))
 	r.Get("/v1/traces/{trial}/summary", traceSummaryHandler(reg))
+	r.Get("/v1/episode-events", episodeEventQueryHandler(reg))
+	r.Post("/v1/episode-events", episodeEventIngestHandler(reg, logger))
 
 	// Plugin health reporters endpoint
 	r.Get("/v1/plugins", pluginsHandler(reg))
@@ -427,6 +430,212 @@ func traceSummaryHandler(reg *plugin.Registry) http.HandlerFunc {
 			"per_model":               modelBreakdown,
 		})
 	}
+}
+
+func episodeEventIngestHandler(reg *plugin.Registry, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !runAuthenticators(reg, w, r) {
+			return
+		}
+
+		sinks := reg.EpisodeEventSinks()
+		if len(sinks) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "no plugin supports episode event ingestion",
+			})
+			return
+		}
+
+		var event plugin.EpisodeEvent
+		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid episode event json"})
+			return
+		}
+		event = normalizeEpisodeEventFromRequest(event, r)
+		if err := validateEpisodeEvent(event); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+
+		for _, sink := range sinks {
+			if err := sink.RecordEpisodeEvent(&event); err != nil {
+				logger.Warn("episode event sink error",
+					"plugin", sink.Name(),
+					"event_id", event.EventID,
+					"episode_id", event.EpisodeID,
+					"error", err,
+				)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": "episode event sink failed"})
+				return
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":     "accepted",
+			"event_id":   event.EventID,
+			"episode_id": event.EpisodeID,
+			"sinks":      len(sinks),
+		})
+	}
+}
+
+func episodeEventQueryHandler(reg *plugin.Registry) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var queryer plugin.EpisodeEventQueryer
+		for _, p := range reg.AllPlugins() {
+			if q, ok := p.(plugin.EpisodeEventQueryer); ok {
+				queryer = q
+				break
+			}
+		}
+		if queryer == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "no plugin supports episode event queries",
+			})
+			return
+		}
+
+		filter := plugin.EpisodeEventFilter{
+			EpisodeID: r.URL.Query().Get("episode_id"),
+			Kind:      r.URL.Query().Get("kind"),
+		}
+		if l := r.URL.Query().Get("limit"); l != "" {
+			var n int
+			fmt.Sscanf(l, "%d", &n)
+			if n > 0 {
+				filter.Limit = n
+			}
+		}
+		if filter.Limit == 0 {
+			filter.Limit = 100
+		}
+
+		events, err := queryer.QueryEpisodeEvents(filter)
+		if err != nil {
+			slog.Error("episode event query failed", "error", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "internal"})
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"events": events,
+			"count":  len(events),
+		})
+	}
+}
+
+func runAuthenticators(reg *plugin.Registry, w http.ResponseWriter, r *http.Request) bool {
+	for _, auth := range reg.Authenticators() {
+		if err := auth.Authenticate(r); err != nil {
+			code := http.StatusUnauthorized
+			if ae, ok := err.(*plugin.AuthError); ok {
+				code = ae.Code
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(code)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeEpisodeEventFromRequest(event plugin.EpisodeEvent, r *http.Request) plugin.EpisodeEvent {
+	if event.SchemaVersion == "" {
+		event.SchemaVersion = "event-schema-v1"
+	}
+	if event.EventID == "" {
+		event.EventID = uuid.NewString()
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now().UTC()
+		event.TimestampSource = "gateway_received_at"
+	}
+	if event.EpisodeID == "" {
+		event.EpisodeID = r.Header.Get("X-Episode-ID")
+	}
+	if event.EpisodeOp == "" {
+		event.EpisodeOp = r.Header.Get("X-Episode-Operation")
+	}
+	if event.SessionID == "" {
+		event.SessionID = r.Header.Get("X-Session-ID")
+	}
+	if event.TrialName == "" {
+		event.TrialName = r.Header.Get("X-Trial-Name")
+	}
+	if event.StepName == "" {
+		event.StepName = r.Header.Get("X-Step-Name")
+	}
+	if event.TaskName == "" {
+		event.TaskName = r.Header.Get("X-Task-Name")
+	}
+	if event.EpisodeID == "" {
+		event.EpisodeID = event.SessionID
+	}
+	if event.EpisodeID == "" {
+		event.EpisodeID = event.TrialName
+	}
+	if event.Source == "" {
+		event.Source = "gateway_episode_events_api"
+	}
+	if event.Certainty == "" {
+		event.Certainty = "observed"
+	}
+	if event.ExtractorVersion == "" {
+		event.ExtractorVersion = "online-gateway-v1"
+	}
+	if event.Observation == nil {
+		event.Observation = map[string]any{}
+	}
+	if event.EvidenceRefs == nil {
+		event.EvidenceRefs = []string{}
+	}
+	return event
+}
+
+func validateEpisodeEvent(event plugin.EpisodeEvent) error {
+	if event.EpisodeID == "" {
+		return fmt.Errorf("episode_id is required")
+	}
+	if event.Kind == "" {
+		return fmt.Errorf("kind is required")
+	}
+	switch event.Kind {
+	case "llm_call",
+		"tool_call",
+		"file_written",
+		"file_modified",
+		"test_run",
+		"test_failed",
+		"test_passed",
+		"verifier_result",
+		"no_progress",
+		"run_exception":
+	default:
+		return fmt.Errorf("unsupported episode event kind %q", event.Kind)
+	}
+	if event.Source == "" {
+		return fmt.Errorf("source is required")
+	}
+	if event.EventID == "" {
+		return fmt.Errorf("event_id is required")
+	}
+	return nil
 }
 
 func pluginsHandler(reg *plugin.Registry) http.HandlerFunc {

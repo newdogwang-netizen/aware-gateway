@@ -76,3 +76,51 @@ func TestStoreRecordsAndQueriesRouteBudget(t *testing.T) {
 		t.Fatalf("episode traces = %#v, want trace-1", episodeTraces)
 	}
 }
+
+func TestStoreRecordsAndQueriesEpisodeEvents(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	err = store.RecordEpisodeEvent(plugin.EpisodeEvent{
+		SchemaVersion:    "event-schema-v1",
+		EventID:          "event-test-run-1",
+		EpisodeID:        "episode-progress",
+		EpisodeOp:        "continue",
+		Timestamp:        now,
+		TimestampSource:  "test",
+		Kind:             "test_run",
+		Source:           "unit-test",
+		Observation:      map[string]any{"outcome": "passed", "command": "go test ./..."},
+		EvidenceRefs:     []string{"test:stdout"},
+		Certainty:        "observed",
+		ExtractorVersion: "online-gateway-v1",
+		SessionID:        "trial-progress__agent",
+	})
+	if err != nil {
+		t.Fatalf("RecordEpisodeEvent returned error: %v", err)
+	}
+
+	events, err := store.QueryEpisodeEvents(plugin.EpisodeEventFilter{EpisodeID: "episode-progress", Kind: "test_run"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeEvents returned error: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	if events[0].EventID != "event-test-run-1" {
+		t.Fatalf("event id = %q, want event-test-run-1", events[0].EventID)
+	}
+	if events[0].Timestamp.IsZero() {
+		t.Fatal("timestamp was not restored")
+	}
+	if events[0].Observation["outcome"] != "passed" {
+		t.Fatalf("observation = %#v, want outcome=passed", events[0].Observation)
+	}
+	if len(events[0].EvidenceRefs) != 1 || events[0].EvidenceRefs[0] != "test:stdout" {
+		t.Fatalf("evidence refs = %#v, want test:stdout", events[0].EvidenceRefs)
+	}
+}

@@ -298,6 +298,7 @@ describes agent work, not judge overhead.
 The first reducer tracks only stable control signals:
 
 - total agent calls, cost, and tokens in this episode
+- explicit tool, file-write, test, verifier, and no-progress events
 - monotonic state version before and after each projected request
 - last model, last budget action, and last finish reason
 - normalized call outcome: `response_completed`, `length_truncated`,
@@ -305,6 +306,10 @@ The first reducer tracks only stable control signals:
 - consecutive `finish_reason=length` calls
 - repeated `finish_reason=length` pressure inside the latest N events
 - consecutive HTTP/provider errors
+- candidate progress: workspace/delivery file writes and passed local test runs
+- strong progress: verifier reward and fully passing final test events
+- no-progress pressure: explicit `no_progress` events and recent pressure
+  without progress
 - the latest N projected events
 
 The next prompt receives this compact episode state. The budget layer also uses
@@ -313,7 +318,29 @@ length finishes inside the recent event window, the next route budget is
 increased by a multiplier and capped by `max_tokens_ceiling`/
 `timeout_ms_ceiling`. The routing reason records this as
 `episode_adjust=length_boost` with both the current streak and recent length
-count.
+count. If an explicit `no_progress` event is present, the budget layer does not
+keep expanding because of length pressure; it records
+`episode_adjust=no_progress_freeze` so the router can change strategy instead.
+
+Online runners can post the same event shape used by RSI replay:
+
+```http
+POST /v1/episode-events
+Content-Type: application/json
+X-Episode-ID: trial-abc__agent
+
+{
+  "kind": "test_run",
+  "source": "local-runner",
+  "observation": {"outcome": "passed", "command": "go test ./..."},
+  "evidence_refs": ["stdout"]
+}
+```
+
+The gateway fills missing `schema_version`, `event_id`, `timestamp`,
+`certainty`, and `extractor_version` defaults. The audit SQLite plugin stores
+these rows in `episode_events`; `GET /v1/episode-events?episode_id=...` returns
+them for replay and visualization.
 
 The online trace now carries the episode metadata needed for replay and later
 state rebuilding:
@@ -329,8 +356,9 @@ is disabled. With the audit SQLite store enabled, `/v1/traces?episode_id=...`
 can fetch one task line directly.
 
 This is not the full Issue #1 runtime. It does not yet identify nested task
-lines with a semantic resolver, project live tool/file/test events, project
-verifier results, or perform offline policy updates. It is the smallest online
+lines with a semantic resolver or automatically capture every shell/tool call.
+Live tool/file/test/verifier events must still be posted by a runner or adapter.
+It also does not perform offline policy updates. It is the smallest online
 state chain needed to
 make route decisions auditable against the state they actually saw.
 

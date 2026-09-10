@@ -176,6 +176,15 @@ func (s *SmartRouter) adjustBudgetForEpisode(req *http.Request, action string, p
 		return profile, ""
 	}
 
+	if snapshot.ActiveNoProgress {
+		return profile, fmt.Sprintf(
+			"episode_adjust=no_progress_freeze episode_calls=%d episode_no_progress=%s episode_events_since_progress=%d",
+			snapshot.CallCount,
+			snapshot.NoProgressSeverity,
+			snapshot.EventsSinceProgress,
+		)
+	}
+
 	streakPressure := snapshot.ConsecutiveLengthFinishes >= cfg.LengthStreakThreshold
 	windowPressure := snapshot.RecentLengthFinishes >= cfg.LengthWindowThreshold
 	if !streakPressure && !windowPressure {

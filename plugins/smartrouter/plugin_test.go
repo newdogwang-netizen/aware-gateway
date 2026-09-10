@@ -943,6 +943,205 @@ func TestEpisodeLengthFinishBoostsNextBudget(t *testing.T) {
 	}
 }
 
+func TestEpisodeProgressEventResetsLengthPressureBeforeNextBudget(t *testing.T) {
+	var prompt string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("ReadAll request body: %v", err)
+		}
+		var payload struct {
+			Messages []struct {
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Fatalf("decode decision request: %v", err)
+		}
+		if len(payload.Messages) == 0 {
+			t.Fatal("decision request had no messages")
+		}
+		prompt = payload.Messages[0].Content
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"message": {"content": "{\"model\":\"z-ai/glm-5.3-flash\",\"turn_type\":\"validation\",\"hypothesis_state\":\"stable\",\"critical_path\":false,\"recoverability\":\"easy\",\"budget_action\":\"cheap_execute\",\"context_summary\":\"test passed\",\"reason\":\"progress observed\"}"}}],
+			"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+		}`)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	router.cfg.CacheTTLSeconds = -1
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionCheapExecute: {MaxTokens: 1000, TimeoutMs: 10000},
+		},
+	}
+	router.cfg.EpisodeRuntime = EpisodeConfig{
+		Enabled:               true,
+		LengthStreakThreshold: 1,
+		MaxTokensMultiplier:   3,
+		TimeoutMultiplier:     2,
+		MaxTokensCeiling:      2500,
+		TimeoutMsCeiling:      15000,
+	}
+	if err := router.Record(&plugin.AuditRecord{
+		Timestamp:    time.Now(),
+		SessionID:    "episode-progress-reset",
+		Pool:         "openrouter",
+		RoutedModel:  "z-ai/glm-5.3-flash",
+		Status:       200,
+		FinishReason: "length",
+		BudgetAction: budgetActionCheapExecute,
+		TotalTokens:  1000,
+		Cost:         0.01,
+		LatencyMs:    60000,
+	}); err != nil {
+		t.Fatalf("Record returned error: %v", err)
+	}
+	if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+		EventID:   "event-test-run-progress",
+		EpisodeID: "episode-progress-reset",
+		Timestamp: time.Now(),
+		Kind:      "test_run",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"outcome": "passed",
+			"command": "go test ./...",
+		},
+		EvidenceRefs: []string{"stdout"},
+	}); err != nil {
+		t.Fatalf("RecordEpisodeEvent returned error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "episode-progress-reset")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Summarize the validation result and continue."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decision == nil || decision.Skip {
+		t.Fatal("Route skipped; want routed decision")
+	}
+	if decision.MaxTokens != 1000 {
+		t.Fatalf("max tokens = %d, want base budget after progress reset", decision.MaxTokens)
+	}
+	if strings.Contains(decision.Reason, "episode_adjust=length_boost") {
+		t.Fatalf("reason = %q, want no length boost after progress event", decision.Reason)
+	}
+	for _, want := range []string{
+		"test_runs=1",
+		"test_passed=1",
+		"candidate=1",
+		"length_since_progress=0",
+		"last_progress=test_run",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
+func TestEpisodeNoProgressEventFreezesLengthBudgetExpansion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionCheapExecute: {MaxTokens: 1000, TimeoutMs: 10000},
+		},
+	}
+	router.cfg.EpisodeRuntime = EpisodeConfig{
+		Enabled:               true,
+		LengthStreakThreshold: 1,
+		MaxTokensMultiplier:   3,
+		TimeoutMultiplier:     2,
+		MaxTokensCeiling:      2500,
+		TimeoutMsCeiling:      15000,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "episode-no-progress")
+	if err := router.Record(&plugin.AuditRecord{
+		Timestamp:    time.Now(),
+		SessionID:    "episode-no-progress",
+		Pool:         "openrouter",
+		RoutedModel:  "z-ai/glm-5.3-flash",
+		Status:       200,
+		FinishReason: "length",
+		BudgetAction: budgetActionCheapExecute,
+		TotalTokens:  1000,
+		Cost:         0.01,
+		LatencyMs:    60000,
+	}); err != nil {
+		t.Fatalf("Record returned error: %v", err)
+	}
+	if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+		EventID:   "event-no-progress-1",
+		EpisodeID: "episode-no-progress",
+		Timestamp: time.Now(),
+		Kind:      "no_progress",
+		Source:    "progress-reducer",
+		Observation: map[string]any{
+			"reason":     "length_pressure_without_progress",
+			"since_turn": 3,
+		},
+		EvidenceRefs: []string{"event:length-1"},
+	}); err != nil {
+		t.Fatalf("RecordEpisodeEvent returned error: %v", err)
+	}
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Run the existing go test ./... command and report the output."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decision == nil || decision.Skip {
+		t.Fatal("Route skipped; want safe-control decision")
+	}
+	if decision.MaxTokens != 1000 {
+		t.Fatalf("max tokens = %d, want frozen base budget", decision.MaxTokens)
+	}
+	if decision.TimeoutMs != 10000 {
+		t.Fatalf("timeout ms = %d, want frozen base timeout", decision.TimeoutMs)
+	}
+	for _, want := range []string{"episode_adjust=no_progress_freeze", "episode_no_progress=stale"} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+
+	if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+		EventID:   "event-test-progress-after-freeze",
+		EpisodeID: "episode-no-progress",
+		Timestamp: time.Now(),
+		Kind:      "test_run",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"outcome": "passed",
+			"command": "go test ./...",
+		},
+		EvidenceRefs: []string{"stdout"},
+	}); err != nil {
+		t.Fatalf("RecordEpisodeEvent progress returned error: %v", err)
+	}
+	reqAfterProgress := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	reqAfterProgress.Header.Set("X-Session-ID", "episode-no-progress")
+	decisionAfterProgress, err := router.Route(reqAfterProgress, body)
+	if err != nil {
+		t.Fatalf("Route after progress returned error: %v", err)
+	}
+	if strings.Contains(decisionAfterProgress.Reason, "episode_adjust=no_progress_freeze") {
+		t.Fatalf("reason = %q, want progress event to clear active no-progress freeze", decisionAfterProgress.Reason)
+	}
+}
+
 func TestEpisodeRecentLengthPressureBoostsBudget(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "decision model should not be called", http.StatusInternalServerError)

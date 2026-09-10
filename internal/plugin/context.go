@@ -104,6 +104,29 @@ type AuditRecord struct {
 	TaskName  string `json:"task_name,omitempty"`  // X-Task-Name (e.g. "data-anonymization")
 }
 
+// EpisodeEvent is a generic per-episode outcome/progress event. It mirrors the
+// RSI event-schema-v1 shape so online events can be replayed with offline
+// Harbor artifacts.
+type EpisodeEvent struct {
+	SchemaVersion    string         `json:"schema_version,omitempty"`
+	EventID          string         `json:"event_id,omitempty"`
+	EpisodeID        string         `json:"episode_id"`
+	EpisodeOp        string         `json:"episode_operation,omitempty"`
+	Timestamp        time.Time      `json:"timestamp"`
+	TimestampSource  string         `json:"timestamp_source,omitempty"`
+	Sequence         int            `json:"sequence,omitempty"`
+	Kind             string         `json:"kind"`
+	Source           string         `json:"source"`
+	Observation      map[string]any `json:"observation,omitempty"`
+	EvidenceRefs     []string       `json:"evidence_refs,omitempty"`
+	Certainty        string         `json:"certainty,omitempty"`
+	ExtractorVersion string         `json:"extractor_version,omitempty"`
+	SessionID        string         `json:"session_id,omitempty"`
+	TrialName        string         `json:"trial_name,omitempty"`
+	StepName         string         `json:"step_name,omitempty"`
+	TaskName         string         `json:"task_name,omitempty"`
+}
+
 // RequestBody is a convenience type for reading and restoring request bodies.
 // Plugins that need to inspect the body should use this to avoid consuming it.
 type RequestBody struct {

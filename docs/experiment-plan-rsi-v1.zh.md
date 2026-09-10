@@ -731,6 +731,9 @@ Online Episode ID                 done for explicit X-Episode-ID fallback to ses
 Online Episode Resolver           done for header/body operation plus minimal interrupt/resume stack
 Online State Version Audit        done for state-before/state-after trace fields
 Trace Query by Episode            done for /v1/traces?episode_id=...
+Online Episode Event API          done for POST/GET /v1/episode-events
+Online Event Store                done for audit SQLite episode_events table
+Online Progress Projection        done for posted file/test/verifier/no_progress events
 ```
 
 RSI R1 完整结束后，aware-gateway 应达到：
@@ -741,12 +744,14 @@ Safe-control Rule Layer           done
 Budgeted Route Action             done
 Minimal Episode Runtime           done
 Session Episode Stack             done for deterministic continue/interrupt/resume/global/unknown
-Outcome Event Projection          done for offline replay, partial online llm_call state
+Outcome Event Projection          done for offline replay, online when events are posted
 Outcome-aware Replay              done
 Outcome-aware Screening Pilot     not started for P2
 Outcome-aware Acceptance          at least 3 runs per accepted task class
 Budget Policy Effectiveness       accepted or explicitly rejected
-Issue #1                          remains open until live tool/test/verifier events close the loop
+Automatic Tool Event Capture      not started; needs runner/Harbor adapter
+Delivery Feedback                 not started; needs verifier/outcome adapter in real runs
+Issue #1                          remains open until automatic live events close the loop
 ```
 
 这轮的重点不是证明 aware-gateway 已经“智能完成”，而是建立一条能持续打磨的工程路径：

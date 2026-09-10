@@ -11,13 +11,14 @@ import (
 )
 
 const (
-	defaultEpisodeRecentEvents          = 5
-	defaultEpisodeLengthStreakThreshold = 1
-	defaultEpisodeLengthWindowThreshold = 2
-	defaultEpisodeMaxTokensMultiplier   = 3.0
-	defaultEpisodeTimeoutMultiplier     = 2.0
-	defaultEpisodeMaxTokensCeiling      = 8192
-	defaultEpisodeTimeoutMsCeiling      = 240000
+	defaultEpisodeRecentEvents                 = 5
+	defaultEpisodeLengthStreakThreshold        = 1
+	defaultEpisodeLengthWindowThreshold        = 2
+	defaultEpisodeMaxTokensMultiplier          = 3.0
+	defaultEpisodeTimeoutMultiplier            = 2.0
+	defaultEpisodeMaxTokensCeiling             = 8192
+	defaultEpisodeTimeoutMsCeiling             = 240000
+	defaultEpisodeNoProgressAgentCallThreshold = 50
 
 	episodeOperationContinue  = "continue"
 	episodeOperationInterrupt = "interrupt"
@@ -40,7 +41,9 @@ type EpisodeConfig struct {
 }
 
 type EpisodeEvent struct {
+	ID           string
 	Kind         string
+	Source       string
 	Outcome      string
 	Model        string
 	BudgetAction string
@@ -50,21 +53,39 @@ type EpisodeEvent struct {
 	Cost         float64
 	TotalTokens  int
 	Timestamp    time.Time
+	Observation  map[string]any
+	EvidenceRefs []string
 }
 
 type EpisodeState struct {
-	ID                        string
-	Version                   int
-	CallCount                 int
-	TotalCost                 float64
-	TotalTokens               int
-	LastModel                 string
-	LastBudgetAction          string
-	LastFinishReason          string
-	ConsecutiveLengthFinishes int
-	RecentLengthFinishes      int
-	ConsecutiveErrors         int
-	RecentEvents              []EpisodeEvent
+	ID                          string
+	Version                     int
+	CallCount                   int
+	TotalCost                   float64
+	TotalTokens                 int
+	ToolCallCount               int
+	FileWriteCount              int
+	TestRunCount                int
+	TestPassedCount             int
+	TestFailedCount             int
+	CandidateProgressCount      int
+	StrongProgressCount         int
+	NoProgressEventCount        int
+	ActiveNoProgress            bool
+	EventsSinceProgress         int
+	LLMCallsSinceProgress       int
+	LengthPressureSinceProgress int
+	LastProgressEventID         string
+	LastProgressKind            string
+	VerifierReward              float64
+	NoProgressSeverity          string
+	LastModel                   string
+	LastBudgetAction            string
+	LastFinishReason            string
+	ConsecutiveLengthFinishes   int
+	RecentLengthFinishes        int
+	ConsecutiveErrors           int
+	RecentEvents                []EpisodeEvent
 }
 
 type EpisodeSession struct {
@@ -82,18 +103,34 @@ type EpisodeResolution struct {
 }
 
 type EpisodeSnapshot struct {
-	ID                        string
-	Version                   int
-	CallCount                 int
-	TotalCost                 float64
-	TotalTokens               int
-	LastModel                 string
-	LastBudgetAction          string
-	LastFinishReason          string
-	ConsecutiveLengthFinishes int
-	RecentLengthFinishes      int
-	ConsecutiveErrors         int
-	RecentEvents              []EpisodeEvent
+	ID                          string
+	Version                     int
+	CallCount                   int
+	TotalCost                   float64
+	TotalTokens                 int
+	ToolCallCount               int
+	FileWriteCount              int
+	TestRunCount                int
+	TestPassedCount             int
+	TestFailedCount             int
+	CandidateProgressCount      int
+	StrongProgressCount         int
+	NoProgressEventCount        int
+	ActiveNoProgress            bool
+	EventsSinceProgress         int
+	LLMCallsSinceProgress       int
+	LengthPressureSinceProgress int
+	LastProgressEventID         string
+	LastProgressKind            string
+	VerifierReward              float64
+	NoProgressSeverity          string
+	LastModel                   string
+	LastBudgetAction            string
+	LastFinishReason            string
+	ConsecutiveLengthFinishes   int
+	RecentLengthFinishes        int
+	ConsecutiveErrors           int
+	RecentEvents                []EpisodeEvent
 }
 
 func (s *SmartRouter) resolveEpisodeForRequest(req *http.Request, parsed *parsedRequest) EpisodeResolution {
@@ -363,7 +400,9 @@ func (s *SmartRouter) Record(record *plugin.AuditRecord) error {
 	}
 
 	event := EpisodeEvent{
+		ID:           record.TraceID,
 		Kind:         "llm_call",
+		Source:       "gateway_trace",
 		Outcome:      episodeOutcome(record),
 		Model:        record.RoutedModel,
 		BudgetAction: record.BudgetAction,
@@ -403,25 +442,126 @@ func (s *SmartRouter) Record(record *plugin.AuditRecord) error {
 	return nil
 }
 
-func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeConfig) {
-	state.Version++
-	state.CallCount++
-	state.TotalCost += event.Cost
-	state.TotalTokens += event.TotalTokens
-	state.LastModel = event.Model
-	state.LastBudgetAction = event.BudgetAction
-	state.LastFinishReason = event.FinishReason
-
-	if event.FinishReason == "length" {
-		state.ConsecutiveLengthFinishes++
-	} else if event.FinishReason != "" || event.Status < 400 {
-		state.ConsecutiveLengthFinishes = 0
+func (s *SmartRouter) RecordEpisodeEvent(event *plugin.EpisodeEvent) error {
+	if event == nil || !s.cfg.Enabled {
+		return nil
+	}
+	key := strings.TrimSpace(event.EpisodeID)
+	if key == "" {
+		key = strings.TrimSpace(event.SessionID)
+	}
+	if key == "" {
+		key = strings.TrimSpace(event.TrialName)
+	}
+	if key == "" {
+		return nil
+	}
+	cfg := s.episodeConfig()
+	if !cfg.Enabled {
+		return nil
 	}
 
-	if event.Status >= 400 {
-		state.ConsecutiveErrors++
+	projected := EpisodeEvent{
+		ID:           event.EventID,
+		Kind:         strings.TrimSpace(event.Kind),
+		Source:       strings.TrimSpace(event.Source),
+		Outcome:      stringFromObservation(event.Observation, "outcome"),
+		Model:        firstNonEmpty(stringFromObservation(event.Observation, "routed_model"), stringFromObservation(event.Observation, "model")),
+		BudgetAction: stringFromObservation(event.Observation, "budget_action"),
+		FinishReason: strings.ToLower(strings.TrimSpace(stringFromObservation(event.Observation, "finish_reason"))),
+		Status:       intFromObservation(event.Observation, "status"),
+		LatencyMs:    int64(intFromObservation(event.Observation, "latency_ms")),
+		Cost:         floatFromObservation(event.Observation, "cost_usd"),
+		TotalTokens:  intFromObservation(event.Observation, "total_tokens"),
+		Timestamp:    event.Timestamp,
+		Observation:  copyObservation(event.Observation),
+		EvidenceRefs: append([]string(nil), event.EvidenceRefs...),
+	}
+	if projected.Kind == "" {
+		projected.Kind = "unknown"
+	}
+	if projected.Outcome == "" && projected.Kind == "llm_call" {
+		projected.Outcome = "unknown"
+	}
+
+	s.episodeMu.Lock()
+	if s.episodes == nil {
+		s.episodes = make(map[string]*EpisodeState)
+	}
+	state := s.episodes[key]
+	if state == nil {
+		state = &EpisodeState{ID: key}
+		s.episodes[key] = state
+	}
+	projectEpisodeEvent(state, projected, cfg)
+	s.episodeMu.Unlock()
+	return nil
+}
+
+func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeConfig) {
+	state.Version++
+	progress := isStrongProgressEvent(event) || isCandidateProgressEvent(event)
+
+	switch event.Kind {
+	case "llm_call":
+		state.CallCount++
+		state.TotalCost += event.Cost
+		state.TotalTokens += event.TotalTokens
+		state.LastModel = event.Model
+		state.LastBudgetAction = event.BudgetAction
+		state.LastFinishReason = event.FinishReason
+
+		if event.FinishReason == "length" || event.Outcome == "length_truncated" {
+			state.ConsecutiveLengthFinishes++
+			state.LengthPressureSinceProgress++
+		} else if event.FinishReason != "" || event.Status < 400 {
+			state.ConsecutiveLengthFinishes = 0
+		}
+
+		if event.Status >= 400 || event.Outcome == "error" {
+			state.ConsecutiveErrors++
+		} else {
+			state.ConsecutiveErrors = 0
+		}
+		state.LLMCallsSinceProgress++
+	case "tool_call":
+		state.ToolCallCount++
+	case "file_written", "file_modified":
+		state.FileWriteCount++
+	case "test_run":
+		state.TestRunCount++
+		switch strings.ToLower(strings.TrimSpace(stringFromObservation(event.Observation, "outcome"))) {
+		case "passed":
+			state.TestPassedCount++
+		case "failed":
+			state.TestFailedCount++
+		}
+	case "test_passed":
+		state.TestPassedCount++
+	case "test_failed":
+		state.TestFailedCount++
+	case "verifier_result":
+		state.VerifierReward = floatFromObservation(event.Observation, "reward")
+	case "no_progress":
+		state.NoProgressEventCount++
+		state.ActiveNoProgress = true
+	}
+
+	if progress {
+		if isStrongProgressEvent(event) {
+			state.StrongProgressCount++
+		} else {
+			state.CandidateProgressCount++
+		}
+		state.EventsSinceProgress = 0
+		state.LLMCallsSinceProgress = 0
+		state.LengthPressureSinceProgress = 0
+		state.ConsecutiveLengthFinishes = 0
+		state.ActiveNoProgress = false
+		state.LastProgressEventID = event.ID
+		state.LastProgressKind = event.Kind
 	} else {
-		state.ConsecutiveErrors = 0
+		state.EventsSinceProgress++
 	}
 
 	state.RecentEvents = append(state.RecentEvents, event)
@@ -429,6 +569,7 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 		state.RecentEvents = state.RecentEvents[len(state.RecentEvents)-cfg.RecentEvents:]
 	}
 	state.RecentLengthFinishes = countLengthFinishes(state.RecentEvents)
+	state.NoProgressSeverity = noProgressSeverity(state, cfg)
 }
 
 func (s *SmartRouter) episodeSnapshot(req *http.Request) EpisodeSnapshot {
@@ -457,18 +598,34 @@ func snapshotFromEpisodeState(state *EpisodeState) EpisodeSnapshot {
 	recent := make([]EpisodeEvent, len(state.RecentEvents))
 	copy(recent, state.RecentEvents)
 	return EpisodeSnapshot{
-		ID:                        state.ID,
-		Version:                   state.Version,
-		CallCount:                 state.CallCount,
-		TotalCost:                 state.TotalCost,
-		TotalTokens:               state.TotalTokens,
-		LastModel:                 state.LastModel,
-		LastBudgetAction:          state.LastBudgetAction,
-		LastFinishReason:          state.LastFinishReason,
-		ConsecutiveLengthFinishes: state.ConsecutiveLengthFinishes,
-		RecentLengthFinishes:      state.RecentLengthFinishes,
-		ConsecutiveErrors:         state.ConsecutiveErrors,
-		RecentEvents:              recent,
+		ID:                          state.ID,
+		Version:                     state.Version,
+		CallCount:                   state.CallCount,
+		TotalCost:                   state.TotalCost,
+		TotalTokens:                 state.TotalTokens,
+		ToolCallCount:               state.ToolCallCount,
+		FileWriteCount:              state.FileWriteCount,
+		TestRunCount:                state.TestRunCount,
+		TestPassedCount:             state.TestPassedCount,
+		TestFailedCount:             state.TestFailedCount,
+		CandidateProgressCount:      state.CandidateProgressCount,
+		StrongProgressCount:         state.StrongProgressCount,
+		NoProgressEventCount:        state.NoProgressEventCount,
+		ActiveNoProgress:            state.ActiveNoProgress,
+		EventsSinceProgress:         state.EventsSinceProgress,
+		LLMCallsSinceProgress:       state.LLMCallsSinceProgress,
+		LengthPressureSinceProgress: state.LengthPressureSinceProgress,
+		LastProgressEventID:         state.LastProgressEventID,
+		LastProgressKind:            state.LastProgressKind,
+		VerifierReward:              state.VerifierReward,
+		NoProgressSeverity:          state.NoProgressSeverity,
+		LastModel:                   state.LastModel,
+		LastBudgetAction:            state.LastBudgetAction,
+		LastFinishReason:            state.LastFinishReason,
+		ConsecutiveLengthFinishes:   state.ConsecutiveLengthFinishes,
+		RecentLengthFinishes:        state.RecentLengthFinishes,
+		ConsecutiveErrors:           state.ConsecutiveErrors,
+		RecentEvents:                recent,
 	}
 }
 
@@ -490,6 +647,24 @@ func (s *SmartRouter) renderEpisodeSnapshot(snapshot EpisodeSnapshot) string {
 			valueOrUnknown(snapshot.LastModel),
 			valueOrUnknown(snapshot.LastBudgetAction),
 			valueOrUnknown(snapshot.LastFinishReason),
+		),
+		fmt.Sprintf(
+			"progress tools=%d file_writes=%d test_runs=%d test_passed=%d test_failed=%d candidate=%d strong=%d no_progress_events=%d active_no_progress=%t no_progress=%s events_since_progress=%d llm_since_progress=%d length_since_progress=%d last_progress=%s verifier_reward=%.3f",
+			snapshot.ToolCallCount,
+			snapshot.FileWriteCount,
+			snapshot.TestRunCount,
+			snapshot.TestPassedCount,
+			snapshot.TestFailedCount,
+			snapshot.CandidateProgressCount,
+			snapshot.StrongProgressCount,
+			snapshot.NoProgressEventCount,
+			snapshot.ActiveNoProgress,
+			valueOrDefault(snapshot.NoProgressSeverity, "none"),
+			snapshot.EventsSinceProgress,
+			snapshot.LLMCallsSinceProgress,
+			snapshot.LengthPressureSinceProgress,
+			valueOrUnknown(snapshot.LastProgressKind),
+			snapshot.VerifierReward,
 		),
 	}
 	if len(snapshot.RecentEvents) > 0 {
@@ -538,23 +713,41 @@ func renderEpisodeStateJSON(snapshot EpisodeSnapshot) string {
 		return ""
 	}
 	payload := map[string]any{
-		"episode_id":                  snapshot.ID,
-		"state_version":               snapshot.Version,
-		"call_count":                  snapshot.CallCount,
-		"total_cost":                  snapshot.TotalCost,
-		"total_tokens":                snapshot.TotalTokens,
-		"last_model":                  snapshot.LastModel,
-		"last_budget_action":          snapshot.LastBudgetAction,
-		"last_finish_reason":          snapshot.LastFinishReason,
-		"consecutive_length_finishes": snapshot.ConsecutiveLengthFinishes,
-		"recent_length_finishes":      snapshot.RecentLengthFinishes,
-		"consecutive_errors":          snapshot.ConsecutiveErrors,
+		"episode_id":                     snapshot.ID,
+		"state_version":                  snapshot.Version,
+		"call_count":                     snapshot.CallCount,
+		"total_cost":                     snapshot.TotalCost,
+		"total_tokens":                   snapshot.TotalTokens,
+		"tool_call_count":                snapshot.ToolCallCount,
+		"file_write_count":               snapshot.FileWriteCount,
+		"test_run_count":                 snapshot.TestRunCount,
+		"test_passed_count":              snapshot.TestPassedCount,
+		"test_failed_count":              snapshot.TestFailedCount,
+		"candidate_progress_count":       snapshot.CandidateProgressCount,
+		"strong_progress_count":          snapshot.StrongProgressCount,
+		"no_progress_event_count":        snapshot.NoProgressEventCount,
+		"active_no_progress":             snapshot.ActiveNoProgress,
+		"events_since_progress":          snapshot.EventsSinceProgress,
+		"llm_calls_since_progress":       snapshot.LLMCallsSinceProgress,
+		"length_pressure_since_progress": snapshot.LengthPressureSinceProgress,
+		"last_progress_event_id":         snapshot.LastProgressEventID,
+		"last_progress_kind":             snapshot.LastProgressKind,
+		"verifier_reward":                snapshot.VerifierReward,
+		"no_progress_severity":           valueOrDefault(snapshot.NoProgressSeverity, "none"),
+		"last_model":                     snapshot.LastModel,
+		"last_budget_action":             snapshot.LastBudgetAction,
+		"last_finish_reason":             snapshot.LastFinishReason,
+		"consecutive_length_finishes":    snapshot.ConsecutiveLengthFinishes,
+		"recent_length_finishes":         snapshot.RecentLengthFinishes,
+		"consecutive_errors":             snapshot.ConsecutiveErrors,
 	}
 	if len(snapshot.RecentEvents) > 0 {
 		recent := make([]map[string]any, 0, len(snapshot.RecentEvents))
 		for _, event := range snapshot.RecentEvents {
 			recent = append(recent, map[string]any{
+				"event_id":      event.ID,
 				"kind":          event.Kind,
+				"source":        event.Source,
 				"outcome":       event.Outcome,
 				"model":         event.Model,
 				"budget_action": event.BudgetAction,
@@ -563,6 +756,7 @@ func renderEpisodeStateJSON(snapshot EpisodeSnapshot) string {
 				"total_tokens":  event.TotalTokens,
 				"cost":          event.Cost,
 				"latency_ms":    event.LatencyMs,
+				"evidence_refs": event.EvidenceRefs,
 			})
 		}
 		payload["recent_events"] = recent
@@ -657,11 +851,182 @@ func episodeOutcome(record *plugin.AuditRecord) string {
 func countLengthFinishes(events []EpisodeEvent) int {
 	count := 0
 	for _, event := range events {
-		if event.FinishReason == "length" {
+		if event.FinishReason == "length" || event.Outcome == "length_truncated" {
 			count++
 		}
 	}
 	return count
+}
+
+func countRecentEpisodeErrors(events []EpisodeEvent) int {
+	count := 0
+	for _, event := range events {
+		if event.Status >= 400 || event.Outcome == "error" || event.Kind == "run_exception" {
+			count++
+		}
+	}
+	return count
+}
+
+func countRecentProgress(events []EpisodeEvent) int {
+	count := 0
+	for _, event := range events {
+		if isStrongProgressEvent(event) || isCandidateProgressEvent(event) {
+			count++
+		}
+	}
+	return count
+}
+
+func noProgressSeverity(state *EpisodeState, cfg EpisodeConfig) string {
+	if state == nil {
+		return "none"
+	}
+	recentPressure := state.RecentLengthFinishes + countRecentEpisodeErrors(state.RecentEvents)
+	recentProgress := countRecentProgress(state.RecentEvents)
+	if state.LLMCallsSinceProgress >= defaultEpisodeNoProgressAgentCallThreshold {
+		return "blocked"
+	}
+	if state.ActiveNoProgress {
+		return "stale"
+	}
+	if recentPressure >= cfg.LengthWindowThreshold && recentProgress == 0 {
+		return "stale"
+	}
+	if recentPressure > 0 {
+		return "watch"
+	}
+	return "none"
+}
+
+func isStrongProgressEvent(event EpisodeEvent) bool {
+	switch event.Kind {
+	case "test_passed":
+		return intFromObservation(event.Observation, "failed_count") == 0
+	case "verifier_result":
+		return floatFromObservation(event.Observation, "reward") > 0
+	default:
+		return false
+	}
+}
+
+func isCandidateProgressEvent(event EpisodeEvent) bool {
+	switch event.Kind {
+	case "file_modified":
+		return intFromObservation(event.Observation, "path_count") > 0
+	case "file_written":
+		return boolFromObservation(event.Observation, "delivery_target") || boolFromObservation(event.Observation, "workspace_target")
+	case "test_run":
+		return strings.EqualFold(stringFromObservation(event.Observation, "outcome"), "passed")
+	default:
+		return false
+	}
+}
+
+func copyObservation(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func stringFromObservation(observation map[string]any, key string) string {
+	if observation == nil {
+		return ""
+	}
+	switch value := observation[key].(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case fmt.Stringer:
+		return strings.TrimSpace(value.String())
+	default:
+		if value == nil {
+			return ""
+		}
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
+}
+
+func intFromObservation(observation map[string]any, key string) int {
+	if observation == nil {
+		return 0
+	}
+	switch value := observation[key].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case float64:
+		return int(value)
+	case json.Number:
+		out, _ := value.Int64()
+		return int(out)
+	case string:
+		var out int
+		if _, err := fmt.Sscanf(strings.TrimSpace(value), "%d", &out); err == nil {
+			return out
+		}
+	}
+	return 0
+}
+
+func floatFromObservation(observation map[string]any, key string) float64 {
+	if observation == nil {
+		return 0
+	}
+	switch value := observation[key].(type) {
+	case float64:
+		return value
+	case float32:
+		return float64(value)
+	case int:
+		return float64(value)
+	case int64:
+		return float64(value)
+	case json.Number:
+		out, _ := value.Float64()
+		return out
+	case string:
+		var out float64
+		if _, err := fmt.Sscanf(strings.TrimSpace(value), "%f", &out); err == nil {
+			return out
+		}
+	}
+	return 0
+}
+
+func boolFromObservation(observation map[string]any, key string) bool {
+	if observation == nil {
+		return false
+	}
+	switch value := observation[key].(type) {
+	case bool:
+		return value
+	case string:
+		return strings.EqualFold(strings.TrimSpace(value), "true")
+	default:
+		return false
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func valueOrDefault(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func joinRouterContext(parts ...string) string {

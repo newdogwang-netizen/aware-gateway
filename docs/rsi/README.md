@@ -47,6 +47,29 @@ Projected event kinds now include:
 - `file_modified`, `test_passed` / `test_failed`, `verifier_result`: final Harbor artifacts.
 - `no_progress`: derived pressure signal.
 
+## Online Ingestion
+
+The gateway can ingest the same event shape during a live run:
+
+```bash
+curl -s http://localhost:12026/v1/episode-events \
+  -H 'Content-Type: application/json' \
+  -H 'X-Episode-ID: trial-abc__agent' \
+  -d '{
+    "kind": "test_run",
+    "source": "local-runner",
+    "observation": {"outcome": "passed", "command": "go test ./..."},
+    "evidence_refs": ["stdout"]
+  }'
+```
+
+Missing `schema_version`, `event_id`, `timestamp`, `certainty`, and
+`extractor_version` fields are filled by the gateway. The audit SQLite store
+writes these events to `episode_events`, queryable with
+`GET /v1/episode-events?episode_id=...`. The smart-router also projects posted
+events into its online episode state, so later decisions can distinguish
+activity from progress before a full offline extraction pass.
+
 The reducer keeps two no-progress views. `no_progress_event_count` is historical
 background. `no_progress_window.severity` is the current state used by P2 replay:
 `none`, `watch`, `stale`, or `blocked`.

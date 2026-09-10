@@ -21,6 +21,7 @@ type Registry struct {
 	respTransformers    []ResponseTransformer
 	authenticators      []Authenticator
 	auditSinks          []AuditSink
+	episodeEventSinks   []EpisodeEventSink
 	middlewareProviders []MiddlewareProvider
 	healthReporters     []HealthReporter
 }
@@ -82,6 +83,9 @@ func (r *Registry) Init(ctx *Context) error {
 		if as, ok := p.(AuditSink); ok {
 			r.auditSinks = append(r.auditSinks, as)
 		}
+		if es, ok := p.(EpisodeEventSink); ok {
+			r.episodeEventSinks = append(r.episodeEventSinks, es)
+		}
 		if mp, ok := p.(MiddlewareProvider); ok {
 			r.middlewareProviders = append(r.middlewareProviders, mp)
 		}
@@ -97,6 +101,7 @@ func (r *Registry) Init(ctx *Context) error {
 		"resp_transformers", len(r.respTransformers),
 		"authenticators", len(r.authenticators),
 		"audit_sinks", len(r.auditSinks),
+		"episode_event_sinks", len(r.episodeEventSinks),
 		"middleware", len(r.middlewareProviders),
 		"health_reporters", len(r.healthReporters),
 	)
@@ -151,6 +156,12 @@ func (r *Registry) AuditSinks() []AuditSink {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.auditSinks
+}
+
+func (r *Registry) EpisodeEventSinks() []EpisodeEventSink {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.episodeEventSinks
 }
 
 func (r *Registry) MiddlewareProviders() []MiddlewareProvider {

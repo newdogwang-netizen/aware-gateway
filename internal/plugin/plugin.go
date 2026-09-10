@@ -17,6 +17,7 @@
 //   - ResponseTransformer: pipeline — each transformer runs in order
 //   - Authenticator: all must pass (AND logic)
 //   - AuditSink: fan-out — each sink receives every event
+//   - EpisodeEventSink: fan-out — each sink receives explicit progress events
 //   - MiddlewareProvider: middleware wrapped in registration order
 package plugin
 
@@ -104,6 +105,14 @@ type AuditSink interface {
 	Record(record *AuditRecord) error
 }
 
+// EpisodeEventSink receives explicit episode outcome/progress events. These
+// events cover non-LLM work such as tool calls, file writes, test runs, and
+// verifier results.
+type EpisodeEventSink interface {
+	Plugin
+	RecordEpisodeEvent(event *EpisodeEvent) error
+}
+
 // MiddlewareProvider supplies HTTP middleware to wrap the handler chain.
 // Multiple providers are wrapped in priority order (outermost = lowest priority).
 type MiddlewareProvider interface {
@@ -166,8 +175,21 @@ type TraceEntry struct {
 	StateAfter     string  `json:"episode_state_after,omitempty"`
 }
 
+// EpisodeEventFilter holds query parameters for episode event lookup.
+type EpisodeEventFilter struct {
+	EpisodeID string
+	Kind      string
+	Limit     int
+}
+
 // TraceQueryer is an optional interface that AuditSink plugins can implement
 // to support the /v1/traces endpoint.
 type TraceQueryer interface {
 	QueryTraces(filter TraceFilter) ([]TraceEntry, error)
+}
+
+// EpisodeEventQueryer is an optional interface for plugins that can retrieve
+// explicit outcome/progress events.
+type EpisodeEventQueryer interface {
+	QueryEpisodeEvents(filter EpisodeEventFilter) ([]EpisodeEvent, error)
 }

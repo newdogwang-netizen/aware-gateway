@@ -350,6 +350,29 @@ increase the next route budget within configured ceilings. Audit traces carry
 the resolved episode id, operation, state version before routing, compact
 state-before JSON, and state-after JSON after the request is projected.
 
+External runners can also post explicit progress events:
+
+```bash
+curl -s http://localhost:12026/v1/episode-events \
+  -H 'Content-Type: application/json' \
+  -H 'X-Episode-ID: trial-abc__agent' \
+  -d '{
+    "kind": "test_run",
+    "source": "local-runner",
+    "observation": {"outcome": "passed", "command": "go test ./..."},
+    "evidence_refs": ["stdout"]
+  }'
+```
+
+The accepted event kinds mirror the RSI event schema:
+`llm_call`, `tool_call`, `file_written`, `file_modified`, `test_run`,
+`test_failed`, `test_passed`, `verifier_result`, `no_progress`, and
+`run_exception`. The audit SQLite plugin stores these events in
+`episode_events`, and `GET /v1/episode-events?episode_id=...` returns them for
+replay or visualization. Posted progress events update the online episode state
+immediately, so the next router prompt can see file/test/verifier progress
+rather than only the last LLM finish reason.
+
 ## Project Structure
 
 ```

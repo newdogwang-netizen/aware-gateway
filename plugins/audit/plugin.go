@@ -110,6 +110,33 @@ func (p *Plugin) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, er
 	return p.store.QueryTraces(filter)
 }
 
+// QueryEpisodeEvents delegates to the SQLite store when configured.
+func (p *Plugin) QueryEpisodeEvents(filter plugin.EpisodeEventFilter) ([]plugin.EpisodeEvent, error) {
+	if p.store == nil {
+		return nil, fmt.Errorf("audit sqlite store not configured")
+	}
+	return p.store.QueryEpisodeEvents(filter)
+}
+
+func (p *Plugin) RecordEpisodeEvent(event *plugin.EpisodeEvent) error {
+	if !p.cfg.Enabled || event == nil {
+		return nil
+	}
+	if p.cfg.Store == "log" || p.cfg.Store == "both" {
+		data, err := json.Marshal(event)
+		if err != nil {
+			return fmt.Errorf("marshal episode event: %w", err)
+		}
+		p.logger.Info("audit: episode event recorded", "event", string(data))
+	}
+	if (p.cfg.Store == "sqlite" || p.cfg.Store == "both") && p.store != nil {
+		if err := p.store.RecordEpisodeEvent(*event); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (p *Plugin) Record(record *plugin.AuditRecord) error {
 	if !p.cfg.Enabled {
 		return nil
@@ -276,6 +303,29 @@ func Open(path string) (*Store, error) {
 	CREATE INDEX IF NOT EXISTS idx_audit_task ON audit(task_name);
 	CREATE INDEX IF NOT EXISTS idx_audit_session ON audit(session_id);
 	CREATE INDEX IF NOT EXISTS idx_audit_episode ON audit(episode_id);
+	CREATE TABLE IF NOT EXISTS episode_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		event_id TEXT UNIQUE,
+		episode_id TEXT,
+		episode_operation TEXT DEFAULT '',
+		timestamp TEXT,
+		timestamp_source TEXT DEFAULT '',
+		sequence INTEGER DEFAULT 0,
+		kind TEXT,
+		source TEXT,
+		observation TEXT DEFAULT '{}',
+		evidence_refs TEXT DEFAULT '[]',
+		certainty TEXT DEFAULT '',
+		extractor_version TEXT DEFAULT '',
+		session_id TEXT DEFAULT '',
+		trial_name TEXT DEFAULT '',
+		step_name TEXT DEFAULT '',
+		task_name TEXT DEFAULT ''
+	);
+	CREATE INDEX IF NOT EXISTS idx_episode_events_event ON episode_events(event_id);
+	CREATE INDEX IF NOT EXISTS idx_episode_events_episode ON episode_events(episode_id);
+	CREATE INDEX IF NOT EXISTS idx_episode_events_kind ON episode_events(kind);
+	CREATE INDEX IF NOT EXISTS idx_episode_events_time ON episode_events(timestamp);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
@@ -353,6 +403,57 @@ func (s *Store) Record(r Record) {
 	}
 }
 
+func (s *Store) RecordEpisodeEvent(event plugin.EpisodeEvent) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("audit store not available")
+	}
+	observation := event.Observation
+	if observation == nil {
+		observation = map[string]any{}
+	}
+	evidenceRefs := event.EvidenceRefs
+	if evidenceRefs == nil {
+		evidenceRefs = []string{}
+	}
+	observationJSON, err := json.Marshal(observation)
+	if err != nil {
+		return fmt.Errorf("marshal episode event observation: %w", err)
+	}
+	evidenceRefsJSON, err := json.Marshal(evidenceRefs)
+	if err != nil {
+		return fmt.Errorf("marshal episode event evidence refs: %w", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err = s.db.Exec(`INSERT OR REPLACE INTO episode_events
+		(event_id, episode_id, episode_operation, timestamp, timestamp_source, sequence,
+		 kind, source, observation, evidence_refs, certainty, extractor_version,
+		 session_id, trial_name, step_name, task_name)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		event.EventID,
+		event.EpisodeID,
+		event.EpisodeOp,
+		event.Timestamp.Format(time.RFC3339Nano),
+		event.TimestampSource,
+		event.Sequence,
+		event.Kind,
+		event.Source,
+		string(observationJSON),
+		string(evidenceRefsJSON),
+		event.Certainty,
+		event.ExtractorVersion,
+		event.SessionID,
+		event.TrialName,
+		event.StepName,
+		event.TaskName,
+	)
+	if err != nil {
+		return fmt.Errorf("insert episode event: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) Flush() {
 	s.mu.Lock()
 	if len(s.buf) == 0 {
@@ -423,6 +524,92 @@ func (s *Store) flushLoop() {
 func (s *Store) Close() error {
 	close(s.stopCh)
 	return s.db.Close()
+}
+
+func (s *Store) QueryEpisodeEvents(filter plugin.EpisodeEventFilter) ([]plugin.EpisodeEvent, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("audit store not available")
+	}
+
+	query := `SELECT event_id, episode_id, episode_operation, timestamp, timestamp_source, sequence,
+		kind, source, observation, evidence_refs, certainty, extractor_version,
+		session_id, trial_name, step_name, task_name
+		FROM episode_events WHERE 1=1`
+	args := []any{}
+
+	if filter.EpisodeID != "" {
+		query += " AND episode_id = ?"
+		args = append(args, filter.EpisodeID)
+	}
+	if filter.Kind != "" {
+		query += " AND kind = ?"
+		args = append(args, filter.Kind)
+	}
+	query += " ORDER BY timestamp ASC"
+	if filter.Limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
+	}
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query episode events: %w", err)
+	}
+	defer rows.Close()
+
+	events := make([]plugin.EpisodeEvent, 0)
+	for rows.Next() {
+		var event plugin.EpisodeEvent
+		var timestamp string
+		var observationJSON string
+		var evidenceRefsJSON string
+		if err := rows.Scan(
+			&event.EventID,
+			&event.EpisodeID,
+			&event.EpisodeOp,
+			&timestamp,
+			&event.TimestampSource,
+			&event.Sequence,
+			&event.Kind,
+			&event.Source,
+			&observationJSON,
+			&evidenceRefsJSON,
+			&event.Certainty,
+			&event.ExtractorVersion,
+			&event.SessionID,
+			&event.TrialName,
+			&event.StepName,
+			&event.TaskName,
+		); err != nil {
+			return nil, fmt.Errorf("scan episode event row: %w", err)
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, timestamp)
+		if err != nil {
+			return nil, fmt.Errorf("parse episode event timestamp: %w", err)
+		}
+		event.Timestamp = parsed
+		event.SchemaVersion = "event-schema-v1"
+		if observationJSON != "" {
+			if err := json.Unmarshal([]byte(observationJSON), &event.Observation); err != nil {
+				return nil, fmt.Errorf("decode episode event observation: %w", err)
+			}
+		}
+		if event.Observation == nil {
+			event.Observation = map[string]any{}
+		}
+		if evidenceRefsJSON != "" {
+			if err := json.Unmarshal([]byte(evidenceRefsJSON), &event.EvidenceRefs); err != nil {
+				return nil, fmt.Errorf("decode episode event evidence refs: %w", err)
+			}
+		}
+		if event.EvidenceRefs == nil {
+			event.EvidenceRefs = []string{}
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate episode events: %w", err)
+	}
+	return events, nil
 }
 
 // QueryTraces retrieves audit records matching the given filter.
