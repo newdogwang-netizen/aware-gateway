@@ -1055,7 +1055,8 @@ func TestEpisodeNoProgressEventFreezesLengthBudgetExpansion(t *testing.T) {
 	router.cfg.BudgetedRoute = BudgetedRouteConfig{
 		Enabled: true,
 		Profiles: map[string]RouteBudgetProfile{
-			budgetActionCheapExecute: {MaxTokens: 1000, TimeoutMs: 10000},
+			budgetActionCheapExecute:   {MaxTokens: 1000, TimeoutMs: 10000},
+			budgetActionPremiumRecover: {MaxTokens: 1000, TimeoutMs: 10000},
 		},
 	}
 	router.cfg.EpisodeRuntime = EpisodeConfig{
@@ -1105,13 +1106,19 @@ func TestEpisodeNoProgressEventFreezesLengthBudgetExpansion(t *testing.T) {
 	if decision == nil || decision.Skip {
 		t.Fatal("Route skipped; want safe-control decision")
 	}
+	if decision.Model != "anthropic/claude-opus-5" {
+		t.Fatalf("model = %q, want Opus recovery route", decision.Model)
+	}
+	if decision.BudgetAction != budgetActionPremiumRecover {
+		t.Fatalf("budget action = %q, want %s", decision.BudgetAction, budgetActionPremiumRecover)
+	}
 	if decision.MaxTokens != 1000 {
 		t.Fatalf("max tokens = %d, want frozen base budget", decision.MaxTokens)
 	}
 	if decision.TimeoutMs != 10000 {
 		t.Fatalf("timeout ms = %d, want frozen base timeout", decision.TimeoutMs)
 	}
-	for _, want := range []string{"episode_adjust=no_progress_freeze", "episode_no_progress=stale"} {
+	for _, want := range []string{"rule_id=episode_no_progress_recovery", "episode_adjust=no_progress_freeze", "episode_no_progress=stale"} {
 		if !strings.Contains(decision.Reason, want) {
 			t.Fatalf("reason = %q, want %q", decision.Reason, want)
 		}
@@ -1139,6 +1146,179 @@ func TestEpisodeNoProgressEventFreezesLengthBudgetExpansion(t *testing.T) {
 	}
 	if strings.Contains(decisionAfterProgress.Reason, "episode_adjust=no_progress_freeze") {
 		t.Fatalf("reason = %q, want progress event to clear active no-progress freeze", decisionAfterProgress.Reason)
+	}
+}
+
+func TestRecordEpisodeEventDedupesEventIDsBeforeProjection(t *testing.T) {
+	router := newTestSmartRouter("")
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true}
+	event := &plugin.EpisodeEvent{
+		EventID:   "event-dedupe-test-run",
+		EpisodeID: "episode-dedupe",
+		Timestamp: time.Now(),
+		Kind:      "test_run",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"outcome": "passed",
+			"command": "go test ./...",
+		},
+	}
+
+	if err := router.RecordEpisodeEvent(event); err != nil {
+		t.Fatalf("first RecordEpisodeEvent returned error: %v", err)
+	}
+	if err := router.RecordEpisodeEvent(event); err != nil {
+		t.Fatalf("second RecordEpisodeEvent returned error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-dedupe")
+	snapshot := router.episodeSnapshot(req)
+	if snapshot.Version != 1 {
+		t.Fatalf("state version = %d, want 1 after duplicate event id", snapshot.Version)
+	}
+	if snapshot.TestRunCount != 1 || snapshot.TestPassedCount != 1 {
+		t.Fatalf("test counts = run %d passed %d, want 1/1", snapshot.TestRunCount, snapshot.TestPassedCount)
+	}
+	if snapshot.CandidateProgressCount != 1 {
+		t.Fatalf("candidate progress = %d, want 1", snapshot.CandidateProgressCount)
+	}
+	if len(snapshot.RecentEvents) != 1 {
+		t.Fatalf("recent events = %d, want 1", len(snapshot.RecentEvents))
+	}
+}
+
+func TestEpisodeNoProgressStateRoutesPremiumRecoveryWithoutDecisionModel(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionPremiumRecover: {MaxTokens: 1000, TimeoutMs: 10000},
+		},
+	}
+	router.cfg.EpisodeRuntime = EpisodeConfig{
+		Enabled:               true,
+		RecentEvents:          5,
+		LengthStreakThreshold: 3,
+		LengthWindowThreshold: 2,
+		MaxTokensMultiplier:   2,
+		TimeoutMultiplier:     2,
+		MaxTokensCeiling:      3000,
+		TimeoutMsCeiling:      20000,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "episode-state-recovery")
+	for i := 0; i < 2; i++ {
+		if err := router.Record(&plugin.AuditRecord{
+			Timestamp:    time.Now(),
+			SessionID:    "episode-state-recovery",
+			Pool:         "openrouter",
+			RoutedModel:  "z-ai/glm-5.3-flash",
+			Status:       200,
+			FinishReason: "length",
+			BudgetAction: budgetActionCheapExecute,
+			TotalTokens:  1000,
+			Cost:         0.01,
+			LatencyMs:    60000,
+		}); err != nil {
+			t.Fatalf("Record %d returned error: %v", i+1, err)
+		}
+	}
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Run the existing go test ./... command and report the output."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local episode state recovery")
+	}
+	if decision == nil || decision.Skip {
+		t.Fatalf("Route skipped; want episode state recovery route")
+	}
+	if decision.Model != "anthropic/claude-opus-5" {
+		t.Fatalf("model = %q, want Opus", decision.Model)
+	}
+	if decision.BudgetAction != budgetActionPremiumRecover {
+		t.Fatalf("budget action = %q, want %s", decision.BudgetAction, budgetActionPremiumRecover)
+	}
+	for _, want := range []string{
+		"rule_id=episode_no_progress_recovery",
+		"no_progress=stale",
+		"state_version=2",
+		"recent_length=2",
+		"llm_since_progress=2",
+		"episode_adjust=length_boost",
+	} {
+		if !strings.Contains(decision.Reason, want) {
+			t.Fatalf("reason = %q, want %q", decision.Reason, want)
+		}
+	}
+}
+
+func TestEpisodeNoProgressRecoveryHonorsPremiumCooldown(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Session-ID", "episode-state-cooldown")
+	if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+		EventID:   "event-no-progress-cooldown",
+		EpisodeID: "episode-state-cooldown",
+		Timestamp: time.Now(),
+		Kind:      "no_progress",
+		Source:    "progress-reducer",
+		Observation: map[string]any{
+			"reason": "length_pressure_without_progress",
+		},
+	}); err != nil {
+		t.Fatalf("RecordEpisodeEvent returned error: %v", err)
+	}
+
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue with the next bounded step."}]}`)
+	for i := 0; i < 2; i++ {
+		decision, err := router.Route(req, body)
+		if err != nil {
+			t.Fatalf("recovery Route %d returned error: %v", i+1, err)
+		}
+		if decision == nil || decision.Model != "anthropic/claude-opus-5" {
+			t.Fatalf("recovery Route %d = %#v, want Opus recovery", i+1, decision)
+		}
+		if !strings.Contains(decision.Reason, "rule_id=episode_no_progress_recovery") {
+			t.Fatalf("recovery Route %d reason = %q, want episode recovery rule", i+1, decision.Reason)
+		}
+	}
+
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("cooldown Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local cooldown route")
+	}
+	if decision == nil || decision.Model != "z-ai/glm-5.3-flash" {
+		t.Fatalf("cooldown Route = %#v, want flash", decision)
+	}
+	if !strings.Contains(decision.Reason, "rule_id=premium_cooldown") {
+		t.Fatalf("cooldown reason = %q, want premium cooldown rule", decision.Reason)
+	}
+	if strings.Contains(decision.Reason, "rule_id=episode_no_progress_recovery") {
+		t.Fatalf("cooldown reason = %q, no-progress recovery should honor cooldown", decision.Reason)
 	}
 }
 

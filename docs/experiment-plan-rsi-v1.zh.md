@@ -44,6 +44,7 @@ replay screening 和重复 pilot acceptance 后，才允许进入 canary。
 - Budgeted Route Action
 - 最小 Episode 投影
 - `finish_reason=length` 动态预算反馈
+- `stale/blocked` no-progress 状态触发本地 recovery 路由
 
 A5 说明了新的主要矛盾：
 
@@ -736,6 +737,7 @@ Online Event Store                done for audit SQLite episode_events table
 Online Progress Projection        done for posted file/test/verifier/no_progress events
 Online Command Runner Adapter     done for wrapped command/test/file-write events
 Harbor Artifact Watcher           done for trajectory/patch/ctrf/result sidecar
+Stateful No-progress Recovery     done for stale/blocked -> local premium_recover
 ```
 
 RSI R1 完整结束后，aware-gateway 应达到：
@@ -748,6 +750,7 @@ Minimal Episode Runtime           done
 Session Episode Stack             done for deterministic continue/interrupt/resume/global/unknown
 Outcome Event Projection          done for offline replay, online when events are posted
 Outcome-aware Replay              done
+Event-driven State Controller     partial for no-progress recovery
 Outcome-aware Screening Pilot     not started for P2
 Outcome-aware Acceptance          at least 3 runs per accepted task class
 Budget Policy Effectiveness       accepted or explicitly rejected

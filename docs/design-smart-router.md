@@ -321,6 +321,11 @@ increased by a multiplier and capped by `max_tokens_ceiling`/
 count. If an explicit `no_progress` event is present, the budget layer does not
 keep expanding because of length pressure; it records
 `episode_adjust=no_progress_freeze` so the router can change strategy instead.
+The local safe-control layer now consumes the same projected state: when the
+episode reaches `no_progress=stale` or `no_progress=blocked`, it bypasses the
+semantic judge and routes the next ambiguous or otherwise cheap-looking turn to
+`premium_recover` with evidence such as state version, length pressure,
+LLM calls since progress, and last progress kind in the routing reason.
 
 Online runners can post the same event shape used by RSI replay:
 
@@ -377,8 +382,9 @@ lines with a semantic resolver or automatically capture every shell/tool call.
 Live tool/file/test/verifier events must still be posted by a runner, command
 wrapper, or artifact watcher. A true Harbor-native hook that emits before files
 land on disk is still separate integration work. It also does not perform
-offline policy updates. It is the smallest online state chain needed to
-make route decisions auditable against the state they actually saw.
+offline policy updates or acceptance-gated policy evolution. It is now a
+partial online state controller: state can affect routing for no-progress
+recovery, and every such decision remains auditable against the state it saw.
 
 A5 showed the boundary of this first loop: the episode feedback fired in a real
 Harbor run, but the trial was stopped before verification after cost and call

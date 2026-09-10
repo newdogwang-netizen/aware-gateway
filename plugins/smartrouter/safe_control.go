@@ -92,6 +92,29 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 		)
 	}
 
+	if obs.State.CooldownRemaining > 0 && !looksLikePremiumRequired(message) {
+		return s.safeControlCheapRoute(
+			req,
+			obs.State,
+			cfg,
+			"premium_cooldown",
+			"cheap_probe",
+			0.88,
+			[]string{
+				fmt.Sprintf("cooldown_remaining=%d", obs.State.CooldownRemaining),
+				fmt.Sprintf("consecutive_premium=%d", obs.State.ConsecutivePremium),
+			},
+			"cooldown",
+			"stable",
+			"cooldown after consecutive premium calls",
+			"premium cooldown; gather cheap evidence",
+		)
+	}
+
+	if decision, history, ok := s.episodeStateControlDecision(req); ok {
+		return decision, history, true
+	}
+
 	if looksLikeFileReadOrSearch(message) {
 		return s.safeControlCheapRoute(
 			req,
@@ -140,26 +163,57 @@ func (s *SmartRouter) safeControlDecision(req *http.Request, parsed *parsedReque
 		)
 	}
 
-	if obs.State.CooldownRemaining > 0 && !looksLikePremiumRequired(message) {
-		return s.safeControlCheapRoute(
-			req,
-			obs.State,
-			cfg,
-			"premium_cooldown",
-			"cheap_probe",
-			0.88,
-			[]string{
-				fmt.Sprintf("cooldown_remaining=%d", obs.State.CooldownRemaining),
-				fmt.Sprintf("consecutive_premium=%d", obs.State.ConsecutivePremium),
-			},
-			"cooldown",
-			"stable",
-			"cooldown after consecutive premium calls",
-			"premium cooldown; gather cheap evidence",
-		)
+	return nil, nil, false
+}
+
+func (s *SmartRouter) episodeStateControlDecision(req *http.Request) (*plugin.RoutingDecision, *DecisionResponse, bool) {
+	cfg := s.episodeConfig()
+	if !cfg.Enabled {
+		return nil, nil, false
+	}
+	snapshot := s.episodeSnapshot(req)
+	if snapshot.ID == "" {
+		return nil, nil, false
+	}
+	severity := valueOrDefault(snapshot.NoProgressSeverity, "none")
+	if severity != "stale" && severity != "blocked" {
+		return nil, nil, false
 	}
 
-	return nil, nil, false
+	evidence := []string{
+		fmt.Sprintf("episode_id=%s", snapshot.ID),
+		fmt.Sprintf("state_version=%d", snapshot.Version),
+		fmt.Sprintf("no_progress=%s", severity),
+		fmt.Sprintf("llm_since_progress=%d", snapshot.LLMCallsSinceProgress),
+		fmt.Sprintf("events_since_progress=%d", snapshot.EventsSinceProgress),
+		fmt.Sprintf("length_since_progress=%d", snapshot.LengthPressureSinceProgress),
+		fmt.Sprintf("recent_length=%d", snapshot.RecentLengthFinishes),
+		fmt.Sprintf("error_streak=%d", snapshot.ConsecutiveErrors),
+		"last_progress=" + valueOrUnknown(snapshot.LastProgressKind),
+	}
+	ruleID := "episode_no_progress_recovery"
+	summary := "episode state shows repeated pressure without progress"
+	reason := "episode no-progress state requires recovery strategy"
+	confidence := 0.91
+	if severity == "blocked" {
+		ruleID = "episode_blocked_recovery"
+		summary = "episode state is blocked after many calls without progress"
+		reason = "episode blocked; recover before spending more cheap turns"
+		confidence = 0.96
+	}
+
+	return s.safeControlRoute(
+		req,
+		ruleID,
+		budgetActionPremiumRecover,
+		true,
+		confidence,
+		evidence,
+		"recovery",
+		"contradicted",
+		summary,
+		reason,
+	)
 }
 
 func (s *SmartRouter) safeControlConfig() SafeControlConfig {

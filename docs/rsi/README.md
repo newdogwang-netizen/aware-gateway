@@ -68,7 +68,9 @@ Missing `schema_version`, `event_id`, `timestamp`, `certainty`, and
 writes these events to `episode_events`, queryable with
 `GET /v1/episode-events?episode_id=...`. The smart-router also projects posted
 events into its online episode state, so later decisions can distinguish
-activity from progress before a full offline extraction pass.
+activity from progress before a full offline extraction pass. Explicit event
+projection is idempotent by `event_id`; repeated sidecar retries do not advance
+the in-memory state twice.
 
 For local runners, `scripts/run_episode_command.py` wraps a command and posts
 the detected events automatically:
@@ -110,6 +112,11 @@ AWARE_V4_EPISODE_WATCHER=1 scripts/run_v4_matrix.sh pilot
 The reducer keeps two no-progress views. `no_progress_event_count` is historical
 background. `no_progress_window.severity` is the current state used by P2 replay:
 `none`, `watch`, `stale`, or `blocked`.
+
+Online smart-router state uses the same distinction. `watch` is prompt context
+only. `stale` and `blocked` are strong enough for the local safe-control layer
+to skip the semantic judge and select `premium_recover`; the routing reason
+records the episode state version and pressure evidence that triggered it.
 
 ## Replay
 

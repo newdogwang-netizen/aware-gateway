@@ -86,6 +86,7 @@ type EpisodeState struct {
 	RecentLengthFinishes        int
 	ConsecutiveErrors           int
 	RecentEvents                []EpisodeEvent
+	SeenEventIDs                map[string]struct{}
 }
 
 type EpisodeSession struct {
@@ -492,6 +493,16 @@ func (s *SmartRouter) RecordEpisodeEvent(event *plugin.EpisodeEvent) error {
 	if state == nil {
 		state = &EpisodeState{ID: key}
 		s.episodes[key] = state
+	}
+	if projected.ID != "" {
+		if state.SeenEventIDs == nil {
+			state.SeenEventIDs = make(map[string]struct{})
+		}
+		if _, exists := state.SeenEventIDs[projected.ID]; exists {
+			s.episodeMu.Unlock()
+			return nil
+		}
+		state.SeenEventIDs[projected.ID] = struct{}{}
 	}
 	projectEpisodeEvent(state, projected, cfg)
 	s.episodeMu.Unlock()
