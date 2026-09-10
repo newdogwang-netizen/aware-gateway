@@ -450,44 +450,68 @@ func episodeEventIngestHandler(reg *plugin.Registry, logger *slog.Logger) http.H
 			return
 		}
 
-		var event plugin.EpisodeEvent
-		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]string{"error": "invalid episode event json"})
-			return
-		}
-		event = normalizeEpisodeEventFromRequest(event, r)
-		if err := validateEpisodeEvent(event); err != nil {
+		events, err := decodeEpisodeEvents(r)
+		if err != nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
-
-		for _, sink := range sinks {
-			if err := sink.RecordEpisodeEvent(&event); err != nil {
-				logger.Warn("episode event sink error",
-					"plugin", sink.Name(),
-					"event_id", event.EventID,
-					"episode_id", event.EpisodeID,
-					"error", err,
-				)
+		for i := range events {
+			events[i] = normalizeEpisodeEventFromRequest(events[i], r)
+			if err := validateEpisodeEvent(events[i]); err != nil {
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusInternalServerError)
-				json.NewEncoder(w).Encode(map[string]string{"error": "episode event sink failed"})
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": err.Error(),
+					"index": i,
+				})
 				return
 			}
 		}
 
+		for i := range events {
+			event := &events[i]
+			for _, sink := range sinks {
+				if err := sink.RecordEpisodeEvent(event); err != nil {
+					logger.Warn("episode event sink error",
+						"plugin", sink.Name(),
+						"event_id", event.EventID,
+						"episode_id", event.EpisodeID,
+						"error", err,
+					)
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusInternalServerError)
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"error":    "episode event sink failed",
+						"event_id": event.EventID,
+						"index":    i,
+					})
+					return
+				}
+			}
+		}
+
+		eventIDs := make([]string, 0, len(events))
+		episodeIDs := make([]string, 0, len(events))
+		for _, event := range events {
+			eventIDs = append(eventIDs, event.EventID)
+			episodeIDs = append(episodeIDs, event.EpisodeID)
+		}
+		response := map[string]interface{}{
+			"status":      "accepted",
+			"count":       len(events),
+			"event_ids":   eventIDs,
+			"episode_ids": episodeIDs,
+			"sinks":       len(sinks),
+		}
+		if len(events) == 1 {
+			response["event_id"] = events[0].EventID
+			response["episode_id"] = events[0].EpisodeID
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":     "accepted",
-			"event_id":   event.EventID,
-			"episode_id": event.EpisodeID,
-			"sinks":      len(sinks),
-		})
+		json.NewEncoder(w).Encode(response)
 	}
 }
 
@@ -655,6 +679,62 @@ func runAuthenticators(reg *plugin.Registry, w http.ResponseWriter, r *http.Requ
 		}
 	}
 	return true
+}
+
+func decodeEpisodeEvents(r *http.Request) ([]plugin.EpisodeEvent, error) {
+	var raw json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+		return nil, fmt.Errorf("invalid episode event json")
+	}
+	first := byte(0)
+	for _, b := range raw {
+		switch b {
+		case ' ', '\n', '\r', '\t':
+			continue
+		default:
+			first = b
+		}
+		break
+	}
+	if first == 0 {
+		return nil, fmt.Errorf("episode event body is required")
+	}
+	if first == '[' {
+		var events []plugin.EpisodeEvent
+		if err := json.Unmarshal(raw, &events); err != nil {
+			return nil, fmt.Errorf("invalid episode event json")
+		}
+		if len(events) == 0 {
+			return nil, fmt.Errorf("events must not be empty")
+		}
+		return events, nil
+	}
+	if first != '{' {
+		return nil, fmt.Errorf("invalid episode event json")
+	}
+
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return nil, fmt.Errorf("invalid episode event json")
+	}
+	if _, ok := object["events"]; ok {
+		var envelope struct {
+			Events []plugin.EpisodeEvent `json:"events"`
+		}
+		if err := json.Unmarshal(raw, &envelope); err != nil {
+			return nil, fmt.Errorf("invalid episode event json")
+		}
+		if len(envelope.Events) == 0 {
+			return nil, fmt.Errorf("events must not be empty")
+		}
+		return envelope.Events, nil
+	}
+
+	var event plugin.EpisodeEvent
+	if err := json.Unmarshal(raw, &event); err != nil {
+		return nil, fmt.Errorf("invalid episode event json")
+	}
+	return []plugin.EpisodeEvent{event}, nil
 }
 
 func normalizeEpisodeEventFromRequest(event plugin.EpisodeEvent, r *http.Request) plugin.EpisodeEvent {

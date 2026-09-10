@@ -397,6 +397,11 @@ X-Episode-ID: trial-abc__agent
 }
 ```
 
+The same endpoint also accepts a raw JSON array or an envelope of
+`{"events": [...]}` for batch sidecars. Each event is normalized and validated
+independently before any sink is called; validation errors include the failing
+batch index so a runner can retry with precise diagnostics.
+
 The gateway fills missing `schema_version`, `event_id`, `timestamp`,
 `certainty`, and `extractor_version` defaults. The audit SQLite plugin stores
 these rows in `episode_events`; `GET /v1/episode-events?episode_id=...` returns

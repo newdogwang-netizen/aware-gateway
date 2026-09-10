@@ -70,6 +70,10 @@ curl -s http://localhost:12026/v1/episode-events \
   }'
 ```
 
+Batch emitters can post either a raw event array or `{"events": [...]}` to the
+same endpoint. The gateway validates the full batch before recording it; a bad
+event returns a 400 response with the failing `index`.
+
 Missing `schema_version`, `event_id`, `timestamp`, `certainty`, and
 `extractor_version` fields are filled by the gateway. The audit SQLite store
 writes these events to `episode_events`, queryable with

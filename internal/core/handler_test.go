@@ -519,18 +519,7 @@ func TestStripInternalRequestFieldsKeepsOtherExtraBodyFields(t *testing.T) {
 }
 
 func TestEpisodeEventEndpointIngestsAndQueriesEvents(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	cfg := &config.Config{}
-	store := &capturingEpisodeEventStore{}
-	reg := plugin.NewRegistry(logger)
-	if err := reg.Register(store); err != nil {
-		t.Fatalf("register event store: %v", err)
-	}
-	if err := reg.Init(&plugin.Context{Config: cfg, Logger: logger}); err != nil {
-		t.Fatalf("init registry: %v", err)
-	}
-
-	router := BuildRouter(cfg, MapPoolProvider{}, reg, logger)
+	router, store := newEpisodeEventEndpointTestRouter(t)
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/episode-events",
@@ -598,6 +587,155 @@ func TestEpisodeEventEndpointIngestsAndQueriesEvents(t *testing.T) {
 	}
 	if payload.Count != 1 || payload.Events[0].SessionID != "trial-api__agent" {
 		t.Fatalf("session query payload = %#v, want one matching event", payload)
+	}
+}
+
+func TestEpisodeEventEndpointIngestsBatchEvents(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "envelope",
+			body: `{
+				"events": [
+					{
+						"event_id": "event-batch-file",
+						"episode_id": "episode-batch-branch",
+						"kind": "file_written",
+						"source": "unit-test",
+						"observation": {"path_count": 1, "workspace_target": true}
+					},
+					{
+						"event_id": "event-batch-test",
+						"kind": "test_run",
+						"source": "unit-test",
+						"observation": {"outcome": "passed", "command": "go test ./..."}
+					}
+				]
+			}`,
+		},
+		{
+			name: "array",
+			body: `[
+				{
+					"event_id": "event-batch-array-file",
+					"episode_id": "episode-batch-branch",
+					"kind": "file_written",
+					"source": "unit-test",
+					"observation": {"path_count": 1, "workspace_target": true}
+				},
+				{
+					"event_id": "event-batch-array-test",
+					"kind": "test_run",
+					"source": "unit-test",
+					"observation": {"outcome": "passed", "command": "go test ./..."}
+				}
+			]`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			router, store := newEpisodeEventEndpointTestRouter(t)
+			req := httptest.NewRequest(http.MethodPost, "/v1/episode-events", bytes.NewBufferString(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Episode-ID", "episode-batch-main")
+			req.Header.Set("X-Session-ID", "trial-batch__agent")
+			req.Header.Set("X-Trial-Name", "trial-batch")
+			rec := httptest.NewRecorder()
+
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			var payload struct {
+				Status     string   `json:"status"`
+				Count      int      `json:"count"`
+				EventIDs   []string `json:"event_ids"`
+				EpisodeIDs []string `json:"episode_ids"`
+				Sinks      int      `json:"sinks"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("decode batch response: %v", err)
+			}
+			if payload.Status != "accepted" || payload.Count != 2 || len(payload.EventIDs) != 2 || payload.Sinks != 1 {
+				t.Fatalf("batch response = %#v, want two accepted events", payload)
+			}
+			if len(store.events) != 2 {
+				t.Fatalf("stored events = %d, want 2", len(store.events))
+			}
+			if store.events[0].EpisodeID != "episode-batch-branch" {
+				t.Fatalf("first episode id = %q, want explicit branch", store.events[0].EpisodeID)
+			}
+			if store.events[1].EpisodeID != "episode-batch-main" {
+				t.Fatalf("second episode id = %q, want header fallback", store.events[1].EpisodeID)
+			}
+			for i, event := range store.events {
+				if event.SessionID != "trial-batch__agent" {
+					t.Fatalf("event %d session = %q, want header session", i, event.SessionID)
+				}
+				if event.TrialName != "trial-batch" {
+					t.Fatalf("event %d trial = %q, want header trial", i, event.TrialName)
+				}
+				if event.Timestamp.IsZero() {
+					t.Fatalf("event %d timestamp was not generated", i)
+				}
+			}
+
+			queryReq := httptest.NewRequest(http.MethodGet, "/v1/episode-events?session_id=trial-batch__agent", nil)
+			queryRec := httptest.NewRecorder()
+			router.ServeHTTP(queryRec, queryReq)
+			if queryRec.Code != http.StatusOK {
+				t.Fatalf("query status = %d, body = %s", queryRec.Code, queryRec.Body.String())
+			}
+			var queryPayload struct {
+				Count  int                   `json:"count"`
+				Events []plugin.EpisodeEvent `json:"events"`
+			}
+			if err := json.Unmarshal(queryRec.Body.Bytes(), &queryPayload); err != nil {
+				t.Fatalf("decode query response: %v", err)
+			}
+			if queryPayload.Count != 2 || len(queryPayload.Events) != 2 {
+				t.Fatalf("query payload = %#v, want two session events", queryPayload)
+			}
+		})
+	}
+}
+
+func TestEpisodeEventEndpointRejectsInvalidBatchWithoutPartialWrite(t *testing.T) {
+	router, store := newEpisodeEventEndpointTestRouter(t)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/episode-events",
+		bytes.NewBufferString(`{
+			"events": [
+				{"event_id": "event-valid", "kind": "tool_call", "source": "unit-test"},
+				{"event_id": "event-invalid", "source": "unit-test"}
+			]
+		}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Episode-ID", "episode-batch-invalid")
+	req.Header.Set("X-Session-ID", "trial-invalid__agent")
+	rec := httptest.NewRecorder()
+
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Error string `json:"error"`
+		Index int    `json:"index"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if payload.Error != "kind is required" || payload.Index != 1 {
+		t.Fatalf("error payload = %#v, want bad second event", payload)
+	}
+	if len(store.events) != 0 {
+		t.Fatalf("stored events = %d, want no partial validation writes", len(store.events))
 	}
 }
 
@@ -936,6 +1074,21 @@ func (s *capturingAuditSink) Record(record *plugin.AuditRecord) error {
 
 type capturingEpisodeEventStore struct {
 	events []plugin.EpisodeEvent
+}
+
+func newEpisodeEventEndpointTestRouter(t *testing.T) (http.Handler, *capturingEpisodeEventStore) {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := &config.Config{}
+	store := &capturingEpisodeEventStore{}
+	reg := plugin.NewRegistry(logger)
+	if err := reg.Register(store); err != nil {
+		t.Fatalf("register event store: %v", err)
+	}
+	if err := reg.Init(&plugin.Context{Config: cfg, Logger: logger}); err != nil {
+		t.Fatalf("init registry: %v", err)
+	}
+	return BuildRouter(cfg, MapPoolProvider{}, reg, logger), store
 }
 
 func (s *capturingEpisodeEventStore) Name() string { return "capturing-episode-events" }

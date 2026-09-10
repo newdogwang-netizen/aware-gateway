@@ -513,10 +513,10 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     task = "phase2-safe-control-probe"
     checks: list[dict[str, Any]] = []
 
+    length_events: list[dict[str, Any]] = []
     for index in range(1, 3):
         event_id = f"{episode}__length-{index}"
-        post_json(
-            f"http://127.0.0.1:{port}/v1/episode-events",
+        length_events.append(
             {
                 "event_id": event_id,
                 "episode_id": episode,
@@ -540,16 +540,26 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
                 "trial_name": trial,
                 "step_name": f"episode-runtime-injected-length-{index}",
                 "task_name": task,
-            },
-            headers={
-                "X-Trial-Name": trial,
-                "X-Session-ID": session,
-                "X-Episode-ID": episode,
-                "X-Episode-Operation": "continue",
-                "X-Step-Name": f"episode-runtime-injected-length-{index}",
-                "X-Task-Name": task,
-            },
+            }
         )
+    batch_response = post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {"events": length_events},
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": session,
+            "X-Episode-ID": episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-runtime-injected-length-batch",
+            "X-Task-Name": task,
+        },
+    )
+    checks.extend(
+        [
+            check_equal("batch-event-ingest-count", batch_response.get("count"), 2),
+            check_equal("batch-event-ingest-sinks", batch_response.get("sinks"), 2),
+        ]
+    )
 
     state_before = fetch_episode_state(port, episode)
     state_payload = state_before.get("state") or {}

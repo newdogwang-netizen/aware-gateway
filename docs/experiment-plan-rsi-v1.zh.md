@@ -736,8 +736,9 @@ Online Episode Resolver           done for header/body operation plus minimal in
 Online Episode Session Query      done for GET /v1/episode-sessions and trace/event backfill
 Online State Version Audit        done for state-before/state-after trace fields
 Trace Query by Episode            done for /v1/traces?episode_id=...
-Online Episode Event API          done for POST/GET /v1/episode-events
+Online Episode Event API          done for single/batch POST and GET /v1/episode-events
 Online Event Store                done for audit SQLite episode_events table
+Batch Sidecar Event Ingest        done for atomic validation before sink fan-out
 Online Progress Projection        done for posted file/test/verifier/no_progress events
 Online Command Runner Adapter     done for wrapped command/test/file-write events
 Harbor Artifact Watcher           done for trajectory/patch/ctrf/result sidecar
