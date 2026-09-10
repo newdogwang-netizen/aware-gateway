@@ -17,6 +17,8 @@ const (
 	budgetActionCompletionGuardrail = "completion_guardrail"
 	budgetActionFreezeOrReplan      = "freeze_or_replan"
 	budgetActionStopTrial           = "stop_trial"
+
+	freezeOrReplanAgentInstruction = "Bounded replan turn. Stop broad exploration. State the current hypothesis, the smallest decisive check or implementation pivot, and the abandon condition before further execution. Keep any command narrow and tied to that check."
 )
 
 // BudgetedRouteConfig lets a routing decision carry execution budget, not only
@@ -37,6 +39,9 @@ func (s *SmartRouter) applyRouteBudget(req *http.Request, decision *plugin.Routi
 	}
 	if action != "" {
 		decision.BudgetAction = action
+		if instruction := agentInstructionForBudgetAction(action); instruction != "" {
+			decision.AgentInstruction = instruction
+		}
 	}
 	cfg := s.budgetedRouteConfig()
 	if !cfg.Enabled || action == "" {
@@ -64,6 +69,17 @@ func (s *SmartRouter) applyRouteBudget(req *http.Request, decision *plugin.Routi
 	if adjustment != "" {
 		decision.Reason += " " + adjustment
 	}
+}
+
+func agentInstructionForBudgetAction(action string) string {
+	normalized, ok := normalizeBudgetAction(action)
+	if !ok {
+		return ""
+	}
+	if normalized == budgetActionFreezeOrReplan {
+		return freezeOrReplanAgentInstruction
+	}
+	return ""
 }
 
 func (s *SmartRouter) budgetedRouteConfig() BudgetedRouteConfig {
@@ -181,6 +197,15 @@ func (s *SmartRouter) adjustBudgetForEpisode(req *http.Request, action string, p
 	snapshot := s.episodeSnapshot(req)
 	if snapshot.ID == "" {
 		return profile, ""
+	}
+
+	if action == budgetActionFreezeOrReplan {
+		return profile, fmt.Sprintf(
+			"episode_adjust=replan_freeze episode_calls=%d episode_length_streak=%d episode_recent_length=%d",
+			snapshot.CallCount,
+			snapshot.ConsecutiveLengthFinishes,
+			snapshot.RecentLengthFinishes,
+		)
 	}
 
 	severity := valueOrDefault(snapshot.NoProgressSeverity, "none")

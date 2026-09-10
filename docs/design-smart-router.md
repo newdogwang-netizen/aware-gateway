@@ -288,6 +288,8 @@ only a model label. A `RoutingDecision` can now carry:
 - `budget_action`, such as `cheap_probe`, `cheap_execute`, `premium_reason`,
   `premium_recover`, `freeze_or_replan`, `completion_guardrail`, or the
   local-only `stop_trial`
+- `agent_instruction`, an optional high-priority chat instruction for actions
+  that need to shape the next agent turn, currently used by `freeze_or_replan`
 - `max_tokens`, which rewrites the upstream chat request
 - `timeout_ms`, which can shorten the endpoint timeout for that routed call
 
@@ -505,8 +507,10 @@ has many exploration events or LLM calls without implementation, validation,
 delivery, or strong progress, the local controller emits
 `episode_long_exploration_replan` and routes one bounded Opus call with
 `budget_action=freeze_or_replan`. This is not a larger execution budget; it is
-a forced pause for a concrete pivot or abandon criterion. If the following
-calls still produce no effective progress, `episode_replan_no_progress_stop_gate`
+a forced pause for a concrete pivot or abandon criterion. The gateway injects a
+short route instruction into the upstream chat messages so the agent sees that
+constraint, not only the trace system. If the following calls still produce no
+effective progress, `episode_replan_no_progress_stop_gate`
 rejects the next call locally with
 `error_kind=gateway_replan_no_progress_stop_gate`.
 

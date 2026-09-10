@@ -57,6 +57,7 @@ type RoutingDecision struct {
 	Endpoint            string // specific endpoint (empty = use pool load balancer)
 	Reason              string // human-readable explanation for observability
 	BudgetAction        string // optional route action profile, e.g. cheap_probe
+	AgentInstruction    string // optional high-priority instruction injected into chat messages
 	MaxTokens           int    // optional request max_tokens override
 	TimeoutMs           int    // optional per-attempt upstream timeout override
 	EpisodeID           string // task episode used for stateful routing

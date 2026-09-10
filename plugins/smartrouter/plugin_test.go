@@ -1853,6 +1853,93 @@ func TestEpisodeLengthFinishBoostsNextBudget(t *testing.T) {
 	}
 }
 
+func TestFreezeOrReplanDoesNotReceiveLengthBoost(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.SafeControl.StopCostUSD = 100
+	router.cfg.SafeControl.StopAgentCallThreshold = 100
+	router.cfg.SafeControl.StopLengthPressureThreshold = 100
+	router.cfg.SafeControl.LongExplorationThreshold = 1
+	router.cfg.SafeControl.LongExplorationCallThreshold = 100
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionFreezeOrReplan: {MaxTokens: 2048, TimeoutMs: 60000},
+		},
+	}
+	router.cfg.EpisodeRuntime = EpisodeConfig{
+		Enabled:               true,
+		LengthStreakThreshold: 1,
+		MaxTokensMultiplier:   3,
+		TimeoutMultiplier:     2,
+		MaxTokensCeiling:      8192,
+		TimeoutMsCeiling:      240000,
+	}
+
+	if err := router.Record(&plugin.AuditRecord{
+		TraceID:      "trace-length-before-replan",
+		Timestamp:    time.Now(),
+		SessionID:    "episode-replan-freeze-budget",
+		EpisodeID:    "episode-replan-freeze-budget",
+		Pool:         "openrouter",
+		RoutedModel:  "z-ai/glm-5.3-flash",
+		Status:       200,
+		FinishReason: "length",
+		BudgetAction: budgetActionCheapProbe,
+		TotalTokens:  4096,
+		Cost:         0.01,
+		LatencyMs:    60000,
+	}); err != nil {
+		t.Fatalf("Record returned error: %v", err)
+	}
+	if err := router.RecordEpisodeEvent(&plugin.EpisodeEvent{
+		EventID:   "event-exploration-before-replan-freeze",
+		EpisodeID: "episode-replan-freeze-budget",
+		Timestamp: time.Now(),
+		Kind:      "tool_call",
+		Source:    "unit-test",
+		Observation: map[string]any{
+			"command": "sed -n '1,20p' /app/data/input.txt",
+		},
+	}); err != nil {
+		t.Fatalf("RecordEpisodeEvent returned error: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-replan-freeze-budget")
+	req.Header.Set("X-Session-ID", "episode-replan-freeze-budget")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue the investigation."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local long-exploration replan")
+	}
+	if decision == nil || decision.Skip || decision.Abort {
+		t.Fatalf("decision = %#v, want routed replan", decision)
+	}
+	if decision.BudgetAction != budgetActionFreezeOrReplan {
+		t.Fatalf("budget action = %q, want %s", decision.BudgetAction, budgetActionFreezeOrReplan)
+	}
+	if decision.MaxTokens != 2048 || decision.TimeoutMs != 60000 {
+		t.Fatalf("budget = tokens %d timeout %d, want unboosted 2048/60000", decision.MaxTokens, decision.TimeoutMs)
+	}
+	if strings.Contains(decision.Reason, "episode_adjust=length_boost") {
+		t.Fatalf("reason = %q, want no length boost for freeze_or_replan", decision.Reason)
+	}
+	if !strings.Contains(decision.Reason, "episode_adjust=replan_freeze") {
+		t.Fatalf("reason = %q, want replan freeze adjustment", decision.Reason)
+	}
+}
+
 func TestEpisodeProgressEventResetsLengthPressureBeforeNextBudget(t *testing.T) {
 	var prompt string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -3024,6 +3111,9 @@ func TestEpisodeLongExplorationRoutesBoundedReplan(t *testing.T) {
 	}
 	if decision.BudgetAction != budgetActionFreezeOrReplan {
 		t.Fatalf("budget action = %q, want %s", decision.BudgetAction, budgetActionFreezeOrReplan)
+	}
+	if !strings.Contains(decision.AgentInstruction, "Bounded replan turn") {
+		t.Fatalf("agent instruction = %q, want bounded replan instruction", decision.AgentInstruction)
 	}
 	if decision.MaxTokens != 777 || decision.TimeoutMs != 888 {
 		t.Fatalf("budget = tokens %d timeout %d, want 777/888", decision.MaxTokens, decision.TimeoutMs)

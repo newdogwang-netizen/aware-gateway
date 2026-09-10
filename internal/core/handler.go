@@ -183,6 +183,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	routedEndpoint := ""
 	routingReason := ""
 	routeBudgetAction := ""
+	routeAgentInstruction := ""
 	routeMaxTokens := 0
 	routeTimeoutMs := 0
 	routeEpisodeID := ""
@@ -211,6 +212,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				routedEndpoint = decision.Endpoint
 				routingReason = decision.Reason
 				routeBudgetAction = decision.BudgetAction
+				routeAgentInstruction = decision.AgentInstruction
 				routeMaxTokens = decision.MaxTokens
 				routeTimeoutMs = decision.TimeoutMs
 				routeEpisodeID = decision.EpisodeID
@@ -289,6 +291,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if routeMaxTokens > 0 {
 		bodyBytes = applyMaxTokensOverride(bodyBytes, r.Header.Get("Content-Type"), routeMaxTokens)
+		r = routing.SetBodyBytes(r, bodyBytes)
+	}
+	if routeAgentInstruction != "" {
+		bodyBytes = injectAgentInstruction(bodyBytes, r.Header.Get("Content-Type"), routeAgentInstruction)
 		r = routing.SetBodyBytes(r, bodyBytes)
 	}
 
@@ -984,6 +990,73 @@ func applyMaxTokensOverride(body []byte, contentType string, maxTokens int) []by
 		return body
 	}
 	return out
+}
+
+const routeInstructionPrefix = "aware-gateway route instruction:"
+
+func injectAgentInstruction(body []byte, contentType, instruction string) []byte {
+	instruction = strings.TrimSpace(instruction)
+	if !strings.HasPrefix(contentType, "application/json") || len(body) == 0 || instruction == "" {
+		return body
+	}
+	if !strings.HasPrefix(instruction, routeInstructionPrefix) {
+		instruction = routeInstructionPrefix + " " + instruction
+	}
+
+	var req map[string]any
+	if json.Unmarshal(body, &req) != nil {
+		return body
+	}
+	messages, ok := req["messages"].([]any)
+	if !ok {
+		return body
+	}
+	if messagesContainInstruction(messages, instruction) {
+		return body
+	}
+
+	insertAt := 0
+	for insertAt < len(messages) {
+		message, ok := messages[insertAt].(map[string]any)
+		if !ok {
+			break
+		}
+		role, _ := message["role"].(string)
+		if role != "system" && role != "developer" {
+			break
+		}
+		insertAt++
+	}
+
+	instructionMessage := map[string]any{
+		"role":    "system",
+		"content": instruction,
+	}
+	rewritten := make([]any, 0, len(messages)+1)
+	rewritten = append(rewritten, messages[:insertAt]...)
+	rewritten = append(rewritten, instructionMessage)
+	rewritten = append(rewritten, messages[insertAt:]...)
+	req["messages"] = rewritten
+
+	out, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+func messagesContainInstruction(messages []any, instruction string) bool {
+	for _, raw := range messages {
+		message, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := message["content"].(string)
+		if ok && strings.Contains(content, instruction) {
+			return true
+		}
+	}
+	return false
 }
 
 func rewriteModel(body []byte, newModel string) []byte {

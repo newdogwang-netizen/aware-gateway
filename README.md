@@ -384,7 +384,8 @@ are audited with `route_budget_action=stop_trial` and a specific `error_kind`.
 Requests outside those rules continue through the prompt-based smart-router.
 With `budgeted_route.enabled`, the router also attaches a route action profile
 to each decision. The gateway rewrites `max_tokens`, shortens the upstream
-timeout when configured, and records the budget action in audit traces.
+timeout when configured, injects a short route instruction for bounded replan
+turns, and records the budget action in audit traces.
 With `episode_runtime.enabled`, the router now resolves a minimal online task
 line before routing. An explicit `X-Episode-ID` wins. Otherwise the resolver
 uses `X-Session-ID`/`X-Trial-Name` as the main episode and recognizes a small

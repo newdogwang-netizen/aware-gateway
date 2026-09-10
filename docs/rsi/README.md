@@ -159,7 +159,9 @@ implementation/validation/delivery/strong progress, agent-call overflow without
 effective progress, long exploration that first triggers `freeze_or_replan`,
 post-replan no-progress early stop, and blocked premium recovery with no route
 outcome are rejected locally with HTTP 409 and audited with specific
-`error_kind` values.
+`error_kind` values. `freeze_or_replan` also carries a short route instruction
+that is injected into the upstream chat messages, so the agent is told to stop
+broad exploration and produce a concrete pivot or abandon condition.
 
 For local runners, `scripts/run_episode_command.py` wraps a command and posts
 the detected events automatically:

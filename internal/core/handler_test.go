@@ -246,6 +246,99 @@ func TestHandlerAppliesRouteBudgetToBodyAndAudit(t *testing.T) {
 	}
 }
 
+func TestHandlerInjectsRouteAgentInstruction(t *testing.T) {
+	var upstreamBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatalf("decode upstream body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"choices": [{"finish_reason": "stop", "message": {"content": "ok"}}],
+			"usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+		}`)
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		Retry: config.RetryConfig{MaxRetries: 1},
+		Routes: []config.RouteConfig{
+			{Pattern: "/v1/chat/completions", Pool: "openrouter"},
+		},
+	}
+	openrouterPool, err := pool.NewPool("openrouter", config.PoolConfig{
+		Strategy: "round_robin",
+		Endpoints: []config.EndpointConfig{
+			{Name: "upstream", URL: upstream.URL, Weight: 1, Timeout: time.Second},
+		},
+	}, config.CircuitBreakerConfig{})
+	if err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	router := &capturingRouter{
+		model:            "anthropic/claude-opus-5",
+		budgetAction:     "freeze_or_replan",
+		maxTokens:        2048,
+		agentInstruction: "Bounded replan turn. Stop broad exploration.",
+	}
+	reg := plugin.NewRegistry(logger)
+	if err := reg.Register(router); err != nil {
+		t.Fatalf("register router: %v", err)
+	}
+	if err := reg.Init(&plugin.Context{Config: cfg, Logger: logger}); err != nil {
+		t.Fatalf("init registry: %v", err)
+	}
+
+	handler := NewHandler(cfg, MapPoolProvider{"openrouter": openrouterPool}, reg, logger)
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/chat/completions",
+		bytes.NewBufferString(`{
+			"model": "auto",
+			"messages": [
+				{"role": "system", "content": "base system"},
+				{"role": "user", "content": "continue"}
+			]
+		}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	messages, ok := upstreamBody["messages"].([]any)
+	if !ok {
+		t.Fatalf("messages missing or wrong type: %#v", upstreamBody["messages"])
+	}
+	if len(messages) != 3 {
+		t.Fatalf("messages len = %d, want 3: %#v", len(messages), messages)
+	}
+	first, _ := messages[0].(map[string]any)
+	if first["role"] != "system" || first["content"] != "base system" {
+		t.Fatalf("first message = %#v, want original system", first)
+	}
+	inserted, _ := messages[1].(map[string]any)
+	if inserted["role"] != "system" {
+		t.Fatalf("inserted role = %#v, want system", inserted["role"])
+	}
+	insertedContent, _ := inserted["content"].(string)
+	if !strings.Contains(insertedContent, "aware-gateway route instruction: Bounded replan turn") {
+		t.Fatalf("inserted content = %q", insertedContent)
+	}
+	third, _ := messages[2].(map[string]any)
+	if third["role"] != "user" || third["content"] != "continue" {
+		t.Fatalf("third message = %#v, want original user", third)
+	}
+	if got := upstreamBody["max_tokens"]; got != float64(2048) {
+		t.Fatalf("upstream max_tokens = %v, want 2048", got)
+	}
+}
+
 func TestHandlerAbortsRouterDecisionBeforeUpstreamAndAudits(t *testing.T) {
 	upstreamCalled := false
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1102,22 +1195,23 @@ func TestHandlerReleasesInFlightOnNonStreamingBodyTimeout(t *testing.T) {
 }
 
 type capturingRouter struct {
-	sessionID     string
-	trialName     string
-	episodeID     string
-	body          map[string]any
-	model         string
-	budgetAction  string
-	maxTokens     int
-	timeoutMs     int
-	episodeOp     string
-	seenEpisodeOp string
-	stateVersion  int
-	stateBefore   string
-	abort         bool
-	abortStatus   int
-	abortKind     string
-	abortMessage  string
+	sessionID        string
+	trialName        string
+	episodeID        string
+	body             map[string]any
+	model            string
+	budgetAction     string
+	agentInstruction string
+	maxTokens        int
+	timeoutMs        int
+	episodeOp        string
+	seenEpisodeOp    string
+	stateVersion     int
+	stateBefore      string
+	abort            bool
+	abortStatus      int
+	abortKind        string
+	abortMessage     string
 }
 
 func (r *capturingRouter) Name() string { return "capturing-router" }
@@ -1144,6 +1238,7 @@ func (r *capturingRouter) Route(req *http.Request, body []byte) (*plugin.Routing
 		Model:               model,
 		Reason:              "test route",
 		BudgetAction:        r.budgetAction,
+		AgentInstruction:    r.agentInstruction,
 		MaxTokens:           r.maxTokens,
 		TimeoutMs:           r.timeoutMs,
 		EpisodeID:           episodeID,

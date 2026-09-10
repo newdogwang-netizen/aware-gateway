@@ -693,6 +693,8 @@ future_evidence_leakage = 0
 
 - `episode_long_exploration_replan`：`exploration_since_progress >= 12` 或 `llm_calls_since_progress >= 12` 时，本地跳过 Judge，路由一次有界 Opus `freeze_or_replan`。
 - `freeze_or_replan` budget profile：`max_tokens=2048`、`timeout_ms=60000`；它不是继续扩大执行预算，而是要求产生明确 pivot 或 abandon 条件。
+- `freeze_or_replan` agent instruction：gateway 会在上游 chat messages 中插入一条短控制指令，让 agent 明确知道本轮要停止广泛探索，给出当前假设、最小决定性检查或实现 pivot，以及 abandon 条件。
+- `freeze_or_replan` 不参与 length boost；即使上一轮出现 `finish_reason=length`，也必须保持基础 profile，并在 trace 里写 `episode_adjust=replan_freeze`。
 - `episode_replan_no_progress_stop_gate`：replan 之后连续 `3` 次 LLM 调用仍没有 implementation/validation/delivery/strong progress，下一轮本地返回 `409`，分类为 `gateway_replan_no_progress_stop_gate`。
 - 回归约束：long-exploration replan 看的是 `exploration_since_progress` / `llm_calls_since_progress`，不是 episode 历史总 progress；早期有过一次实现进展，不应阻止后续再次卡住时 replan。
 
@@ -708,27 +710,33 @@ make build GO=/usr/local/go/bin/go              passed
 safe-control probe                               188/188
 ```
 
+随后补充了两条 core/smart-router 回归：
+
+- `RoutingDecision.AgentInstruction` 会被注入到上游请求体，且 `freeze_or_replan` 必须携带 bounded replan instruction。
+- `freeze_or_replan` 在 length pressure 下仍保持基础预算，不允许被 `episode_adjust=length_boost` 放大。
+
+这些补丁通过 `go test ./internal/core ./plugins/smartrouter`、全仓库短测、脚本测试、build 和 safe-control probe。
+
 真实 `shadow-relay` canary：
 
 | artifact | failure_kind | reward | total cost | agent calls | decision calls | duration | progress tiers |
 |----------|--------------|--------|------------|-------------|----------------|----------|----------------|
-| `/mnt/data2/aware-gateway-runs/aware-v4-20260910T114644Z` | `gateway_replan_no_progress_stop_gate` | 0 | `$0.6032` | 9 | 3 | `172.8s` | exploration `20`, implementation `0`, validation `0`, delivery `0` |
+| `/mnt/data2/aware-gateway-runs/aware-v4-20260910T120642Z` | `gateway_replan_no_progress_stop_gate` | 0 | `$0.4325` | 9 | 3 | `174.8s` | exploration `23`, implementation `0`, validation `0`, delivery `0` |
 
 路由动作：
 
 ```text
-cheap_probe:4
+cheap_probe:5
 cheap_execute:1
 freeze_or_replan:1
 premium_reason:1
-premium_recover:1
 stop_trial:1
 ```
 
 离线抽取证据：
 
 ```text
-episode events = 31
+episode events = 34
 candidate_progress_event_count = 0
 progress_event_count = 0
 length_finish_count = 2
@@ -741,14 +749,15 @@ future_evidence_leakage = 0
 | version | stop reason | cost | agent calls | exploration | effective progress |
 |---------|-------------|------|-------------|-------------|--------------------|
 | progress-tier only | `gateway_cost_stop_gate` | `$3.2018` | 29 | 42 | 0 |
-| long-exploration control | `gateway_replan_no_progress_stop_gate` | `$0.6032` | 9 | 20 | 0 |
+| long-exploration control + route instruction | `gateway_replan_no_progress_stop_gate` | `$0.4325` | 9 | 23 | 0 |
 
 结论：
 
 ```text
 Long-exploration control accepted for cost containment.
 Quality not accepted: reward is still 0.
-Next issue is not another threshold tweak; it is making replan produce an executable hypothesis, then validating whether that hypothesis changes delivery outcome.
+Route instruction partially helped: the later trace produced a concrete protocol hypothesis, but it still did not become implementation/validation/delivery progress.
+Next issue is not another threshold tweak; it is capturing and scoring the replan hypothesis as an explicit event, then validating whether that hypothesis changes delivery outcome.
 ```
 
 ### Step 5: 小规模 Harbor pilot
