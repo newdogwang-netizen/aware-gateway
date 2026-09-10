@@ -740,6 +740,7 @@ Harbor Artifact Watcher           done for trajectory/patch/ctrf/result sidecar
 Stateful No-progress Recovery     done for stale/blocked -> local premium_recover
 Route Outcome Linkage             done for route -> event/test/verifier windows
 Online Episode State Query        done for GET /v1/episode-state
+State Backfill                    done for persisted traces/events -> online projection
 ```
 
 RSI R1 完整结束后，aware-gateway 应达到：
@@ -755,6 +756,7 @@ Outcome-aware Replay              done
 Event-driven State Controller     partial for no-progress recovery
 Route-to-Outcome Feedback         partial for extractor/replay analysis windows
 Online State Inspection           done for current in-memory projection
+Restart State Rebuild             partial for audit trace/event backfill
 Outcome-aware Screening Pilot     not started for P2
 Outcome-aware Acceptance          at least 3 runs per accepted task class
 Budget Policy Effectiveness       accepted or explicitly rejected

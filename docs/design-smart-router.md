@@ -347,9 +347,12 @@ The gateway fills missing `schema_version`, `event_id`, `timestamp`,
 these rows in `episode_events`; `GET /v1/episode-events?episode_id=...` returns
 them for replay and visualization.
 `GET /v1/episode-state?episode_id=...` returns the current online state
-projection exposed by smart-router. This gives experiment tooling a direct way
-to inspect the reducer output that routing decisions are using, without
-reconstructing it from raw events on every read.
+projection exposed by smart-router. If that episode is missing from memory and
+trace/event query sources are available, smart-router performs a one-time
+best-effort backfill from persisted audit traces and explicit episode events.
+This gives experiment tooling a direct way to inspect the reducer output that
+routing decisions are using, without reconstructing it from raw events on every
+read.
 
 The first online adapter is command-based:
 
@@ -380,7 +383,9 @@ state rebuilding:
 `route_budget_action` is recorded as route metadata even when budget rewriting
 is disabled. With the audit SQLite store enabled, `/v1/traces?episode_id=...`
 can fetch one task line directly; `/v1/episode-state?episode_id=...` shows the
-latest in-memory projection for that same task line.
+latest online projection for that same task line. On restart, the first request
+or state query for an episode can rehydrate that projection from persisted
+traces/events before the router decides.
 
 This is not the full Issue #1 runtime. It does not yet identify nested task
 lines with a semantic resolver or automatically capture every shell/tool call.
@@ -389,7 +394,8 @@ wrapper, or artifact watcher. A true Harbor-native hook that emits before files
 land on disk is still separate integration work. It also does not perform
 offline policy updates or acceptance-gated policy evolution. It is now a
 partial online state controller: state can affect routing for no-progress
-recovery, and every such decision remains auditable against the state it saw.
+recovery, state can be inspected through the runtime API, and every such
+decision remains auditable against the state it saw.
 
 A5 showed the boundary of this first loop: the episode feedback fired in a real
 Harbor run, but the trial was stopped before verification after cost and call

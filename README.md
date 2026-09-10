@@ -409,6 +409,10 @@ Inspect the router's current online projection for one task line:
 curl -s 'http://localhost:12026/v1/episode-state?episode_id=trial-abc__agent'
 ```
 
+When the in-memory projection is missing, smart-router can backfill it from
+persisted audit traces and explicit episode events if query plugins are
+available.
+
 ## Project Structure
 
 ```

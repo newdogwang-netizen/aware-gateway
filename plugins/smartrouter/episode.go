@@ -428,7 +428,7 @@ func (s *SmartRouter) Record(record *plugin.AuditRecord) error {
 		state = &EpisodeState{ID: key}
 		s.episodes[key] = state
 	}
-	projectEpisodeEvent(state, event, cfg)
+	projectUniqueEpisodeEvent(state, event, cfg)
 	if record.EpisodeID == "" {
 		record.EpisodeID = key
 	}
@@ -463,6 +463,26 @@ func (s *SmartRouter) RecordEpisodeEvent(event *plugin.EpisodeEvent) error {
 		return nil
 	}
 
+	projected := episodeEventFromPluginEvent(event)
+
+	s.episodeMu.Lock()
+	if s.episodes == nil {
+		s.episodes = make(map[string]*EpisodeState)
+	}
+	state := s.episodes[key]
+	if state == nil {
+		state = &EpisodeState{ID: key}
+		s.episodes[key] = state
+	}
+	projectUniqueEpisodeEvent(state, projected, cfg)
+	s.episodeMu.Unlock()
+	return nil
+}
+
+func episodeEventFromPluginEvent(event *plugin.EpisodeEvent) EpisodeEvent {
+	if event == nil {
+		return EpisodeEvent{}
+	}
 	projected := EpisodeEvent{
 		ID:           event.EventID,
 		Kind:         strings.TrimSpace(event.Kind),
@@ -485,29 +505,72 @@ func (s *SmartRouter) RecordEpisodeEvent(event *plugin.EpisodeEvent) error {
 	if projected.Outcome == "" && projected.Kind == "llm_call" {
 		projected.Outcome = "unknown"
 	}
+	return projected
+}
 
-	s.episodeMu.Lock()
-	if s.episodes == nil {
-		s.episodes = make(map[string]*EpisodeState)
+func episodeEventFromTraceEntry(trace plugin.TraceEntry) EpisodeEvent {
+	timestamp, _ := time.Parse(time.RFC3339Nano, trace.Timestamp)
+	outcome := "unknown"
+	if trace.Status >= 400 {
+		outcome = "error"
+	} else if strings.EqualFold(trace.FinishReason, "length") {
+		outcome = "length_truncated"
+	} else if strings.EqualFold(trace.FinishReason, "stop") {
+		outcome = "response_completed"
+	} else if trace.Status >= 200 && trace.Status < 300 && trace.FinishReason == "" && trace.TotalTokens == 0 {
+		outcome = "provider_incomplete"
 	}
-	state := s.episodes[key]
-	if state == nil {
-		state = &EpisodeState{ID: key}
-		s.episodes[key] = state
+	model := trace.RoutedModel
+	if model == "" {
+		model = trace.Model
 	}
-	if projected.ID != "" {
+	return EpisodeEvent{
+		ID:           trace.TraceID,
+		Kind:         "llm_call",
+		Source:       "audit_trace_backfill",
+		Outcome:      outcome,
+		Model:        model,
+		BudgetAction: trace.BudgetAction,
+		FinishReason: strings.ToLower(strings.TrimSpace(trace.FinishReason)),
+		Status:       trace.Status,
+		LatencyMs:    trace.LatencyMs,
+		Cost:         trace.Cost,
+		TotalTokens:  trace.TotalTokens,
+		Timestamp:    timestamp,
+		Observation: map[string]any{
+			"trace_id":           trace.TraceID,
+			"outcome":            outcome,
+			"model":              trace.Model,
+			"routed_model":       trace.RoutedModel,
+			"pool":               trace.Pool,
+			"budget_action":      trace.BudgetAction,
+			"route_max_tokens":   trace.RouteMaxTokens,
+			"route_timeout_ms":   trace.RouteTimeoutMs,
+			"finish_reason":      trace.FinishReason,
+			"status":             trace.Status,
+			"latency_ms":         trace.LatencyMs,
+			"cost_usd":           trace.Cost,
+			"total_tokens":       trace.TotalTokens,
+			"routing_reason":     trace.RoutingReason,
+			"backfill_source":    "audit_trace",
+			"original_step_name": trace.StepName,
+		},
+		EvidenceRefs: []string{"trace:" + trace.TraceID},
+	}
+}
+
+func projectUniqueEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeConfig) bool {
+	if event.ID != "" {
 		if state.SeenEventIDs == nil {
 			state.SeenEventIDs = make(map[string]struct{})
 		}
-		if _, exists := state.SeenEventIDs[projected.ID]; exists {
-			s.episodeMu.Unlock()
-			return nil
+		if _, exists := state.SeenEventIDs[event.ID]; exists {
+			return false
 		}
-		state.SeenEventIDs[projected.ID] = struct{}{}
+		state.SeenEventIDs[event.ID] = struct{}{}
 	}
-	projectEpisodeEvent(state, projected, cfg)
-	s.episodeMu.Unlock()
-	return nil
+	projectEpisodeEvent(state, event, cfg)
+	return true
 }
 
 func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeConfig) {
@@ -593,6 +656,7 @@ func (s *SmartRouter) episodeSnapshot(req *http.Request) EpisodeSnapshot {
 	if key == "" {
 		return EpisodeSnapshot{}
 	}
+	s.ensureEpisodeStateLoaded(key, cfg)
 
 	s.episodeMu.Lock()
 	defer s.episodeMu.Unlock()
@@ -789,6 +853,9 @@ func (s *SmartRouter) QueryEpisodeStates(filter plugin.EpisodeStateFilter) ([]pl
 	if !cfg.Enabled {
 		return nil, nil
 	}
+	if filter.EpisodeID != "" {
+		s.ensureEpisodeStateLoaded(filter.EpisodeID, cfg)
+	}
 
 	s.episodeMu.Lock()
 	defer s.episodeMu.Unlock()
@@ -819,6 +886,110 @@ func (s *SmartRouter) QueryEpisodeStates(filter plugin.EpisodeStateFilter) ([]pl
 		out = append(out, episodeStateEntry(snapshotFromEpisodeState(s.episodes[key]), s.Name()))
 	}
 	return out, nil
+}
+
+func (s *SmartRouter) ensureEpisodeStateLoaded(key string, cfg EpisodeConfig) {
+	if key == "" || !cfg.Enabled {
+		return
+	}
+	if len(s.traceQueryers) == 0 && len(s.eventQueryers) == 0 {
+		return
+	}
+
+	s.episodeMu.Lock()
+	if _, exists := s.episodes[key]; exists {
+		s.episodeMu.Unlock()
+		return
+	}
+	s.episodeMu.Unlock()
+
+	s.backfillMu.Lock()
+	if s.backfilled == nil {
+		s.backfilled = make(map[string]struct{})
+	}
+	if _, alreadyTried := s.backfilled[key]; alreadyTried {
+		s.backfillMu.Unlock()
+		return
+	}
+	s.backfilled[key] = struct{}{}
+	s.backfillMu.Unlock()
+
+	events := s.loadPersistedEpisodeEvents(key)
+	if len(events) == 0 {
+		return
+	}
+	sort.SliceStable(events, func(i, j int) bool {
+		if events[i].Timestamp.Equal(events[j].Timestamp) {
+			return events[i].ID < events[j].ID
+		}
+		if events[i].Timestamp.IsZero() {
+			return false
+		}
+		if events[j].Timestamp.IsZero() {
+			return true
+		}
+		return events[i].Timestamp.Before(events[j].Timestamp)
+	})
+
+	s.episodeMu.Lock()
+	defer s.episodeMu.Unlock()
+	state := s.episodes[key]
+	if state == nil {
+		state = &EpisodeState{ID: key}
+		s.episodes[key] = state
+	}
+	for _, event := range events {
+		projectUniqueEpisodeEvent(state, event, cfg)
+	}
+}
+
+func (s *SmartRouter) loadPersistedEpisodeEvents(key string) []EpisodeEvent {
+	var events []EpisodeEvent
+	seenTraceIDs := map[string]struct{}{}
+	traceFilters := []plugin.TraceFilter{
+		{EpisodeID: key, Limit: 1000},
+		{SessionID: key, Limit: 1000},
+		{TrialName: key, Limit: 1000},
+	}
+	for _, queryer := range s.traceQueryers {
+		for _, filter := range traceFilters {
+			traces, err := queryer.QueryTraces(filter)
+			if err != nil {
+				continue
+			}
+			for _, trace := range traces {
+				if trace.TraceID == "" {
+					continue
+				}
+				if _, exists := seenTraceIDs[trace.TraceID]; exists {
+					continue
+				}
+				seenTraceIDs[trace.TraceID] = struct{}{}
+				if trace.Pool == "decision-model" || strings.HasPrefix(trace.StepName, "router-decision") {
+					continue
+				}
+				events = append(events, episodeEventFromTraceEntry(trace))
+			}
+		}
+	}
+
+	seenEventIDs := map[string]struct{}{}
+	for _, queryer := range s.eventQueryers {
+		explicitEvents, err := queryer.QueryEpisodeEvents(plugin.EpisodeEventFilter{EpisodeID: key, Limit: 1000})
+		if err != nil {
+			continue
+		}
+		for _, event := range explicitEvents {
+			if event.EventID != "" {
+				if _, exists := seenEventIDs[event.EventID]; exists {
+					continue
+				}
+				seenEventIDs[event.EventID] = struct{}{}
+			}
+			events = append(events, episodeEventFromPluginEvent(&event))
+		}
+	}
+	return events
 }
 
 func episodeStateEntry(snapshot EpisodeSnapshot, source string) plugin.EpisodeStateEntry {

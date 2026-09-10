@@ -100,6 +100,8 @@ type SmartRouter struct {
 	logger        *slog.Logger
 	ctx           *plugin.Context
 	auditSinks    []plugin.AuditSink
+	traceQueryers []plugin.TraceQueryer
+	eventQueryers []plugin.EpisodeEventQueryer
 	warmMu        sync.Mutex
 	warmCounts    map[string]int
 	historyMu     sync.Mutex
@@ -108,6 +110,8 @@ type SmartRouter struct {
 	controlStates map[string]*safeControlState
 	episodeMu     sync.Mutex
 	episodes      map[string]*EpisodeState
+	backfillMu    sync.Mutex
+	backfilled    map[string]struct{}
 	sessionMu     sync.Mutex
 	sessions      map[string]*EpisodeSession
 }
@@ -192,6 +196,7 @@ func (s *SmartRouter) Init(ctx *plugin.Context) error {
 	s.histories = make(map[string][]DecisionHistory)
 	s.controlStates = make(map[string]*safeControlState)
 	s.episodes = make(map[string]*EpisodeState)
+	s.backfilled = make(map[string]struct{})
 	s.sessions = make(map[string]*EpisodeSession)
 
 	s.logger.Info("smart-router initialized",
@@ -217,6 +222,14 @@ func (s *SmartRouter) Close() error { return nil }
 // so decision model calls can be recorded in the trace/billing pipeline.
 func (s *SmartRouter) SetAuditSinks(sinks []plugin.AuditSink) {
 	s.auditSinks = sinks
+}
+
+// SetStateBackfillSources lets the router rebuild in-memory episode state from
+// persisted traces/events after restart. It is best-effort; request routing
+// continues even when no source is configured.
+func (s *SmartRouter) SetStateBackfillSources(traceQueryers []plugin.TraceQueryer, eventQueryers []plugin.EpisodeEventQueryer) {
+	s.traceQueryers = append([]plugin.TraceQueryer(nil), traceQueryers...)
+	s.eventQueryers = append([]plugin.EpisodeEventQueryer(nil), eventQueryers...)
 }
 
 // Route implements plugin.RequestRouter.

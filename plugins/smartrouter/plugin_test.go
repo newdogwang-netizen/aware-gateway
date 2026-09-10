@@ -1235,6 +1235,125 @@ func TestQueryEpisodeStatesReturnsCurrentProjection(t *testing.T) {
 	}
 }
 
+func TestEpisodeStateBackfillInfluencesNextRoute(t *testing.T) {
+	decisionServerCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		decisionServerCalled = true
+		http.Error(w, "decision model should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	router := newTestSmartRouter(server.URL)
+	enableSafeControl(router)
+	router.cfg.CacheTTLSeconds = -1
+	router.cfg.BudgetedRoute = BudgetedRouteConfig{
+		Enabled: true,
+		Profiles: map[string]RouteBudgetProfile{
+			budgetActionPremiumRecover: {MaxTokens: 1000, TimeoutMs: 10000},
+		},
+	}
+	router.cfg.EpisodeRuntime = EpisodeConfig{
+		Enabled:               true,
+		RecentEvents:          5,
+		LengthStreakThreshold: 3,
+		LengthWindowThreshold: 2,
+		MaxTokensMultiplier:   2,
+		TimeoutMultiplier:     2,
+		MaxTokensCeiling:      3000,
+		TimeoutMsCeiling:      20000,
+	}
+	router.SetStateBackfillSources([]plugin.TraceQueryer{fakeTraceQueryer{
+		traces: []plugin.TraceEntry{
+			{
+				TraceID:      "trace-backfill-1",
+				Timestamp:    "2026-09-10T10:00:00Z",
+				RoutedModel:  "z-ai/glm-5.3-flash",
+				Pool:         "openrouter",
+				SessionID:    "episode-backfill",
+				EpisodeID:    "episode-backfill",
+				Status:       200,
+				FinishReason: "length",
+				BudgetAction: budgetActionCheapExecute,
+				TotalTokens:  1000,
+				Cost:         0.01,
+				LatencyMs:    60000,
+			},
+			{
+				TraceID:      "trace-backfill-2",
+				Timestamp:    "2026-09-10T10:01:00Z",
+				RoutedModel:  "z-ai/glm-5.3-flash",
+				Pool:         "openrouter",
+				SessionID:    "episode-backfill",
+				EpisodeID:    "episode-backfill",
+				Status:       200,
+				FinishReason: "length",
+				BudgetAction: budgetActionCheapExecute,
+				TotalTokens:  1000,
+				Cost:         0.01,
+				LatencyMs:    60000,
+			},
+		},
+	}}, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("X-Episode-ID", "episode-backfill")
+	req.Header.Set("X-Session-ID", "episode-backfill")
+	body := []byte(`{"model":"auto","messages":[{"role":"user","content":"Continue with the next bounded step."}]}`)
+	decision, err := router.Route(req, body)
+	if err != nil {
+		t.Fatalf("Route returned error: %v", err)
+	}
+	if decisionServerCalled {
+		t.Fatal("decision server was called; want local route after state backfill")
+	}
+	if decision == nil || decision.Model != "anthropic/claude-opus-5" {
+		t.Fatalf("decision = %#v, want Opus recovery", decision)
+	}
+	if !strings.Contains(decision.Reason, "rule_id=episode_no_progress_recovery") {
+		t.Fatalf("reason = %q, want episode recovery rule", decision.Reason)
+	}
+	if decision.EpisodeStateVersion != 2 {
+		t.Fatalf("state version before route = %d, want 2 from backfilled traces", decision.EpisodeStateVersion)
+	}
+	if !strings.Contains(decision.EpisodeStateBefore, `"no_progress_severity":"stale"`) {
+		t.Fatalf("state before = %q, want stale no-progress", decision.EpisodeStateBefore)
+	}
+}
+
+func TestQueryEpisodeStatesBackfillsPersistedEvents(t *testing.T) {
+	router := newTestSmartRouter("")
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true}
+	router.SetStateBackfillSources(nil, []plugin.EpisodeEventQueryer{fakeEpisodeEventQueryer{
+		events: []plugin.EpisodeEvent{
+			{
+				EventID:   "event-backfilled-test",
+				EpisodeID: "episode-events-backfill",
+				Timestamp: time.Now(),
+				Kind:      "test_run",
+				Source:    "audit-store",
+				Observation: map[string]any{
+					"outcome": "passed",
+					"command": "go test ./...",
+				},
+			},
+		},
+	}})
+
+	states, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: "episode-events-backfill"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates returned error: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	if states[0].StateVersion != 1 {
+		t.Fatalf("state version = %d, want 1", states[0].StateVersion)
+	}
+	if got := states[0].State["test_passed_count"]; got != 1 {
+		t.Fatalf("test_passed_count = %#v, want 1", got)
+	}
+}
+
 func TestEpisodeNoProgressStateRoutesPremiumRecoveryWithoutDecisionModel(t *testing.T) {
 	decisionServerCalled := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2035,4 +2154,49 @@ func enableSafeControl(router *SmartRouter) {
 		PremiumCooldownTurns:   1,
 		CheapProbeBurstLimit:   3,
 	}
+}
+
+type fakeTraceQueryer struct {
+	traces []plugin.TraceEntry
+}
+
+func (q fakeTraceQueryer) QueryTraces(filter plugin.TraceFilter) ([]plugin.TraceEntry, error) {
+	var out []plugin.TraceEntry
+	for _, trace := range q.traces {
+		if filter.EpisodeID != "" && trace.EpisodeID != filter.EpisodeID {
+			continue
+		}
+		if filter.SessionID != "" && trace.SessionID != filter.SessionID {
+			continue
+		}
+		if filter.TrialName != "" && trace.TrialName != filter.TrialName {
+			continue
+		}
+		out = append(out, trace)
+		if filter.Limit > 0 && len(out) >= filter.Limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+type fakeEpisodeEventQueryer struct {
+	events []plugin.EpisodeEvent
+}
+
+func (q fakeEpisodeEventQueryer) QueryEpisodeEvents(filter plugin.EpisodeEventFilter) ([]plugin.EpisodeEvent, error) {
+	var out []plugin.EpisodeEvent
+	for _, event := range q.events {
+		if filter.EpisodeID != "" && event.EpisodeID != filter.EpisodeID {
+			continue
+		}
+		if filter.Kind != "" && event.Kind != filter.Kind {
+			continue
+		}
+		out = append(out, event)
+		if filter.Limit > 0 && len(out) >= filter.Limit {
+			break
+		}
+	}
+	return out, nil
 }

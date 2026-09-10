@@ -87,6 +87,9 @@ curl -s 'http://localhost:12026/v1/episode-state?episode_id=trial-abc__agent'
 
 This is a runtime inspection surface for the state the router is using; offline
 replay still reads `episode-events.jsonl` and applies its own cutoff reducer.
+When smart-router memory has no entry for the requested episode, the runtime
+state path can backfill from persisted audit traces and explicit episode
+events exposed by installed query plugins.
 
 For local runners, `scripts/run_episode_command.py` wraps a command and posts
 the detected events automatically:

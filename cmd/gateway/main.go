@@ -103,10 +103,25 @@ func main() {
 	// calls are recorded in the trace/billing pipeline. Must be after Init()
 	// because AuditSinks() only returns non-nil sinks after plugins are initialized.
 	auditSinks := registry.AuditSinks()
-	slog.Info("injecting audit sinks into smart-router", "sink_count", len(auditSinks))
+	var traceQueryers []plugin.TraceQueryer
+	var episodeEventQueryers []plugin.EpisodeEventQueryer
+	for _, p := range registry.AllPlugins() {
+		if q, ok := p.(plugin.TraceQueryer); ok {
+			traceQueryers = append(traceQueryers, q)
+		}
+		if q, ok := p.(plugin.EpisodeEventQueryer); ok {
+			episodeEventQueryers = append(episodeEventQueryers, q)
+		}
+	}
+	slog.Info("injecting audit/state sources into smart-router",
+		"sink_count", len(auditSinks),
+		"trace_queryers", len(traceQueryers),
+		"episode_event_queryers", len(episodeEventQueryers),
+	)
 	for _, p := range registry.AllPlugins() {
 		if sr, ok := p.(*smartrouter.SmartRouter); ok {
 			sr.SetAuditSinks(auditSinks)
+			sr.SetStateBackfillSources(traceQueryers, episodeEventQueryers)
 		}
 	}
 
