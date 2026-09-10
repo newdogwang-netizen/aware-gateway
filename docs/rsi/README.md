@@ -73,11 +73,12 @@ curl -s http://localhost:12026/v1/episode-events \
 Missing `schema_version`, `event_id`, `timestamp`, `certainty`, and
 `extractor_version` fields are filled by the gateway. The audit SQLite store
 writes these events to `episode_events`, queryable with
-`GET /v1/episode-events?episode_id=...`. The smart-router also projects posted
-events into its online episode state, so later decisions can distinguish
-activity from progress before a full offline extraction pass. Explicit event
-projection is idempotent by `event_id`; repeated sidecar retries do not advance
-the in-memory state twice.
+`GET /v1/episode-events?episode_id=...` or across a full task session with
+`GET /v1/episode-events?session_id=...`. The smart-router also projects posted
+events into its online episode state and session stack, so later decisions can
+distinguish activity from progress before a full offline extraction pass.
+Explicit event projection is idempotent by `event_id`; repeated sidecar retries
+do not advance the in-memory state or session stack twice.
 
 The current online projection is queryable:
 
@@ -99,8 +100,8 @@ curl -s 'http://localhost:12026/v1/episode-sessions?session_id=trial-abc__agent'
 
 This tells the experiment runner which task line is active before it asks for
 the reduced episode state. The returned stack can also be rebuilt best-effort
-from persisted audit traces that include `session_id`, `episode_id`, and
-`episode_operation`.
+from persisted audit traces and explicit episode events that include
+`session_id`, `episode_id`, and `episode_operation`.
 
 ## Deterministic Runtime Probe
 

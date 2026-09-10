@@ -541,6 +541,14 @@ func (s *Store) QueryEpisodeEvents(filter plugin.EpisodeEventFilter) ([]plugin.E
 		query += " AND episode_id = ?"
 		args = append(args, filter.EpisodeID)
 	}
+	if filter.SessionID != "" {
+		query += " AND session_id = ?"
+		args = append(args, filter.SessionID)
+	}
+	if filter.TrialName != "" {
+		query += " AND trial_name = ?"
+		args = append(args, filter.TrialName)
+	}
 	if filter.Kind != "" {
 		query += " AND kind = ?"
 		args = append(args, filter.Kind)

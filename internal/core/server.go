@@ -511,6 +511,8 @@ func episodeEventQueryHandler(reg *plugin.Registry) http.HandlerFunc {
 
 		filter := plugin.EpisodeEventFilter{
 			EpisodeID: r.URL.Query().Get("episode_id"),
+			SessionID: r.URL.Query().Get("session_id"),
+			TrialName: r.URL.Query().Get("trial"),
 			Kind:      r.URL.Query().Get("kind"),
 		}
 		if l := r.URL.Query().Get("limit"); l != "" {

@@ -733,7 +733,7 @@ Policy Acceptance Gate            done for matched summary/replay evaluation
 V4 Pilot Artifact Builder         done for job/traces -> episode summaries -> policy gate
 Online Episode ID                 done for explicit X-Episode-ID fallback to session/trial
 Online Episode Resolver           done for header/body operation plus minimal interrupt/resume stack
-Online Episode Session Query      done for GET /v1/episode-sessions and trace backfill
+Online Episode Session Query      done for GET /v1/episode-sessions and trace/event backfill
 Online State Version Audit        done for state-before/state-after trace fields
 Trace Query by Episode            done for /v1/traces?episode_id=...
 Online Episode Event API          done for POST/GET /v1/episode-events
@@ -764,7 +764,7 @@ Safe-control Rule Layer           done
 Budgeted Route Action             done
 Minimal Episode Runtime           done
 Session Episode Stack             done for deterministic continue/interrupt/resume/global/unknown
-Session Stack Inspection          done for active task-line query and persisted trace rebuild
+Session Stack Inspection          done for active task-line query and persisted trace/event rebuild
 Outcome Event Projection          done for offline replay, online when events are posted
 Outcome-aware Replay              done
 Event-driven State Controller     partial for no-progress recovery

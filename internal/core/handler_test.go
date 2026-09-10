@@ -586,6 +586,19 @@ func TestEpisodeEventEndpointIngestsAndQueriesEvents(t *testing.T) {
 	if payload.Events[0].EventID != store.events[0].EventID {
 		t.Fatalf("query event id = %q, want %q", payload.Events[0].EventID, store.events[0].EventID)
 	}
+
+	sessionReq := httptest.NewRequest(http.MethodGet, "/v1/episode-events?session_id=trial-api__agent", nil)
+	sessionRec := httptest.NewRecorder()
+	router.ServeHTTP(sessionRec, sessionReq)
+	if sessionRec.Code != http.StatusOK {
+		t.Fatalf("session query status = %d, body = %s", sessionRec.Code, sessionRec.Body.String())
+	}
+	if err := json.Unmarshal(sessionRec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode session query response: %v", err)
+	}
+	if payload.Count != 1 || payload.Events[0].SessionID != "trial-api__agent" {
+		t.Fatalf("session query payload = %#v, want one matching event", payload)
+	}
 }
 
 func TestEpisodeStateEndpointQueriesCurrentProjection(t *testing.T) {
@@ -948,6 +961,12 @@ func (s *capturingEpisodeEventStore) QueryEpisodeEvents(filter plugin.EpisodeEve
 	var out []plugin.EpisodeEvent
 	for _, event := range s.events {
 		if filter.EpisodeID != "" && event.EpisodeID != filter.EpisodeID {
+			continue
+		}
+		if filter.SessionID != "" && event.SessionID != filter.SessionID {
+			continue
+		}
+		if filter.TrialName != "" && event.TrialName != filter.TrialName {
 			continue
 		}
 		if filter.Kind != "" && event.Kind != filter.Kind {

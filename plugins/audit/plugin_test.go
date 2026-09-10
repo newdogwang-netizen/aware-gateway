@@ -123,4 +123,12 @@ func TestStoreRecordsAndQueriesEpisodeEvents(t *testing.T) {
 	if len(events[0].EvidenceRefs) != 1 || events[0].EvidenceRefs[0] != "test:stdout" {
 		t.Fatalf("evidence refs = %#v, want test:stdout", events[0].EvidenceRefs)
 	}
+
+	events, err = store.QueryEpisodeEvents(plugin.EpisodeEventFilter{SessionID: "trial-progress__agent"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeEvents by session returned error: %v", err)
+	}
+	if len(events) != 1 || events[0].EpisodeID != "episode-progress" {
+		t.Fatalf("session events = %#v, want episode-progress event", events)
+	}
 }

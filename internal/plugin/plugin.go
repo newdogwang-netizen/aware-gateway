@@ -178,6 +178,8 @@ type TraceEntry struct {
 // EpisodeEventFilter holds query parameters for episode event lookup.
 type EpisodeEventFilter struct {
 	EpisodeID string
+	SessionID string
+	TrialName string
 	Kind      string
 	Limit     int
 }

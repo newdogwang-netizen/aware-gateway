@@ -1833,6 +1833,8 @@ func TestRecordEpisodeEventDedupesEventIDsBeforeProjection(t *testing.T) {
 	event := &plugin.EpisodeEvent{
 		EventID:   "event-dedupe-test-run",
 		EpisodeID: "episode-dedupe",
+		SessionID: "session-dedupe",
+		EpisodeOp: episodeOperationInterrupt,
 		Timestamp: time.Now(),
 		Kind:      "test_run",
 		Source:    "unit-test",
@@ -1863,6 +1865,19 @@ func TestRecordEpisodeEventDedupesEventIDsBeforeProjection(t *testing.T) {
 	}
 	if len(snapshot.RecentEvents) != 1 {
 		t.Fatalf("recent events = %d, want 1", len(snapshot.RecentEvents))
+	}
+	sessions, err := router.QueryEpisodeSessions(plugin.EpisodeSessionFilter{SessionID: "session-dedupe"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeSessions returned error: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(sessions))
+	}
+	if sessions[0].Version != 1 {
+		t.Fatalf("session version = %d, want 1 after duplicate event id", sessions[0].Version)
+	}
+	if sessions[0].ActiveEpisodeID != "episode-dedupe" {
+		t.Fatalf("active episode = %q, want episode-dedupe", sessions[0].ActiveEpisodeID)
 	}
 }
 
@@ -2100,8 +2115,72 @@ func TestQueryEpisodeSessionsBackfillsPersistedTraceOperations(t *testing.T) {
 	if session.LastOperation != episodeOperationResume {
 		t.Fatalf("last operation = %q, want resume", session.LastOperation)
 	}
-	if len(session.LastEvidence) != 1 || session.LastEvidence[0] != "audit_trace_backfill" {
-		t.Fatalf("last evidence = %#v, want audit_trace_backfill", session.LastEvidence)
+	if len(session.LastEvidence) != 1 || session.LastEvidence[0] != "audit_trace:trace-session-resume" {
+		t.Fatalf("last evidence = %#v, want final audit trace id", session.LastEvidence)
+	}
+}
+
+func TestQueryEpisodeSessionsBackfillsPersistedEpisodeEvents(t *testing.T) {
+	router := newTestSmartRouter("")
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true}
+	router.SetStateBackfillSources(nil, []plugin.EpisodeEventQueryer{fakeEpisodeEventQueryer{
+		events: []plugin.EpisodeEvent{
+			{
+				EventID:   "event-session-main",
+				EpisodeID: "session-event-backfill",
+				SessionID: "session-event-backfill",
+				EpisodeOp: episodeOperationContinue,
+				Timestamp: parseTestTime(t, "2026-09-10T10:00:00Z"),
+				Kind:      "tool_call",
+				Source:    "audit-store",
+			},
+			{
+				EventID:   "event-session-branch",
+				EpisodeID: "session-event-backfill#episode-1",
+				SessionID: "session-event-backfill",
+				EpisodeOp: episodeOperationInterrupt,
+				Timestamp: parseTestTime(t, "2026-09-10T10:01:00Z"),
+				Kind:      "test_run",
+				Source:    "audit-store",
+				Observation: map[string]any{
+					"outcome": "failed",
+					"command": "pytest",
+				},
+			},
+			{
+				EventID:   "event-session-resume",
+				EpisodeID: "session-event-backfill",
+				SessionID: "session-event-backfill",
+				EpisodeOp: episodeOperationResume,
+				Timestamp: parseTestTime(t, "2026-09-10T10:02:00Z"),
+				Kind:      "tool_call",
+				Source:    "audit-store",
+			},
+		},
+	}})
+
+	sessions, err := router.QueryEpisodeSessions(plugin.EpisodeSessionFilter{SessionID: "session-event-backfill"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeSessions returned error: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want 1", len(sessions))
+	}
+	session := sessions[0]
+	if session.ActiveEpisodeID != "session-event-backfill" {
+		t.Fatalf("active episode = %q, want session-event-backfill", session.ActiveEpisodeID)
+	}
+	if got := strings.Join(session.EpisodeStack, ","); got != "session-event-backfill" {
+		t.Fatalf("episode stack = %q, want resumed main stack", got)
+	}
+	if session.Version != 3 {
+		t.Fatalf("session version = %d, want 3 event operations", session.Version)
+	}
+	if session.LastOperation != episodeOperationResume {
+		t.Fatalf("last operation = %q, want resume", session.LastOperation)
+	}
+	if len(session.LastEvidence) != 1 || session.LastEvidence[0] != "episode_event:event-session-resume" {
+		t.Fatalf("last evidence = %#v, want final episode event id", session.LastEvidence)
 	}
 }
 
@@ -3171,6 +3250,12 @@ func (q fakeEpisodeEventQueryer) QueryEpisodeEvents(filter plugin.EpisodeEventFi
 		if filter.EpisodeID != "" && event.EpisodeID != filter.EpisodeID {
 			continue
 		}
+		if filter.SessionID != "" && event.SessionID != filter.SessionID {
+			continue
+		}
+		if filter.TrialName != "" && event.TrialName != filter.TrialName {
+			continue
+		}
 		if filter.Kind != "" && event.Kind != filter.Kind {
 			continue
 		}
@@ -3180,4 +3265,13 @@ func (q fakeEpisodeEventQueryer) QueryEpisodeEvents(filter plugin.EpisodeEventFi
 		}
 	}
 	return out, nil
+}
+
+func parseTestTime(t *testing.T, value string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		t.Fatalf("parse test time %q: %v", value, err)
+	}
+	return parsed
 }

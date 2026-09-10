@@ -293,8 +293,8 @@ fields before forwarding upstream.
 `GET /v1/episode-sessions?session_id=...` exposes the current stack, active
 episode, last operation, confidence, and resolver evidence. When the stack is
 not in memory, smart-router can rebuild a best-effort session view from
-persisted audit traces carrying `session_id`, `episode_id`, and
-`episode_operation`.
+persisted audit traces or explicit episode events carrying `session_id`,
+`episode_id`, and `episode_operation`.
 
 After each finished agent call, the audit record is projected into the resolved
 in-memory episode. Decision-model audit records are ignored so the state
@@ -397,7 +397,8 @@ X-Episode-ID: trial-abc__agent
 The gateway fills missing `schema_version`, `event_id`, `timestamp`,
 `certainty`, and `extractor_version` defaults. The audit SQLite plugin stores
 these rows in `episode_events`; `GET /v1/episode-events?episode_id=...` returns
-them for replay and visualization.
+them for replay and visualization. `GET /v1/episode-events?session_id=...`
+returns the event stream across a whole session, including branch episodes.
 `GET /v1/episode-state?episode_id=...` returns the current online state
 projection exposed by smart-router. If that episode is missing from memory and
 trace/event query sources are available, smart-router performs a one-time

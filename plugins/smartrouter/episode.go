@@ -544,8 +544,11 @@ func (s *SmartRouter) RecordEpisodeEvent(event *plugin.EpisodeEvent) error {
 		state = &EpisodeState{ID: key}
 		s.episodes[key] = state
 	}
-	projectUniqueEpisodeEvent(state, projected, cfg)
+	projectedNew := projectUniqueEpisodeEvent(state, projected, cfg)
 	s.episodeMu.Unlock()
+	if projectedNew {
+		s.recordSessionFromEpisodeEvent(event)
+	}
 	return nil
 }
 
@@ -1327,6 +1330,43 @@ func (s *SmartRouter) QueryEpisodeSessions(filter plugin.EpisodeSessionFilter) (
 	return out, nil
 }
 
+func (s *SmartRouter) recordSessionFromEpisodeEvent(event *plugin.EpisodeEvent) {
+	if event == nil {
+		return
+	}
+	sessionID := strings.TrimSpace(event.SessionID)
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(event.TrialName)
+	}
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(event.EpisodeID)
+	}
+	if sessionID == "" {
+		return
+	}
+	episodeID := strings.TrimSpace(event.EpisodeID)
+	if episodeID == "" {
+		episodeID = sessionID
+	}
+	evidence := "episode_event"
+	if event.EventID != "" {
+		evidence = "episode_event:" + event.EventID
+	}
+
+	s.sessionMu.Lock()
+	defer s.sessionMu.Unlock()
+	if s.sessions == nil {
+		s.sessions = make(map[string]*EpisodeSession)
+	}
+	session := s.sessions[sessionID]
+	if session == nil {
+		session = &EpisodeSession{Key: sessionID, ActiveEpisodeID: sessionID, Stack: []string{sessionID}}
+		s.sessions[sessionID] = session
+	}
+	operation := inferSessionOperation(session, episodeID, normalizeEpisodeOperation(event.EpisodeOp))
+	applySessionOperation(session, episodeID, operation, event.Timestamp, 1, []string{evidence})
+}
+
 func (s *SmartRouter) ensureEpisodeStateLoaded(key string, cfg EpisodeConfig) {
 	if key == "" || !cfg.Enabled {
 		return
@@ -1383,7 +1423,7 @@ func (s *SmartRouter) ensureEpisodeStateLoaded(key string, cfg EpisodeConfig) {
 }
 
 func (s *SmartRouter) ensureEpisodeSessionLoaded(sessionID string) {
-	if sessionID == "" || len(s.traceQueryers) == 0 {
+	if sessionID == "" || (len(s.traceQueryers) == 0 && len(s.eventQueryers) == 0) {
 		return
 	}
 
@@ -1406,29 +1446,21 @@ func (s *SmartRouter) ensureEpisodeSessionLoaded(sessionID string) {
 	s.backfilled[backfillKey] = struct{}{}
 	s.backfillMu.Unlock()
 
-	traces := s.loadPersistedSessionTraces(sessionID)
-	if len(traces) == 0 {
+	operations := s.loadPersistedSessionOperations(sessionID)
+	if len(operations) == 0 {
 		return
 	}
-	sort.SliceStable(traces, func(i, j int) bool {
-		return traces[i].Timestamp < traces[j].Timestamp
+	sort.SliceStable(operations, func(i, j int) bool {
+		if operations[i].Timestamp.Equal(operations[j].Timestamp) {
+			return operations[i].EpisodeID < operations[j].EpisodeID
+		}
+		return operations[i].Timestamp.Before(operations[j].Timestamp)
 	})
 
 	session := &EpisodeSession{Key: sessionID, ActiveEpisodeID: sessionID, Stack: []string{sessionID}}
-	for _, trace := range traces {
-		if trace.Pool == "decision-model" || strings.HasPrefix(trace.StepName, "router-decision") {
-			continue
-		}
-		episodeID := strings.TrimSpace(trace.EpisodeID)
-		if episodeID == "" {
-			episodeID = sessionID
-		}
-		operation := normalizeEpisodeOperation(trace.EpisodeOp)
-		if operation == "" {
-			operation = episodeOperationContinue
-		}
-		timestamp, _ := time.Parse(time.RFC3339Nano, trace.Timestamp)
-		applyPersistedSessionOperation(session, episodeID, operation, timestamp)
+	for _, operation := range operations {
+		op := inferSessionOperation(session, operation.EpisodeID, operation.Operation)
+		applySessionOperation(session, operation.EpisodeID, op, operation.Timestamp, 1, operation.Evidence)
 	}
 	if session.Version == 0 {
 		return
@@ -1442,6 +1474,54 @@ func (s *SmartRouter) ensureEpisodeSessionLoaded(sessionID string) {
 		s.sessions[sessionID] = session
 	}
 	s.sessionMu.Unlock()
+}
+
+type persistedSessionOperation struct {
+	EpisodeID string
+	Operation string
+	Timestamp time.Time
+	Evidence  []string
+}
+
+func (s *SmartRouter) loadPersistedSessionOperations(sessionID string) []persistedSessionOperation {
+	operations := make([]persistedSessionOperation, 0)
+	for _, trace := range s.loadPersistedSessionTraces(sessionID) {
+		if trace.Pool == "decision-model" || strings.HasPrefix(trace.StepName, "router-decision") {
+			continue
+		}
+		episodeID := strings.TrimSpace(trace.EpisodeID)
+		if episodeID == "" {
+			episodeID = sessionID
+		}
+		timestamp, _ := time.Parse(time.RFC3339Nano, trace.Timestamp)
+		evidence := "audit_trace_backfill"
+		if trace.TraceID != "" {
+			evidence = "audit_trace:" + trace.TraceID
+		}
+		operations = append(operations, persistedSessionOperation{
+			EpisodeID: episodeID,
+			Operation: normalizeEpisodeOperation(trace.EpisodeOp),
+			Timestamp: timestamp,
+			Evidence:  []string{evidence},
+		})
+	}
+	for _, event := range s.loadPersistedSessionEvents(sessionID) {
+		episodeID := strings.TrimSpace(event.EpisodeID)
+		if episodeID == "" {
+			episodeID = sessionID
+		}
+		evidence := "episode_event_backfill"
+		if event.EventID != "" {
+			evidence = "episode_event:" + event.EventID
+		}
+		operations = append(operations, persistedSessionOperation{
+			EpisodeID: episodeID,
+			Operation: normalizeEpisodeOperation(event.EpisodeOp),
+			Timestamp: event.Timestamp,
+			Evidence:  []string{evidence},
+		})
+	}
+	return operations
 }
 
 func (s *SmartRouter) loadPersistedSessionTraces(sessionID string) []plugin.TraceEntry {
@@ -1474,7 +1554,63 @@ func (s *SmartRouter) loadPersistedSessionTraces(sessionID string) []plugin.Trac
 	return traces
 }
 
-func applyPersistedSessionOperation(session *EpisodeSession, episodeID, operation string, timestamp time.Time) {
+func (s *SmartRouter) loadPersistedSessionEvents(sessionID string) []plugin.EpisodeEvent {
+	if sessionID == "" || len(s.eventQueryers) == 0 {
+		return nil
+	}
+	var events []plugin.EpisodeEvent
+	seen := map[string]struct{}{}
+	filters := []plugin.EpisodeEventFilter{
+		{SessionID: sessionID, Limit: 1000},
+		{TrialName: sessionID, Limit: 1000},
+		{EpisodeID: sessionID, Limit: 1000},
+	}
+	for _, queryer := range s.eventQueryers {
+		for _, filter := range filters {
+			rows, err := queryer.QueryEpisodeEvents(filter)
+			if err != nil {
+				continue
+			}
+			for _, event := range rows {
+				key := event.EventID
+				if key == "" {
+					key = fmt.Sprintf("%s/%s/%s/%s", event.Timestamp.Format(time.RFC3339Nano), event.SessionID, event.EpisodeID, event.Kind)
+				}
+				if _, exists := seen[key]; exists {
+					continue
+				}
+				seen[key] = struct{}{}
+				events = append(events, event)
+			}
+		}
+	}
+	return events
+}
+
+func inferSessionOperation(session *EpisodeSession, episodeID, operation string) string {
+	if operation != "" {
+		return operation
+	}
+	if session == nil {
+		return episodeOperationContinue
+	}
+	if episodeID == session.Key && session.ActiveEpisodeID != "" && session.ActiveEpisodeID != session.Key {
+		return episodeOperationResume
+	}
+	if episodeID != "" && episodeID != session.ActiveEpisodeID && episodeID != session.Key {
+		return episodeOperationInterrupt
+	}
+	return episodeOperationContinue
+}
+
+func applySessionOperation(
+	session *EpisodeSession,
+	episodeID string,
+	operation string,
+	timestamp time.Time,
+	confidence float64,
+	evidence []string,
+) {
 	if session == nil || episodeID == "" {
 		return
 	}
@@ -1501,8 +1637,8 @@ func applyPersistedSessionOperation(session *EpisodeSession, episodeID, operatio
 	}
 	session.Version++
 	session.LastOperation = operation
-	session.LastConfidence = 1
-	session.LastEvidence = []string{"audit_trace_backfill"}
+	session.LastConfidence = confidence
+	session.LastEvidence = append([]string(nil), evidence...)
 	if timestamp.IsZero() {
 		timestamp = time.Now().UTC()
 	}
