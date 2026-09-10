@@ -647,6 +647,57 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
     state_after_route = fetch_episode_state(port, episode)
     checks.append(check_equal("state-version-after-route", state_after_route.get("state_version"), 3))
 
+    route_outcome_event_id = f"{episode}__post-route-test-passed"
+    post_json(
+        f"http://127.0.0.1:{port}/v1/episode-events",
+        {
+            "event_id": route_outcome_event_id,
+            "episode_id": episode,
+            "episode_operation": "continue",
+            "sequence": 4,
+            "kind": "test_run",
+            "source": "safe-control-probe",
+            "observation": {
+                "outcome": "passed",
+                "command": "python3 validate.py",
+                "passed_count": 4,
+                "failed_count": 0,
+            },
+            "evidence_refs": [f"probe:event:{route_outcome_event_id}"],
+            "session_id": session,
+            "trial_name": trial,
+            "step_name": "episode-runtime-route-outcome-test-passed",
+            "task_name": task,
+        },
+        headers={
+            "X-Trial-Name": trial,
+            "X-Session-ID": session,
+            "X-Episode-ID": episode,
+            "X-Episode-Operation": "continue",
+            "X-Step-Name": "episode-runtime-route-outcome-test-passed",
+            "X-Task-Name": task,
+        },
+    )
+    state_after_route_outcome = fetch_episode_state(port, episode)
+    route_outcome_payload = state_after_route_outcome.get("state") or {}
+    checks.extend(
+        [
+            check_equal("route-outcome-state-version", state_after_route_outcome.get("state_version"), 4),
+            check_equal("route-outcome-trace-id", route_outcome_payload.get("last_route_trace_id"), route_trace.get("trace_id")),
+            check_equal("route-outcome-label", route_outcome_payload.get("last_route_outcome_label"), "test_passed"),
+            check_equal(
+                "route-outcome-event-id",
+                route_outcome_payload.get("last_route_outcome_event_id"),
+                route_outcome_event_id,
+            ),
+            check_equal("route-outcome-progress", route_outcome_payload.get("last_route_outcome_progress"), True),
+            check_equal("route-outcome-window-event-count", route_outcome_payload.get("last_route_outcome_event_count"), 1),
+            check_equal("route-outcome-total-event-count", route_outcome_payload.get("route_outcome_event_count"), 1),
+            check_equal("route-outcome-progress-count", route_outcome_payload.get("route_outcome_progress_count"), 1),
+            check_equal("route-outcome-negative-count", route_outcome_payload.get("route_outcome_negative_count"), 0),
+        ]
+    )
+
     for index in range(1, 3):
         event_id = f"{failure_episode}__test-failed-{index}"
         post_json(
@@ -1046,6 +1097,7 @@ def run_episode_runtime_probe(port: int, trial: str) -> dict[str, Any]:
         "state_before_route": state_before,
         "state_after_duplicate": state_after_duplicate,
         "state_after_route": state_after_route,
+        "state_after_route_outcome": state_after_route_outcome,
         "route_trace": route_trace,
         "failure_state": failure_state,
         "first_failure_route_trace": first_failure_trace,

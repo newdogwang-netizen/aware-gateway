@@ -113,7 +113,9 @@ audit trace queries, and the online Episode loop:
 test events trigger one local recovery without creating an endless local
 recovery loop, and that completion guardrail traces include delivery,
 validation, verifier readiness evidence, and stale-verifier invalidation when
-target files change after verification.
+target files change after verification. It also checks the online route-outcome
+window that links a posted validation event back to the previous routed agent
+call.
 
 ### Writing a Custom Plugin
 

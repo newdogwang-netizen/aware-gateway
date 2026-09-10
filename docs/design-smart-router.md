@@ -316,6 +316,9 @@ The first reducer tracks only stable control signals:
 - strong progress: verifier reward and fully passing final test events
 - no-progress pressure: explicit `no_progress` events and recent pressure
   without progress
+- online route outcome: the latest LLM route opens a pending outcome window,
+  and later posted file, test, verifier, no-progress, or exception events are
+  attributed back to that route until the next LLM route starts.
 - the latest N projected events
 
 The next prompt receives this compact episode state. The budget layer also uses
@@ -346,6 +349,12 @@ kind. New target writes after a verifier pass move readiness back to
 does not treat stale success evidence as current proof. The gateway does not
 mark completion by itself; it exposes the evidence used for the final model
 choice.
+The reducer also keeps a small online route-outcome window. Each agent LLM call
+starts as `pending`; posted events after it update `last_route_outcome_label`,
+`last_route_outcome_event_id`, and progress/negative counts. The next prompt
+therefore sees whether the previous route produced only output, changed files,
+passed tests, failed validation, or reached verifier success. This is a compact
+online counterpart to the offline extractor's richer route-outcome windows.
 
 Online runners can post the same event shape used by RSI replay:
 

@@ -119,6 +119,8 @@ checks that final task-completion routing carries `completion_readiness` and
 the supporting evidence in the guardrail trace. A second completion scenario
 changes the target file after verifier success and verifies that readiness falls
 back to `delivery_candidate` instead of reusing stale proof.
+The probe also posts validation after a routed recovery call and checks that
+the online route-outcome window links that event to the previous LLM route.
 
 For local runners, `scripts/run_episode_command.py` wraps a command and posts
 the detected events automatically:

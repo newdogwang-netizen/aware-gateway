@@ -33,6 +33,18 @@ const (
 	completionReadinessValidationPassed  = "validation_passed"
 	completionReadinessVerifierFailed    = "verifier_failed"
 	completionReadinessVerifierPassed    = "verifier_passed"
+
+	routeOutcomePending          = "pending"
+	routeOutcomeToolCall         = "tool_call"
+	routeOutcomeDeliveryChanged  = "delivery_changed"
+	routeOutcomeWorkspaceChanged = "workspace_changed"
+	routeOutcomeTestPassed       = "test_passed"
+	routeOutcomeTestFailed       = "test_failed"
+	routeOutcomeVerifierPassed   = "verifier_passed"
+	routeOutcomeVerifierFailed   = "verifier_failed"
+	routeOutcomeNoProgress       = "no_progress"
+	routeOutcomeRunException     = "run_exception"
+	routeOutcomeNone             = "none"
 )
 
 // EpisodeConfig enables a small in-memory event projection for one task line.
@@ -93,6 +105,14 @@ type EpisodeState struct {
 	LastModel                   string
 	LastBudgetAction            string
 	LastFinishReason            string
+	LastRouteTraceID            string
+	LastRouteOutcomeLabel       string
+	LastRouteOutcomeEventID     string
+	LastRouteOutcomeProgress    bool
+	LastRouteOutcomeEventCount  int
+	RouteOutcomeEventCount      int
+	RouteOutcomeProgressCount   int
+	RouteOutcomeNegativeCount   int
 	LastFailureFingerprint      string
 	SameFailureFingerprintCount int
 	FailureFrontierSize         int
@@ -145,6 +165,14 @@ type EpisodeSnapshot struct {
 	LastModel                   string
 	LastBudgetAction            string
 	LastFinishReason            string
+	LastRouteTraceID            string
+	LastRouteOutcomeLabel       string
+	LastRouteOutcomeEventID     string
+	LastRouteOutcomeProgress    bool
+	LastRouteOutcomeEventCount  int
+	RouteOutcomeEventCount      int
+	RouteOutcomeProgressCount   int
+	RouteOutcomeNegativeCount   int
 	LastFailureFingerprint      string
 	SameFailureFingerprintCount int
 	FailureFrontierSize         int
@@ -648,6 +676,78 @@ func completionAffectingWrite(event EpisodeEvent) bool {
 		boolFromObservation(event.Observation, "workspace_target")
 }
 
+func beginRouteOutcomeWindow(state *EpisodeState, event EpisodeEvent) {
+	state.LastRouteTraceID = event.ID
+	state.LastRouteOutcomeLabel = routeOutcomePending
+	state.LastRouteOutcomeEventID = ""
+	state.LastRouteOutcomeProgress = false
+	state.LastRouteOutcomeEventCount = 0
+}
+
+func projectRouteOutcomeState(state *EpisodeState, event EpisodeEvent) {
+	if state == nil || state.CallCount == 0 {
+		return
+	}
+	label, progress, negative := routeOutcomeFromEvent(event)
+	if label == "" {
+		return
+	}
+	state.LastRouteOutcomeLabel = label
+	state.LastRouteOutcomeEventID = event.ID
+	state.LastRouteOutcomeProgress = progress
+	state.LastRouteOutcomeEventCount++
+	state.RouteOutcomeEventCount++
+	if progress {
+		state.RouteOutcomeProgressCount++
+	}
+	if negative {
+		state.RouteOutcomeNegativeCount++
+	}
+}
+
+func routeOutcomeFromEvent(event EpisodeEvent) (string, bool, bool) {
+	switch event.Kind {
+	case "tool_call":
+		return routeOutcomeToolCall, false, false
+	case "file_written", "file_modified":
+		if boolFromObservation(event.Observation, "delivery_target") {
+			return routeOutcomeDeliveryChanged, true, false
+		}
+		if boolFromObservation(event.Observation, "workspace_target") ||
+			intFromObservation(event.Observation, "path_count") > 0 {
+			return routeOutcomeWorkspaceChanged, true, false
+		}
+	case "test_run":
+		switch strings.ToLower(strings.TrimSpace(stringFromObservation(event.Observation, "outcome"))) {
+		case "passed":
+			return routeOutcomeTestPassed, true, false
+		case "failed":
+			return routeOutcomeTestFailed, false, true
+		}
+	case "test_passed":
+		return routeOutcomeTestPassed, true, false
+	case "test_failed":
+		return routeOutcomeTestFailed, false, true
+	case "verifier_result":
+		if floatFromObservation(event.Observation, "reward") > 0 {
+			return routeOutcomeVerifierPassed, true, false
+		}
+		return routeOutcomeVerifierFailed, false, true
+	case "no_progress":
+		return routeOutcomeNoProgress, false, true
+	case "run_exception":
+		return routeOutcomeRunException, false, true
+	}
+	return "", false, false
+}
+
+func routeOutcomeLabelForSnapshot(snapshot EpisodeSnapshot) string {
+	if snapshot.LastRouteTraceID == "" && snapshot.LastRouteOutcomeLabel == "" {
+		return routeOutcomeNone
+	}
+	return valueOrDefault(snapshot.LastRouteOutcomeLabel, routeOutcomePending)
+}
+
 func projectUniqueEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeConfig) bool {
 	if event.ID != "" {
 		if state.SeenEventIDs == nil {
@@ -688,6 +788,7 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 			state.ConsecutiveErrors = 0
 		}
 		state.LLMCallsSinceProgress++
+		beginRouteOutcomeWindow(state, event)
 	case "tool_call":
 		state.ToolCallCount++
 	case "file_written", "file_modified":
@@ -730,6 +831,9 @@ func projectEpisodeEvent(state *EpisodeState, event EpisodeEvent, cfg EpisodeCon
 	case "no_progress":
 		state.NoProgressEventCount++
 		state.ActiveNoProgress = true
+	}
+	if event.Kind != "llm_call" {
+		projectRouteOutcomeState(state, event)
 	}
 
 	if progress {
@@ -816,6 +920,14 @@ func snapshotFromEpisodeState(state *EpisodeState) EpisodeSnapshot {
 		LastModel:                   state.LastModel,
 		LastBudgetAction:            state.LastBudgetAction,
 		LastFinishReason:            state.LastFinishReason,
+		LastRouteTraceID:            state.LastRouteTraceID,
+		LastRouteOutcomeLabel:       state.LastRouteOutcomeLabel,
+		LastRouteOutcomeEventID:     state.LastRouteOutcomeEventID,
+		LastRouteOutcomeProgress:    state.LastRouteOutcomeProgress,
+		LastRouteOutcomeEventCount:  state.LastRouteOutcomeEventCount,
+		RouteOutcomeEventCount:      state.RouteOutcomeEventCount,
+		RouteOutcomeProgressCount:   state.RouteOutcomeProgressCount,
+		RouteOutcomeNegativeCount:   state.RouteOutcomeNegativeCount,
 		LastFailureFingerprint:      state.LastFailureFingerprint,
 		SameFailureFingerprintCount: state.SameFailureFingerprintCount,
 		FailureFrontierSize:         state.FailureFrontierSize,
@@ -868,6 +980,17 @@ func (s *SmartRouter) renderEpisodeSnapshot(snapshot EpisodeSnapshot) string {
 			valueOrDefault(snapshot.CompletionReadiness, completionReadinessNone),
 			snapshot.DeliveryFileWriteCount,
 			valueOrUnknown(snapshot.LastDeliveryEventID),
+		),
+		fmt.Sprintf(
+			"route_outcome trace=%s label=%s event=%s progress=%t events=%d total_events=%d progress_events=%d negative_events=%d",
+			valueOrUnknown(snapshot.LastRouteTraceID),
+			routeOutcomeLabelForSnapshot(snapshot),
+			valueOrUnknown(snapshot.LastRouteOutcomeEventID),
+			snapshot.LastRouteOutcomeProgress,
+			snapshot.LastRouteOutcomeEventCount,
+			snapshot.RouteOutcomeEventCount,
+			snapshot.RouteOutcomeProgressCount,
+			snapshot.RouteOutcomeNegativeCount,
 		),
 		fmt.Sprintf(
 			"failure_frontier size=%d same_failure_count=%d last_failure=%s",
@@ -957,6 +1080,14 @@ func episodeStatePayload(snapshot EpisodeSnapshot) map[string]any {
 		"last_model":                     snapshot.LastModel,
 		"last_budget_action":             snapshot.LastBudgetAction,
 		"last_finish_reason":             snapshot.LastFinishReason,
+		"last_route_trace_id":            snapshot.LastRouteTraceID,
+		"last_route_outcome_label":       routeOutcomeLabelForSnapshot(snapshot),
+		"last_route_outcome_event_id":    snapshot.LastRouteOutcomeEventID,
+		"last_route_outcome_progress":    snapshot.LastRouteOutcomeProgress,
+		"last_route_outcome_event_count": snapshot.LastRouteOutcomeEventCount,
+		"route_outcome_event_count":      snapshot.RouteOutcomeEventCount,
+		"route_outcome_progress_count":   snapshot.RouteOutcomeProgressCount,
+		"route_outcome_negative_count":   snapshot.RouteOutcomeNegativeCount,
 		"last_failure_fingerprint":       snapshot.LastFailureFingerprint,
 		"same_failure_fingerprint_count": snapshot.SameFailureFingerprintCount,
 		"failure_frontier_size":          snapshot.FailureFrontierSize,

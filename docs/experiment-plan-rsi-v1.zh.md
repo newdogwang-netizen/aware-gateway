@@ -744,6 +744,7 @@ Completion Readiness Projection   done for current delivery/test/verifier state
 Completion Guardrail Evidence     done for state-aware task_complete routing reason
 Stale Completion Invalidation     done for target writes after verifier success
 Route Outcome Linkage             done for route -> event/test/verifier windows
+Online Route Outcome Projection   done for posted events after each LLM route
 Online Episode State Query        done for GET /v1/episode-state
 State Backfill                    done for persisted traces/events -> online projection
 Deterministic Runtime Probe       done for event ingest -> state query -> recovery route
@@ -760,7 +761,7 @@ Session Episode Stack             done for deterministic continue/interrupt/resu
 Outcome Event Projection          done for offline replay, online when events are posted
 Outcome-aware Replay              done
 Event-driven State Controller     partial for no-progress recovery
-Route-to-Outcome Feedback         partial for extractor/replay analysis windows
+Route-to-Outcome Feedback         partial for extractor/replay windows and online posted-event windows
 Online State Inspection           done for current in-memory projection
 Restart State Rebuild             partial for audit trace/event backfill
 Runtime Probe Acceptance          done for deterministic local gateway/mocks

@@ -750,6 +750,7 @@ func TestRouteFeedsEpisodeStateIntoNextPrompt(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("X-Session-ID", "episode-prompt")
 	if err := router.Record(&plugin.AuditRecord{
+		TraceID:      "trace-episode-prompt-1",
 		Timestamp:    time.Now(),
 		SessionID:    "episode-prompt",
 		Pool:         "openrouter",
@@ -772,6 +773,7 @@ func TestRouteFeedsEpisodeStateIntoNextPrompt(t *testing.T) {
 		"Episode state projected from previous agent calls",
 		"length_streak=1",
 		"recent_length=1",
+		"route_outcome trace=trace-episode-prompt-1 label=pending",
 		"outcome=length_truncated",
 		"finish_reason=length",
 	} {
@@ -878,6 +880,149 @@ func TestRouteAnnotatesEpisodeStateBeforeAndAfter(t *testing.T) {
 	}
 	if !strings.Contains(finished.StateAfter, `"state_version":2`) {
 		t.Fatalf("finished state after = %q, want state_version 2", finished.StateAfter)
+	}
+}
+
+func TestEpisodeLinksPostedOutcomesToPreviousRoute(t *testing.T) {
+	router := newTestSmartRouter("http://127.0.0.1:1")
+	router.cfg.EpisodeRuntime = EpisodeConfig{Enabled: true, RecentEvents: 8}
+
+	firstRoute := &plugin.AuditRecord{
+		TraceID:      "trace-route-1",
+		Timestamp:    time.Now(),
+		SessionID:    "session-route-outcome",
+		EpisodeID:    "episode-route-outcome",
+		Pool:         "openrouter",
+		RoutedModel:  "z-ai/glm-5.3-flash",
+		Status:       200,
+		FinishReason: "stop",
+		BudgetAction: budgetActionCheapExecute,
+		TotalTokens:  300,
+		Cost:         0.01,
+	}
+	if err := router.Record(firstRoute); err != nil {
+		t.Fatalf("Record first route returned error: %v", err)
+	}
+
+	states, err := router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: "episode-route-outcome"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates after first route returned error: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	if got := states[0].State["last_route_trace_id"]; got != "trace-route-1" {
+		t.Fatalf("last route trace = %#v, want trace-route-1", got)
+	}
+	if got := states[0].State["last_route_outcome_label"]; got != routeOutcomePending {
+		t.Fatalf("route outcome label = %#v, want pending", got)
+	}
+
+	for _, event := range []*plugin.EpisodeEvent{
+		{
+			EventID:   "event-delivery",
+			EpisodeID: "episode-route-outcome",
+			Timestamp: time.Now(),
+			Kind:      "file_written",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"delivery_target": true,
+			},
+		},
+		{
+			EventID:   "event-test-failed",
+			EpisodeID: "episode-route-outcome",
+			Timestamp: time.Now(),
+			Kind:      "test_run",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":             "failed",
+				"failed_count":        1,
+				"failure_fingerprint": "assert route outcome",
+			},
+		},
+		{
+			EventID:   "event-test-passed",
+			EpisodeID: "episode-route-outcome",
+			Timestamp: time.Now(),
+			Kind:      "test_run",
+			Source:    "unit-test",
+			Observation: map[string]any{
+				"outcome":      "passed",
+				"failed_count": 0,
+			},
+		},
+	} {
+		if err := router.RecordEpisodeEvent(event); err != nil {
+			t.Fatalf("RecordEpisodeEvent %s returned error: %v", event.EventID, err)
+		}
+	}
+
+	states, err = router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: "episode-route-outcome"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates after outcomes returned error: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("states = %d, want 1", len(states))
+	}
+	state := states[0].State
+	if got := state["last_route_trace_id"]; got != "trace-route-1" {
+		t.Fatalf("last route trace = %#v, want trace-route-1", got)
+	}
+	if got := state["last_route_outcome_label"]; got != routeOutcomeTestPassed {
+		t.Fatalf("route outcome label = %#v, want test_passed", got)
+	}
+	if got := state["last_route_outcome_event_id"]; got != "event-test-passed" {
+		t.Fatalf("last route outcome event = %#v, want event-test-passed", got)
+	}
+	if got := state["last_route_outcome_progress"]; got != true {
+		t.Fatalf("last route outcome progress = %#v, want true", got)
+	}
+	if got := state["last_route_outcome_event_count"]; got != 3 {
+		t.Fatalf("last route outcome event count = %#v, want 3", got)
+	}
+	if got := state["route_outcome_event_count"]; got != 3 {
+		t.Fatalf("route outcome event count = %#v, want 3", got)
+	}
+	if got := state["route_outcome_progress_count"]; got != 2 {
+		t.Fatalf("route outcome progress count = %#v, want 2", got)
+	}
+	if got := state["route_outcome_negative_count"]; got != 1 {
+		t.Fatalf("route outcome negative count = %#v, want 1", got)
+	}
+
+	secondRoute := &plugin.AuditRecord{
+		TraceID:      "trace-route-2",
+		Timestamp:    time.Now(),
+		SessionID:    "session-route-outcome",
+		EpisodeID:    "episode-route-outcome",
+		Pool:         "openrouter",
+		RoutedModel:  "anthropic/claude-opus-5",
+		Status:       200,
+		FinishReason: "stop",
+		BudgetAction: budgetActionPremiumRecover,
+		TotalTokens:  700,
+		Cost:         0.08,
+	}
+	if err := router.Record(secondRoute); err != nil {
+		t.Fatalf("Record second route returned error: %v", err)
+	}
+	states, err = router.QueryEpisodeStates(plugin.EpisodeStateFilter{EpisodeID: "episode-route-outcome"})
+	if err != nil {
+		t.Fatalf("QueryEpisodeStates after second route returned error: %v", err)
+	}
+	state = states[0].State
+	if got := state["last_route_trace_id"]; got != "trace-route-2" {
+		t.Fatalf("last route trace = %#v, want trace-route-2", got)
+	}
+	if got := state["last_route_outcome_label"]; got != routeOutcomePending {
+		t.Fatalf("route outcome label = %#v, want pending after new route", got)
+	}
+	if got := state["last_route_outcome_event_count"]; got != 0 {
+		t.Fatalf("last route outcome event count = %#v, want reset to 0", got)
+	}
+	if got := state["route_outcome_event_count"]; got != 3 {
+		t.Fatalf("total route outcome events = %#v, want total preserved", got)
 	}
 }
 
