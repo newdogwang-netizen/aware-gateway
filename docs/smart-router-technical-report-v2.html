@@ -184,31 +184,122 @@
             padding: 16px;
         }
         .panel p:last-child { margin-bottom: 0; }
-        .chart {
-            background: var(--paper);
-            border: 1px solid var(--line);
+        .flow-map {
+            background: #eef5ff;
+            border: 1px solid #c7d7f2;
             border-radius: 8px;
             margin: 18px 0 26px;
             overflow: hidden;
         }
-        .chart-head {
-            border-bottom: 1px solid var(--line);
+        .flow-head {
+            background: #dbeafe;
+            border-bottom: 1px solid #c7d7f2;
             padding: 14px 16px 10px;
         }
-        .chart-head p {
-            color: var(--muted);
-            font-size: 0.9rem;
+        .flow-head p {
+            color: #475467;
+            font-size: 0.92rem;
             margin: 4px 0 0;
         }
-        .svg-wrap {
-            overflow-x: auto;
-            padding: 18px;
+        .flow-grid {
+            display: grid;
+            grid-template-columns: 1fr auto 1fr auto 1fr auto 1fr;
+            gap: 10px;
+            align-items: stretch;
+            padding: 16px;
         }
-        .svg-wrap svg {
+        .flow-node {
+            background: var(--paper);
+            border: 1px solid #c7d7f2;
+            border-radius: 8px;
+            min-height: 132px;
+            padding: 14px;
+        }
+        .flow-node .step {
+            color: var(--blue);
+            font-size: 0.76rem;
+            font-weight: 800;
+        }
+        .flow-node strong {
             display: block;
-            width: 100%;
-            min-width: 780px;
-            height: auto;
+            margin: 6px 0;
+            line-height: 1.28;
+        }
+        .flow-node p {
+            color: #475467;
+            font-size: 0.88rem;
+            margin: 0;
+        }
+        .flow-arrow {
+            align-self: center;
+            color: var(--blue);
+            font-size: 1.35rem;
+            font-weight: 800;
+        }
+        .feedback {
+            border-top: 1px solid #c7d7f2;
+            display: grid;
+            grid-template-columns: 220px 1fr;
+            gap: 12px;
+            padding: 14px 16px 16px;
+        }
+        .feedback-title {
+            color: #102a56;
+            font-weight: 800;
+        }
+        .feedback-body {
+            color: #344054;
+        }
+        .tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 8px;
+        }
+        .tag {
+            background: #ffffff;
+            border: 1px solid #c7d7f2;
+            border-radius: 999px;
+            color: #344054;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 0.78rem;
+            padding: 2px 8px;
+        }
+        .tradeoff {
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            margin: 16px 0 24px;
+            padding: 16px;
+        }
+        .tradeoff-rail {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .tradeoff-cell {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 12px;
+        }
+        .tradeoff-cell:first-child {
+            background: var(--soft-green);
+        }
+        .tradeoff-cell:nth-child(2) {
+            background: var(--soft-blue);
+        }
+        .tradeoff-cell:last-child {
+            background: var(--soft-amber);
+        }
+        .tradeoff-cell strong {
+            display: block;
+            margin-bottom: 4px;
+        }
+        .tradeoff-cell p {
+            color: #475467;
+            font-size: 0.88rem;
+            margin: 0;
         }
         .pass { color: var(--green); font-weight: 760; }
         .warn-text { color: var(--amber); font-weight: 760; }
@@ -228,6 +319,19 @@
             .wrap { width: min(100vw - 24px, 1040px); }
             h1 { font-size: 1.8rem; }
             .metrics, .grid-2, .grid-3 { grid-template-columns: 1fr; }
+            .flow-grid {
+                grid-template-columns: 1fr;
+            }
+            .flow-arrow {
+                justify-self: center;
+                transform: rotate(90deg);
+            }
+            .feedback {
+                grid-template-columns: 1fr;
+            }
+            .tradeoff-rail {
+                grid-template-columns: 1fr;
+            }
             table { display: block; overflow-x: auto; white-space: nowrap; }
         }
     </style>
@@ -294,52 +398,70 @@
         跑命令、读文件、写产物、触发隐藏测试。真正要比较的是整条轨迹。
     </p>
 
-    <div class="chart">
-        <div class="chart-head">
-            <h3>我们要画的不是单点胜利，而是成本-质量边界</h3>
-            <p>当前只有一个通过样本，下一步要补的是不同任务、不同策略的曲线。</p>
+    <div class="flow-map" aria-label="aware-gateway 请求链路">
+        <div class="flow-head">
+            <h3>一条 agent 请求实际怎么走</h3>
+            <p>上面是本轮请求，下面是结果回流。关键点是：router 不是只选模型，还会写入本轮行动要求。</p>
         </div>
-        <div class="svg-wrap">
-            <svg viewBox="0 0 960 430" role="img" aria-label="cost quality frontier">
-                <defs>
-                    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
-                        <path d="M0,0 L10,5 L0,10 Z" fill="#667085"></path>
-                    </marker>
-                    <style>
-                        .axis { stroke: #667085; stroke-width: 1.6; marker-end: url(#arrow); }
-                        .grid { stroke: #eef1f6; stroke-width: 1; }
-                        .curve { fill: none; stroke: #175cd3; stroke-width: 4; }
-                        .curve2 { fill: none; stroke: #067647; stroke-width: 4; }
-                        .dot { fill: #ffffff; stroke-width: 3; }
-                        .d1 { stroke: #175cd3; }
-                        .d2 { stroke: #067647; }
-                        .txt { font: 15px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; fill: #18212f; }
-                        .small { font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; fill: #667085; }
-                    </style>
-                </defs>
-                <line class="grid" x1="110" y1="85" x2="110" y2="340"></line>
-                <line class="grid" x1="280" y1="85" x2="280" y2="340"></line>
-                <line class="grid" x1="450" y1="85" x2="450" y2="340"></line>
-                <line class="grid" x1="620" y1="85" x2="620" y2="340"></line>
-                <line class="grid" x1="790" y1="85" x2="790" y2="340"></line>
-                <line class="grid" x1="90" y1="280" x2="840" y2="280"></line>
-                <line class="grid" x1="90" y1="220" x2="840" y2="220"></line>
-                <line class="grid" x1="90" y1="160" x2="840" y2="160"></line>
-                <line class="axis" x1="90" y1="340" x2="860" y2="340"></line>
-                <line class="axis" x1="90" y1="340" x2="90" y2="60"></line>
-                <text class="txt" x="390" y="390">成本 / 强模型调用比例 / 整条轨迹花费</text>
-                <text class="txt" x="18" y="48">质量</text>
-                <path class="curve" d="M135 284 C240 250, 350 188, 498 148 C610 118, 720 105, 815 98"></path>
-                <path class="curve2" d="M130 305 C220 260, 330 212, 475 168 C610 132, 700 112, 770 106"></path>
-                <circle class="dot d1" cx="505" cy="146" r="8"></circle>
-                <text class="small" x="518" y="143">单次请求路由</text>
-                <text class="small" x="518" y="160">只看本轮输入</text>
-                <circle class="dot d2" cx="318" cy="217" r="8"></circle>
-                <text class="small" x="332" y="214">轨迹路由</text>
-                <text class="small" x="332" y="231">看任务历史和结果</text>
-                <text class="small" x="135" y="325">省钱但风险高</text>
-                <text class="small" x="692" y="86">质量稳但贵</text>
-            </svg>
+        <div class="flow-grid">
+            <div class="flow-node">
+                <div class="step">1. Agent</div>
+                <strong>发起下一轮模型请求</strong>
+                <p>可能是读文件、分析、写代码、修测试，或者准备交付。</p>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-node">
+                <div class="step">2. Gateway</div>
+                <strong>先看确定性状态</strong>
+                <p>如果只是读文件，用便宜模型；如果重复失败或接近交付，升级。</p>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-node">
+                <div class="step">3. Router</div>
+                <strong>输出 route action</strong>
+                <p>决定模型、输出预算、timeout，以及本轮应该探索、执行还是恢复。</p>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-node">
+                <div class="step">4. Upstream</div>
+                <strong>Flash 或 Opus 执行</strong>
+                <p>模型返回后，agent 继续跑工具、改文件、跑测试或生成交付物。</p>
+            </div>
+        </div>
+        <div class="feedback">
+            <div class="feedback-title">结果怎么回到下一轮</div>
+            <div class="feedback-body">
+                gateway 把工具、文件、测试和 verifier 结果投影成 Episode state。下一轮路由会看到这些状态：
+                已经有进展就压缩探索，连续失败就恢复，已有交付证据才允许完成。
+                <div class="tags">
+                    <span class="tag">tool_call</span>
+                    <span class="tag">file_written</span>
+                    <span class="tag">test_passed</span>
+                    <span class="tag">analysis_progress</span>
+                    <span class="tag">verifier_result</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="tradeoff">
+        <h3>成本-质量怎么读</h3>
+        <p>
+            这不是看某一次调用便宜不便宜，而是看一整条任务最终有没有做成，以及做成花了多少钱。
+        </p>
+        <div class="tradeoff-rail">
+            <div class="tradeoff-cell">
+                <strong>便宜但冒险</strong>
+                <p>更多 Flash，成本低，但复杂推理和失败恢复可能不够。</p>
+            </div>
+            <div class="tradeoff-cell">
+                <strong>按状态切换</strong>
+                <p>读文件和简单执行便宜跑，关键判断和恢复再升级。</p>
+            </div>
+            <div class="tradeoff-cell">
+                <strong>稳但昂贵</strong>
+                <p>更多 Opus，质量更稳，但如果每轮都用就失去路由价值。</p>
+            </div>
         </div>
     </div>
 
