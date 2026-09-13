@@ -7,20 +7,18 @@
     <style>
         :root {
             color-scheme: light;
-            --bg: #f6f7f9;
+            --bg: #f7f8fa;
             --paper: #ffffff;
             --ink: #18212f;
             --muted: #667085;
             --line: #d9dee8;
-            --soft-blue: #edf5ff;
-            --soft-green: #ecfdf3;
-            --soft-amber: #fff8db;
-            --soft-red: #fff1f0;
             --blue: #175cd3;
             --green: #067647;
             --amber: #9a6700;
             --red: #b42318;
-            --slate: #253346;
+            --soft-blue: #edf5ff;
+            --soft-green: #ecfdf3;
+            --soft-amber: #fff8db;
             --code: #111827;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -31,7 +29,7 @@
             line-height: 1.72;
         }
         .wrap {
-            width: min(1080px, calc(100vw - 36px));
+            width: min(1040px, calc(100vw - 36px));
             margin: 0 auto;
         }
         a { color: var(--blue); text-decoration: none; }
@@ -39,19 +37,19 @@
         p { margin: 0 0 14px; }
         h1, h2, h3 { letter-spacing: 0; }
         h1 {
-            max-width: 980px;
-            font-size: 2.52rem;
-            line-height: 1.14;
+            max-width: 900px;
+            font-size: 2.44rem;
+            line-height: 1.16;
             margin: 10px 0 16px;
         }
         h2 {
             color: #102a56;
-            font-size: 1.46rem;
+            font-size: 1.42rem;
             line-height: 1.28;
             margin: 38px 0 12px;
         }
         h3 {
-            font-size: 1.06rem;
+            font-size: 1.05rem;
             margin: 0 0 8px;
         }
         code {
@@ -122,20 +120,6 @@
             color: #344054;
             font-size: 1.12rem;
         }
-        .tags {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin-top: 18px;
-        }
-        .tag {
-            background: var(--paper);
-            border: 1px solid var(--line);
-            border-radius: 999px;
-            color: var(--muted);
-            font-size: 0.84rem;
-            padding: 4px 10px;
-        }
         .metrics {
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -143,7 +127,7 @@
             margin: 22px 0 30px;
         }
         .metric {
-            min-height: 128px;
+            min-height: 124px;
             background: var(--paper);
             border: 1px solid var(--line);
             border-radius: 8px;
@@ -157,7 +141,7 @@
         .metric .value {
             display: block;
             margin-top: 8px;
-            font-size: 1.54rem;
+            font-size: 1.5rem;
             font-weight: 780;
             line-height: 1.18;
         }
@@ -181,10 +165,6 @@
             background: var(--soft-amber);
             border-left-color: var(--amber);
         }
-        .callout.bad {
-            background: var(--soft-red);
-            border-left-color: var(--red);
-        }
         .grid-2 {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -204,18 +184,18 @@
             padding: 16px;
         }
         .panel p:last-child { margin-bottom: 0; }
-        .diagram {
+        .chart {
             background: var(--paper);
             border: 1px solid var(--line);
             border-radius: 8px;
             margin: 18px 0 26px;
             overflow: hidden;
         }
-        .diagram-head {
+        .chart-head {
             border-bottom: 1px solid var(--line);
             padding: 14px 16px 10px;
         }
-        .diagram-head p {
+        .chart-head p {
             color: var(--muted);
             font-size: 0.9rem;
             margin: 4px 0 0;
@@ -227,7 +207,7 @@
         .svg-wrap svg {
             display: block;
             width: 100%;
-            min-width: 820px;
+            min-width: 780px;
             height: auto;
         }
         .pass { color: var(--green); font-weight: 760; }
@@ -245,8 +225,8 @@
             border-top: 1px solid var(--line);
         }
         @media (max-width: 860px) {
-            .wrap { width: min(100vw - 24px, 1080px); }
-            h1 { font-size: 1.84rem; }
+            .wrap { width: min(100vw - 24px, 1040px); }
+            h1 { font-size: 1.8rem; }
             .metrics, .grid-2, .grid-3 { grid-template-columns: 1fr; }
             table { display: block; overflow-x: auto; white-space: nowrap; }
         }
@@ -260,301 +240,294 @@
         <a href="smart-router-phase2-safe-control-report.html">Phase 2 报告</a>
         <a href="experiment-plan-rsi-v1.zh.md">RSI 实验计划</a>
         <a href="design-smart-router.md">设计文档</a>
+        <a href="https://github.com/lm-sys/RouteLLM">RouteLLM</a>
         <a href="https://github.com/newdogwang-netizen/aware-gateway/issues/1">Issue #1</a>
     </nav>
 
     <section class="hero">
-        <div class="eyebrow">Technical Report V2 · 2026-09-13 · smart-router / RSI</div>
-        <h1>把 smart-router 从“每轮问模型”推进到“状态化控制层”</h1>
+        <div class="eyebrow">Technical Report V2 · 2026-09-13 · smart-router</div>
+        <h1>从单次 LLM Router 到 Agent 轨迹控制</h1>
         <p class="lede">
-            这一版报告只保留第一阶段到 RSI R1 中真正有解释力的内容：
-            prompt 决策为什么不够，网关层如何记录 episode 状态，哪些本地控制规则能减少无效调用，
-            以及最新一条 <code>shadow-relay</code> canary 为什么算作 screening 通过、但还不能关闭 Issue #1。
+            LLM routing 最容易讲清楚的目标其实只有一句话：
+            <strong>在质量不明显下降的前提下，把模型成本降下来。</strong>
+            RouteLLM 把这件事讲得很干净：强模型、弱模型、一个 threshold，然后画出成本和质量的取舍。
+            aware-gateway 要解决的是同一个问题的 agent 版本：成本不发生在一条 prompt 上，而发生在一整条任务轨迹上。
         </p>
-        <div class="tags">
-            <span class="tag">Gateway routing</span>
-            <span class="tag">Episode state</span>
-            <span class="tag">Outcome-aware control</span>
-            <span class="tag">Harbor benchmark</span>
-            <span class="tag">Cost / quality tradeoff</span>
-        </div>
     </section>
 
     <section class="metrics">
         <div class="metric">
-            <div class="label">最新 canary</div>
+            <div class="label">当前最好样本</div>
             <span class="value">reward 1.0</span>
-            <div class="note"><code>shadow-relay</code> 单条 screening 通过。</div>
+            <div class="note"><code>shadow-relay</code> screening 通过。</div>
         </div>
         <div class="metric">
-            <div class="label">总成本</div>
+            <div class="label">整条轨迹成本</div>
             <span class="value">$1.4194</span>
-            <div class="note">agent $1.3971 + decision $0.0223。</div>
+            <div class="note">包含 agent 和 decision 成本。</div>
         </div>
         <div class="metric">
-            <div class="label">调用结构</div>
-            <span class="value">23 / 3</span>
-            <div class="note">23 次 agent 调用，3 次 semantic decision。</div>
+            <div class="label">semantic judge</div>
+            <span class="value">3 次</span>
+            <div class="note">23 次 agent 调用中只有 3 次问 judge。</div>
         </div>
         <div class="metric">
-            <div class="label">runtime probe</div>
-            <span class="value">271/271</span>
-            <div class="note">控制面确定性检查全部通过。</div>
+            <div class="label">结论边界</div>
+            <span class="value">screening</span>
+            <div class="note">单任务通过，不等于泛化验收。</div>
         </div>
     </section>
 
     <div class="callout">
         <p>
-            当前最准确的项目状态是：<strong>状态化控制层已经在一个代表性任务上跑通闭环</strong>。
-            它证明了网关可以把 trace、tool event、delivery 和 verifier 反馈接进下一轮路由；
-            它还没有证明跨任务泛化，也没有完成 native live tool event hook 和离线策略演进。
+            这篇报告只回答一个问题：aware-gateway 相比经典 query-level router，多做了什么，
+            以及现有数据能支持到哪一步。它不把内部状态机当卖点；状态机只是为了把成本-质量评估做准。
         </p>
     </div>
 
-    <h2>原问题</h2>
+    <h2>先把评估方式说清楚</h2>
     <p>
-        第一阶段的 smart-router 是一个 prompt router：每次请求进来，先把上下文压缩成一个小 prompt，
-        让 decision model 在 Flash 和 Opus 之间选一个。这个设计能工作，但它有三个硬伤。
+        单次请求路由可以用一个简单曲线表达：横轴是强模型调用比例或成本，纵轴是质量。
+        threshold 越保守，强模型用得越多，质量更稳但更贵；threshold 越激进，成本下降，但质量可能掉。
     </p>
-    <div class="grid-3">
-        <div class="panel">
-            <h3>每轮都有 judge 税</h3>
-            <p>文件读取、搜索、格式化输出这类低风险动作也要付一次 decision model 成本和延迟。</p>
-        </div>
-        <div class="panel">
-            <h3>没有任务线记忆</h3>
-            <p>router 只看当前请求，很难知道上一轮模型选择是否真的产生了文件、测试或 verifier 进展。</p>
-        </div>
-        <div class="panel">
-            <h3>成本按轨迹发生</h3>
-            <p>便宜模型如果把 agent 带进十几轮无效探索，总成本不一定低；强模型如果只用在关键点，反而可能更省。</p>
-        </div>
-    </div>
-
-    <h2>网关层怎么改</h2>
     <p>
-        这次没有让 aware-gateway 替 agent 做计划。它只做路由控制：根据已经观察到的证据，判断下一次调用最低需要哪档能力，
-        并把这次选择、预算和后续 outcome 写回 trace。控制粒度从 “model label” 扩展到 “route action”。
+        Agent 任务也应该这么评估，只是横轴不能只看单次请求。一个 coding agent 会在同一任务里连续调用模型、
+        跑命令、读文件、写产物、触发隐藏测试。真正要比较的是整条 trajectory。
     </p>
 
-    <div class="diagram">
-        <div class="diagram-head">
-            <h3>请求路径</h3>
-            <p>smart-router 先走高置信本地控制；不命中时才调用 semantic decision model。</p>
+    <div class="chart">
+        <div class="chart-head">
+            <h3>我们要画的不是单点胜利，而是成本-质量边界</h3>
+            <p>当前只有一个通过样本，下一步要补的是不同任务、不同策略的曲线。</p>
         </div>
         <div class="svg-wrap">
-            <svg viewBox="0 0 1040 390" role="img" aria-label="aware-gateway request path">
+            <svg viewBox="0 0 960 430" role="img" aria-label="cost quality frontier">
                 <defs>
                     <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
                         <path d="M0,0 L10,5 L0,10 Z" fill="#667085"></path>
                     </marker>
                     <style>
-                        .box { fill: #ffffff; stroke: #d9dee8; stroke-width: 1.5; rx: 8; }
-                        .blue { fill: #edf5ff; stroke: #175cd3; }
-                        .green { fill: #ecfdf3; stroke: #067647; }
-                        .amber { fill: #fff8db; stroke: #9a6700; }
-                        .red { fill: #fff1f0; stroke: #b42318; }
-                        .text { font: 15px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; fill: #18212f; }
-                        .smallText { font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; fill: #667085; }
-                        .link { stroke: #667085; stroke-width: 1.6; fill: none; marker-end: url(#arrow); }
+                        .axis { stroke: #667085; stroke-width: 1.6; marker-end: url(#arrow); }
+                        .grid { stroke: #eef1f6; stroke-width: 1; }
+                        .curve { fill: none; stroke: #175cd3; stroke-width: 4; }
+                        .curve2 { fill: none; stroke: #067647; stroke-width: 4; }
+                        .dot { fill: #ffffff; stroke-width: 3; }
+                        .d1 { stroke: #175cd3; }
+                        .d2 { stroke: #067647; }
+                        .txt { font: 15px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; fill: #18212f; }
+                        .small { font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; fill: #667085; }
                     </style>
                 </defs>
-                <rect class="box" x="24" y="150" width="130" height="72"></rect>
-                <text class="text" x="48" y="181">Client</text>
-                <text class="smallText" x="48" y="203">model=auto</text>
-
-                <rect class="blue" x="210" y="132" width="180" height="108"></rect>
-                <text class="text" x="236" y="166">aware-gateway</text>
-                <text class="smallText" x="236" y="190">plugin chain</text>
-                <text class="smallText" x="236" y="211">audit + proxy</text>
-
-                <rect class="amber" x="455" y="48" width="210" height="90"></rect>
-                <text class="text" x="482" y="80">Safe-control</text>
-                <text class="smallText" x="482" y="103">cheap / premium / stop</text>
-                <text class="smallText" x="482" y="122">deterministic rules</text>
-
-                <rect class="blue" x="455" y="164" width="210" height="90"></rect>
-                <text class="text" x="482" y="196">Decision prompt</text>
-                <text class="smallText" x="482" y="219">only when rule misses</text>
-                <text class="smallText" x="482" y="238">returns model + action</text>
-
-                <rect class="green" x="725" y="132" width="190" height="108"></rect>
-                <text class="text" x="752" y="166">Upstream model</text>
-                <text class="smallText" x="752" y="190">Flash or Opus</text>
-                <text class="smallText" x="752" y="211">budget profile applied</text>
-
-                <rect class="red" x="455" y="282" width="210" height="76"></rect>
-                <text class="text" x="482" y="314">Local stop gate</text>
-                <text class="smallText" x="482" y="337">HTTP 409, no spend</text>
-
-                <path class="link" d="M154 186 H210"></path>
-                <path class="link" d="M390 165 C420 130 420 100 455 93"></path>
-                <path class="link" d="M390 205 H455"></path>
-                <path class="link" d="M665 93 C694 120 696 151 725 174"></path>
-                <path class="link" d="M665 209 H725"></path>
-                <path class="link" d="M560 254 V282"></path>
-                <path class="link" d="M915 186 H990"></path>
-                <text class="smallText" x="934" y="174">response</text>
+                <line class="grid" x1="110" y1="85" x2="110" y2="340"></line>
+                <line class="grid" x1="280" y1="85" x2="280" y2="340"></line>
+                <line class="grid" x1="450" y1="85" x2="450" y2="340"></line>
+                <line class="grid" x1="620" y1="85" x2="620" y2="340"></line>
+                <line class="grid" x1="790" y1="85" x2="790" y2="340"></line>
+                <line class="grid" x1="90" y1="280" x2="840" y2="280"></line>
+                <line class="grid" x1="90" y1="220" x2="840" y2="220"></line>
+                <line class="grid" x1="90" y1="160" x2="840" y2="160"></line>
+                <line class="axis" x1="90" y1="340" x2="860" y2="340"></line>
+                <line class="axis" x1="90" y1="340" x2="90" y2="60"></line>
+                <text class="txt" x="390" y="390">成本 / 强模型调用比例 / 整条轨迹花费</text>
+                <text class="txt" x="18" y="48">质量</text>
+                <path class="curve" d="M135 284 C240 250, 350 188, 498 148 C610 118, 720 105, 815 98"></path>
+                <path class="curve2" d="M130 305 C220 260, 330 212, 475 168 C610 132, 700 112, 770 106"></path>
+                <circle class="dot d1" cx="505" cy="146" r="8"></circle>
+                <text class="small" x="518" y="143">query-level router</text>
+                <text class="small" x="518" y="160">单次 prompt</text>
+                <circle class="dot d2" cx="318" cy="217" r="8"></circle>
+                <text class="small" x="332" y="214">agent router</text>
+                <text class="small" x="332" y="231">整条 trajectory</text>
+                <text class="small" x="135" y="325">省钱但风险高</text>
+                <text class="small" x="692" y="86">质量稳但贵</text>
             </svg>
         </div>
     </div>
 
-    <h2>核心抽象</h2>
-    <p>
-        V2 的核心不是“多加几条规则”，而是把路由变成一个可审计的控制回路。每一轮路由都能回答：
-        它看到哪些状态、选择了哪个动作、动作之后是否真的推进了任务。
-    </p>
     <table>
         <tr>
-            <th>抽象</th>
-            <th>现在的实现</th>
-            <th>为什么重要</th>
+            <th>指标</th>
+            <th>RouteLLM 风格</th>
+            <th>Agent 场景下的 aware-gateway 口径</th>
         </tr>
         <tr>
-            <td><code>Episode</code></td>
-            <td>用 <code>X-Episode-ID</code>、<code>X-Session-ID</code>、<code>X-Trial-Name</code> 解析当前任务线，并维护最小 session stack。</td>
-            <td>router 不再只看当前请求，而是知道同一条任务线之前发生过什么。</td>
+            <td>质量</td>
+            <td>benchmark score 或强模型性能保留率。</td>
+            <td>hidden verifier reward、solved rate、最终交付是否通过。</td>
         </tr>
         <tr>
-            <td><code>Event</code></td>
-            <td>接收或抽取 <code>llm_call</code>、<code>tool_call</code>、<code>file_written</code>、<code>test_run</code>、<code>verifier_result</code> 等事件。</td>
-            <td>把“模型说了什么”之外的事实纳入路由，例如是否写了交付文件、测试是否真的过了。</td>
+            <td>成本</td>
+            <td>一次回答使用强/弱模型带来的成本。</td>
+            <td>整条 trajectory 成本：agent 调用、decision 调用、失败和 stop 前已花掉的钱。</td>
         </tr>
         <tr>
-            <td><code>State</code></td>
-            <td>reducer 维护 cost、tokens、progress tier、route outcome、length pressure、failure frontier、completion readiness。</td>
-            <td>把原始 trace 归约成下一轮决策可用的紧凑状态。</td>
+            <td>调节旋钮</td>
+            <td>router threshold，控制强模型调用比例。</td>
+            <td>状态阈值和 route action：什么时候 cheap probe、什么时候 premium recover、什么时候 stop。</td>
         </tr>
         <tr>
-            <td><code>Route Action</code></td>
-            <td><code>cheap_probe</code>、<code>cheap_execute</code>、<code>hypothesis_apply</code>、<code>premium_reason</code>、<code>premium_recover</code>、<code>freeze_or_replan</code>、<code>completion_guardrail</code>。</td>
-            <td>一次路由不只是选模型，还要选预算、timeout 和必要的 agent instruction。</td>
-        </tr>
-        <tr>
-            <td><code>Outcome</code></td>
-            <td>把路由后的文件、测试、verifier、no-progress 和 execution-stall 反馈关联回上一轮 route。</td>
-            <td>后续可以判断某类策略是在推进任务，还是只是制造更多调用。</td>
+            <td>曲线</td>
+            <td>不同 threshold 下的 cost-quality frontier。</td>
+            <td>不同策略、不同任务、不同 stop gate 下的 solved cost frontier。</td>
         </tr>
     </table>
 
-    <h2>控制回路</h2>
-    <div class="diagram">
-        <div class="diagram-head">
-            <h3>Route -> Event -> State -> Next Action</h3>
-            <p>这个回路是 RSI R1 的主要交付：真实运行数据进入状态，状态反过来约束下一次路由。</p>
+    <h2>RouteLLM 和我们到底差在哪</h2>
+    <p>
+        RouteLLM 的核心链路可以简化成：看一条 query，估计强模型胜率，和 threshold 比较，决定走强模型还是弱模型。
+        这个问题足够清楚，所以它的 README 很好懂。
+    </p>
+    <pre><code>query -> router estimates strong_model_win_rate
+      -> compare with threshold
+      -> choose strong_model or weak_model</code></pre>
+    <p>
+        aware-gateway 当前要处理的是 agent 轨迹。某一轮请求看起来可能只是“读文件”，但它处在不同阶段时含义完全不同：
+        早期读文件是探索；已经有候选答案后还在读文件，可能是在拖延交付；测试失败后再读文件，可能是在恢复。
+        所以单看当前 prompt 不够，必须看它前面发生过什么。
+    </p>
+    <pre><code>agent turn -> gateway route -> model call -> tool/file/test/verifier events
+           -> episode state -> next route action -> outcome</code></pre>
+
+    <div class="grid-2">
+        <div class="panel">
+            <h3>RouteLLM 解决的是 query-level routing</h3>
+            <p>强/弱模型二选一，重点是 threshold 校准和评估曲线。它适合普通问答或单轮服务里的模型替换。</p>
         </div>
-        <div class="svg-wrap">
-            <svg viewBox="0 0 1040 430" role="img" aria-label="outcome aware control loop">
-                <defs>
-                    <marker id="arrow2" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
-                        <path d="M0,0 L10,5 L0,10 Z" fill="#667085"></path>
-                    </marker>
-                    <style>
-                        .b { fill: #ffffff; stroke: #d9dee8; stroke-width: 1.5; rx: 8; }
-                        .b1 { fill: #edf5ff; stroke: #175cd3; }
-                        .b2 { fill: #ecfdf3; stroke: #067647; }
-                        .b3 { fill: #fff8db; stroke: #9a6700; }
-                        .b4 { fill: #fff1f0; stroke: #b42318; }
-                        .t { font: 15px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; fill: #18212f; }
-                        .s { font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif; fill: #667085; }
-                        .a { stroke: #667085; stroke-width: 1.6; fill: none; marker-end: url(#arrow2); }
-                    </style>
-                </defs>
-                <rect class="b1" x="60" y="58" width="180" height="84"></rect>
-                <text class="t" x="88" y="91">Route decision</text>
-                <text class="s" x="88" y="115">model + budget_action</text>
-
-                <rect class="b2" x="330" y="58" width="180" height="84"></rect>
-                <text class="t" x="359" y="91">Agent turn</text>
-                <text class="s" x="359" y="115">tool / file / test</text>
-
-                <rect class="b3" x="600" y="58" width="190" height="84"></rect>
-                <text class="t" x="628" y="91">Event projection</text>
-                <text class="s" x="628" y="115">observed / derived / inferred</text>
-
-                <rect class="b" x="390" y="206" width="260" height="108"></rect>
-                <text class="t" x="430" y="240">Episode reducer</text>
-                <text class="s" x="430" y="264">progress tier, readiness</text>
-                <text class="s" x="430" y="284">route outcome, stop pressure</text>
-
-                <rect class="b4" x="760" y="206" width="190" height="108"></rect>
-                <text class="t" x="790" y="240">Control policy</text>
-                <text class="s" x="790" y="264">floor / recover / stop</text>
-                <text class="s" x="790" y="284">audit reason</text>
-
-                <rect class="b2" x="96" y="272" width="210" height="84"></rect>
-                <text class="t" x="126" y="305">Verifier outcome</text>
-                <text class="s" x="126" y="329">reward / hidden tests</text>
-
-                <path class="a" d="M240 100 H330"></path>
-                <path class="a" d="M510 100 H600"></path>
-                <path class="a" d="M695 142 C690 184 650 207 630 225"></path>
-                <path class="a" d="M650 260 H760"></path>
-                <path class="a" d="M855 206 C845 150 780 106 790 100"></path>
-                <path class="a" d="M420 142 C360 210 285 243 240 272"></path>
-                <path class="a" d="M306 314 C360 334 436 326 462 314"></path>
-            </svg>
+        <div class="panel">
+            <h3>aware-gateway 解决的是 trajectory-level control</h3>
+            <p>一次任务里有几十次调用，router 必须知道是否有真实进展，并把下一轮变成更小、更准、或及时停止。</p>
         </div>
     </div>
 
-    <h2>V2 新增的状态信号</h2>
+    <h2>当前架构</h2>
     <p>
-        旧版本只知道模型响应是否截断、调用是否报错。V2 把“正在推进”拆得更细，尤其区分 activity 和 progress。
-        读文件、打印日志、重复运行命令是 activity；写出候选、验证候选、通过 verifier 才能改变 completion readiness。
+        smart-router 现在有三层。第一层是本地 safe-control，处理确定性场景；第二层是 prompt router，处理模糊判断；
+        第三层是 Episode 状态，把上一次选择和后续结果关联起来，影响下一次路由。
+    </p>
+    <table>
+        <tr>
+            <th>层</th>
+            <th>做什么</th>
+            <th>例子</th>
+        </tr>
+        <tr>
+            <td>Safe-control</td>
+            <td>不用问 judge，直接做高置信路由。</td>
+            <td>读文件走 Flash；重复错误或 verifier 失败走 Opus；超成本且无交付证据则本地 stop。</td>
+        </tr>
+        <tr>
+            <td>Prompt router</td>
+            <td>模糊场景仍用语义判断。</td>
+            <td>早期协议建模、复杂恢复、隐藏测试 gap、关键路径推理。</td>
+        </tr>
+        <tr>
+            <td>Episode state</td>
+            <td>记录同一任务线的历史和结果。</td>
+            <td>是否有文件写入、是否有测试通过、是否只是探索、是否连续截断、是否已经接近交付。</td>
+        </tr>
+    </table>
+
+    <h2>路由动作比模型名更重要</h2>
+    <p>
+        只说“选 Flash 还是 Opus”不够。一次路由还应该说明这轮要做什么、给多少输出空间、是否允许继续探索。
+        所以我们把 decision 扩成了 route action。
+    </p>
+    <table>
+        <tr>
+            <th>Action</th>
+            <th>意思</th>
+            <th>通常模型</th>
+        </tr>
+        <tr>
+            <td><code>cheap_probe</code></td>
+            <td>读文件、搜索、看日志、做小范围事实收集。</td>
+            <td>Flash</td>
+        </tr>
+        <tr>
+            <td><code>cheap_execute</code></td>
+            <td>已知方向下的执行、格式化、简单验证或交付写入。</td>
+            <td>Flash</td>
+        </tr>
+        <tr>
+            <td><code>premium_reason</code></td>
+            <td>早期建模、协议推理、关键路径判断。</td>
+            <td>Opus</td>
+        </tr>
+        <tr>
+            <td><code>premium_recover</code></td>
+            <td>假设被反证、测试失败、卡住后换方向。</td>
+            <td>Opus</td>
+        </tr>
+        <tr>
+            <td><code>freeze_or_replan</code></td>
+            <td>长时间探索无进展时，停止扩大预算，先重规划。</td>
+            <td>Opus，短预算</td>
+        </tr>
+        <tr>
+            <td><code>hypothesis_apply</code></td>
+            <td>replan 已经形成假设后，下一轮只能应用、验证或放弃这条假设。</td>
+            <td>Flash 或按状态升级</td>
+        </tr>
+        <tr>
+            <td><code>completion_guardrail</code></td>
+            <td>最终完成确认必须看交付证据，不能只看模型说“完成了”。</td>
+            <td>Opus</td>
+        </tr>
+    </table>
+
+    <h2>这一轮真正改动了什么</h2>
+    <p>
+        旧版本已经能 stop 坏轨迹，但还不知道“某条分析是否已经足够交付”。这轮的关键是把中间进展也变成事件，
+        让 router 不再只看到 length、cost 和错误。
     </p>
     <table>
         <tr>
             <th>信号</th>
-            <th>触发后下一步</th>
-            <th>边界</th>
+            <th>为什么加</th>
+            <th>下一轮怎么用</th>
         </tr>
         <tr>
             <td><code>analysis_progress</code></td>
-            <td>本地路由 <code>cheap_execute</code>，要求把已验证事实转成命令、验证或交付。</td>
-            <td>它是 inferred 事件，只能作为控制信号，不能伪装成 verifier 通过。</td>
+            <td>agent 已经解出关键事实或候选答案，但还没写入交付。</td>
+            <td>下一轮走 <code>cheap_execute</code>，要求把事实转成命令、验证或交付。</td>
         </tr>
         <tr>
             <td><code>replan_hypothesis</code></td>
-            <td>进入 <code>hypothesis_apply</code>，只验证/应用当前假设，避免重新宽泛探索。</td>
-            <td>如果 apply 被 length 截断，只给一次 premium recovery。</td>
+            <td>replan 之后必须知道新假设是什么。</td>
+            <td>下一轮走 <code>hypothesis_apply</code>，验证、实现或放弃这条假设。</td>
         </tr>
         <tr>
-            <td><code>delivery_candidate_needs_delivery</code></td>
-            <td>本地路由 <code>cheap_execute</code>，要求把已有候选写到交付目标或做一个窄验证。</td>
-            <td>连续提醒不落地会变成 <code>delivery_candidate_floor_exhausted</code>，再升级一次 recovery。</td>
+            <td><code>delivery_candidate</code></td>
+            <td>已经有中间产物，但迟迟不写最终输出。</td>
+            <td>提醒一次 cheap delivery；多次不落地再 premium recover。</td>
         </tr>
         <tr>
             <td><code>execution_stall</code></td>
-            <td>连续 stall 后路由 <code>premium_recover</code>，要求恢复非交互式短命令。</td>
-            <td>它描述执行通道卡住，不等于模型能力不足。</td>
-        </tr>
-        <tr>
-            <td><code>completion_readiness</code></td>
-            <td>delivery/test/verifier 证据足够时进入 premium assessment 或 final guardrail。</td>
-            <td><code>finish_reason=stop</code> 不是完成；最终完成必须来自交付和 verifier/outcome。</td>
+            <td>shell/heredoc/交互式命令卡住，继续让模型续写没有意义。</td>
+            <td>要求恢复一个短的非交互命令或直接交付。</td>
         </tr>
     </table>
 
-    <h2>关键实验数据</h2>
+    <h2>关键数据</h2>
     <p>
-        报告里只保留能解释策略演进的数据点。单条失败不拿来做质量结论，但失败轨迹用来定位控制问题。
+        下面这张表保留了真正推动设计变化的几条样本。重点不是每个 run 的细节，而是每个样本暴露了什么。
     </p>
     <table>
         <tr>
-            <th>阶段</th>
+            <th>样本</th>
             <th class="num">Reward</th>
             <th class="num">Cost</th>
-            <th class="num">Agent</th>
-            <th class="num">Decision</th>
-            <th>说明</th>
+            <th class="num">Agent calls</th>
+            <th class="num">Decision calls</th>
+            <th>结论</th>
         </tr>
         <tr>
-            <td>Phase 1 最好 live run</td>
+            <td>Phase 1 prompt router best</td>
             <td class="num pass">1.0</td>
             <td class="num">$2.6803</td>
             <td class="num">14</td>
             <td class="num">13</td>
-            <td>prompt router 能完成任务，但几乎每轮都要问 judge。</td>
+            <td>能完成，但几乎每轮都问 judge。</td>
         </tr>
         <tr>
             <td>A1 safe-control</td>
@@ -562,7 +535,7 @@
             <td class="num">$2.2468</td>
             <td class="num">22</td>
             <td class="num">10</td>
-            <td>本地规则减少 decision 税，质量没有下降。</td>
+            <td>本地规则可以降低 decision 税，质量没有掉。</td>
         </tr>
         <tr>
             <td>A4 budgeted route</td>
@@ -570,15 +543,15 @@
             <td class="num">$3.4808</td>
             <td class="num">44</td>
             <td class="num">23</td>
-            <td>预算动作能工作，但 21/44 次 length 截断把轨迹切碎。</td>
+            <td>预算动作能工作，但 21/44 次 length 截断让轨迹变碎。</td>
         </tr>
         <tr>
-            <td>A5 episode-budget</td>
+            <td>A5 length feedback</td>
             <td class="num warn-text">stopped</td>
             <td class="num">$7.0576</td>
             <td class="num">59</td>
             <td class="num">29</td>
-            <td>只根据 length 放大预算会失控，证明机制可用但策略失败。</td>
+            <td>只看到 length 就放大预算会失控。</td>
         </tr>
         <tr>
             <td>long-exploration stop</td>
@@ -586,7 +559,7 @@
             <td class="num">$0.4325</td>
             <td class="num">9</td>
             <td class="num">3</td>
-            <td>无有效进展时能早停，控制了成本，但没有完成任务。</td>
+            <td>能早停省钱，但不会自动提高质量。</td>
         </tr>
         <tr>
             <td>V2 outcome-aware canary</td>
@@ -594,153 +567,172 @@
             <td class="num">$1.4194</td>
             <td class="num">23</td>
             <td class="num">3</td>
-            <td>状态控制闭环首次在 <code>shadow-relay</code> 上跑通。</td>
+            <td>状态控制闭环在 <code>shadow-relay</code> 上首次跑通。</td>
         </tr>
     </table>
 
     <div class="callout good">
         <p>
-            最新 canary 的成本低于 A1/A4 两条历史成功锚点；decision call 从 Phase 1 最好样本的 13 次降到 3 次。
-            这说明本地状态控制确实能替代一部分 semantic judge，而不是简单退化成 all-premium。
+            最新样本比 A1 和 A4 都便宜，同时保住了 reward 1.0。更重要的是，semantic decision 从 Phase 1 最好样本的
+            13 次降到 3 次，说明本地状态控制确实替掉了一部分 judge，而不是简单把所有请求都交给 Opus。
         </p>
     </div>
 
-    <h2>最新 canary 轨迹</h2>
+    <h2>最新样本发生了什么</h2>
     <p>
-        成功样本来自 <code>/mnt/data2/aware-gateway-runs/aware-v4-20260910T152950Z</code>。
-        这个样本的重点不是 secret 本身，而是路由闭环：分析进展被捕获，下一轮被压成执行动作，
-        cheap application 未落地后只升级一次 recovery，最后写入交付文件并通过 verifier。
+        最新 canary 是 <code>shadow-relay__FRkn4xR</code>。它不是靠一次大模型长回答冲过去的，
+        而是走了一条可观察的链路：
     </p>
+    <pre><code>分析得到关键事实
+-> analysis_progress 进入 episode state
+-> cheap_execute 尝试把事实落到命令/交付
+-> 多次未落地后触发一次 premium_recover
+-> 写入 /app/output/flag.txt 和 /app/output/analysis.json
+-> verifier 8/8 passed, reward=1.0</code></pre>
     <table>
         <tr>
-            <th>指标</th>
+            <th>项目</th>
             <th>值</th>
         </tr>
         <tr>
-            <td>Artifact</td>
-            <td><code>aware-v4-20260910T152950Z</code></td>
+            <td>总成本</td>
+            <td><code>$1.41938494</code>，其中 agent <code>$1.39705894</code>，decision <code>$0.022326</code>。</td>
         </tr>
         <tr>
-            <td>Trial</td>
-            <td><code>shadow-relay__FRkn4xR</code></td>
+            <td>模型调用</td>
+            <td>23 次 agent 调用；3 次 semantic decision。</td>
         </tr>
         <tr>
-            <td>Route actions</td>
-            <td><code>cheap_execute:11</code>, <code>cheap_probe:6</code>, <code>premium_recover:3</code>, <code>premium_reason:1</code>, <code>freeze_or_replan:1</code>, <code>completion_guardrail:1</code></td>
+            <td>路由动作</td>
+            <td><code>cheap_execute:11</code>, <code>cheap_probe:6</code>, <code>premium_recover:3</code>, <code>premium_reason:1</code>, <code>freeze_or_replan:1</code>, <code>completion_guardrail:1</code>。</td>
         </tr>
         <tr>
-            <td>Safe-control rules</td>
-            <td><code>episode_analysis_progress_application:10</code>, <code>episode_analysis_progress_application_recovery:2</code>, <code>episode_long_exploration_replan:1</code>, <code>episode_no_progress_recovery:1</code>, <code>file_read_search_cheap:3</code>, <code>fixed_format_output_cheap:1</code>, <code>premium_cooldown:1</code></td>
+            <td>截断率</td>
+            <td>5/23，约 <code>21.74%</code>。A4 是 21/44，约 <code>47.7%</code>。</td>
         </tr>
         <tr>
-            <td>Length pressure</td>
-            <td>5 / 23 agent calls，rate <code>21.74%</code></td>
-        </tr>
-        <tr>
-            <td>Final evidence</td>
-            <td><code>/app/output/flag.txt</code> 和 <code>/app/output/analysis.json</code> 写入；verifier 8/8 通过；reward <code>1.0</code>。</td>
+            <td>最终证据</td>
+            <td><code>/app/output</code> 写入、1 次测试通过、1 次 verifier result、reward <code>1.0</code>。</td>
         </tr>
     </table>
 
-    <h2>离线复原</h2>
+    <h2>离线复原为什么重要</h2>
     <p>
-        这条成功轨迹也跑了 strict offline extract。它说明线上状态不是只在内存里临时成立，
-        后处理脚本可以从 artifact 和 trace 重建出同一条 episode timeline，并保证 replay 样本没有读到未来证据。
+        如果只看线上成功，很容易讲成故事。我们还用 extractor 从 artifact 和 trace 里重建了 episode timeline，
+        并检查 replay 样本没有偷看未来事件。
     </p>
     <table>
         <tr>
-            <th>事件类型</th>
+            <th>事件</th>
             <th class="num">数量</th>
-            <th>含义</th>
         </tr>
         <tr>
             <td><code>llm_call</code></td>
             <td class="num">23</td>
-            <td>agent 模型调用。</td>
         </tr>
         <tr>
             <td><code>tool_call</code></td>
             <td class="num">40</td>
-            <td>Harbor 可见工具调用。</td>
         </tr>
         <tr>
             <td><code>analysis_progress</code></td>
             <td class="num">7</td>
-            <td>已验证事实、解码产物或候选答案。</td>
         </tr>
         <tr>
             <td><code>file_written</code> / <code>file_modified</code></td>
             <td class="num">4 / 1</td>
-            <td>中间产物和交付相关写入。</td>
         </tr>
         <tr>
             <td><code>test_run</code> / <code>test_passed</code></td>
             <td class="num">1 / 1</td>
-            <td>本地或 verifier 侧验证信号。</td>
         </tr>
         <tr>
             <td><code>verifier_result</code></td>
             <td class="num">1</td>
-            <td>最终 reward 证据。</td>
         </tr>
         <tr>
-            <td>Replay cutoff</td>
-            <td class="num">0 leak</td>
-            <td>3 个 replay 样本没有读取 decision 之后才发生的事件。</td>
+            <td>Replay future evidence leakage</td>
+            <td class="num">0</td>
         </tr>
     </table>
 
-    <h2>现在可以接受什么</h2>
+    <h2>现在能接受什么，不能接受什么</h2>
     <div class="grid-2">
         <div class="panel">
             <h3 class="pass">可以接受</h3>
             <ul>
-                <li>safe-control 子里程碑可以算完成。</li>
-                <li>Budgeted Route Action 的 plumbing 已经验证。</li>
-                <li>Episode/Event 最小 runtime 能影响路由，并能被 trace/replay 审计。</li>
-                <li><code>shadow-relay</code> 上 outcome-aware online control screening 通过。</li>
+                <li>safe-control 作为子里程碑完成。</li>
+                <li>route action 能控制模型、预算、timeout 和必要的 agent instruction。</li>
+                <li>Episode state 能把 outcome 带回下一轮路由。</li>
+                <li><code>shadow-relay</code> 上 V2 screening 通过，成本优于历史成功样本。</li>
             </ul>
         </div>
         <div class="panel">
             <h3 class="warn-text">还不能接受</h3>
             <ul>
-                <li>不能因为单条 canary 就说策略泛化。</li>
-                <li><code>analysis_progress</code> 仍是 inferred，需要更多任务验证误报率。</li>
-                <li>native tool event hook 还没有接到 agent runtime。</li>
-                <li>还没有每任务 3 次以上的 acceptance 数据。</li>
+                <li>不能说策略已经泛化。当前只有一个代表性任务的单次成功。</li>
+                <li><code>analysis_progress</code> 是 inferred 信号，需要更多任务验证误报。</li>
+                <li>Harbor 仍靠 artifact watcher，native tool event hook 还没接到 agent runtime。</li>
+                <li>还没有画出多任务 cost-quality frontier。</li>
             </ul>
         </div>
     </div>
 
-    <h2>工程经验</h2>
-    <ol>
-        <li><code>finish_reason=stop</code> 只能说明一次响应结束，不能当成任务完成。</li>
-        <li>activity 和 progress 必须分开。读文件、搜索、打印更多日志不应该清空 no-progress 压力。</li>
-        <li>路由成本要按整条 trajectory 算，不按单次调用价格算。</li>
-        <li>本地规则只能处理高置信动作；实现、恢复、隐藏测试 gap 仍需要 semantic 或 premium reasoning。</li>
-        <li>强模型应该买“方向改变”和“关键收尾”，不应该买越来越长的原地续写。</li>
-        <li>每个状态 floor 都要有退出条件，否则很快变成另一种死循环。</li>
-        <li>离线 replay 可以筛掉坏策略，但不能替代真实 benchmark。</li>
-    </ol>
-
-    <h2>下一步</h2>
+    <h2>下一步怎么按 RouteLLM 的思路评估</h2>
     <p>
-        接下来不应该继续围绕 <code>shadow-relay</code> 调阈值。更有价值的工作是把同一套状态控制拿去跑 holdout：
-        选一个短数据/算法任务，保持任务名无特例，先做 1 次 screening；如果不回退，再按每任务至少 3 次做 acceptance。
+        下一步不应该继续围绕 <code>shadow-relay</code> 调阈值。应该把它变成一组可比较曲线：
+        不同策略、不同任务、不同强模型使用比例下，solved rate 和 cost per success 怎么变。
     </p>
-    <pre><code>Next milestone:
-1. holdout task screening
-2. native live tool event hook
-3. route-outcome policy gate on repeated runs
-4. offline policy evolution after enough task diversity</code></pre>
+    <table>
+        <tr>
+            <th>要补的数据</th>
+            <th>做法</th>
+        </tr>
+        <tr>
+            <td>任务多样性</td>
+            <td>保留 <code>shadow-relay</code> 作为协议/逆向任务，再选一个短数据或算法任务做 holdout。</td>
+        </tr>
+        <tr>
+            <td>策略曲线</td>
+            <td>不是只跑一个配置，而是扫几档：更省钱、更均衡、更保守。</td>
+        </tr>
+        <tr>
+            <td>质量口径</td>
+            <td>主指标用 reward / solved rate；辅助看 hidden verifier 前是否有交付证据。</td>
+        </tr>
+        <tr>
+            <td>成本口径</td>
+            <td>用 cost per attempt 和 cost per success，失败和 stop 前成本都算进去。</td>
+        </tr>
+        <tr>
+            <td>验收门槛</td>
+            <td>screening 只需要 1 次；acceptance 至少每任务 3 次，不用单次运气关 Issue。</td>
+        </tr>
+    </table>
+
+    <pre><code>目标曲线：
+quality = solved rate / verifier reward
+cost = total trajectory cost
+control = premium share + decision calls + no-progress loops
+
+接受策略：
+同等质量下更低 cost_per_success
+或同等成本下更高 solved rate</code></pre>
+
+    <h2>一句话总结</h2>
+    <p>
+        RouteLLM 给我们的启发是：先把路由问题讲成成本-质量曲线，再谈模型怎么选。
+        aware-gateway 当前的差异是评估单位变了：不是一条 query，而是一整条 agent trajectory。
+        V2 的价值不在于多几个状态名，而在于它开始把“这轮选择之后到底有没有推进任务”变成可记录、可 replay、可验收的数据。
+    </p>
 
     <section class="footnote">
         <p>
-            代码状态：最新实现已提交为 <code>831c11e</code>。最新 canary artifact 记录的 base commit 是
-            <code>bc98c9c</code> 加工作区补丁；该补丁随后提交为 <code>831c11e</code>。
-            相关实现集中在 <code>plugins/smartrouter/episode.go</code>、<code>plugins/smartrouter/safe_control.go</code>、
-            <code>plugins/smartrouter/budget.go</code>、<code>scripts/extract_episode_outcomes.py</code> 和
-            <code>scripts/run_safe_control_probe.py</code>。
+            代码状态：核心实现已提交为 <code>831c11e</code>，本文更新提交在其后。
+            最新 canary artifact：<code>/mnt/data2/aware-gateway-runs/aware-v4-20260910T152950Z</code>。
+            相关实现集中在 <code>plugins/smartrouter/episode.go</code>、
+            <code>plugins/smartrouter/safe_control.go</code>、<code>plugins/smartrouter/budget.go</code>、
+            <code>scripts/extract_episode_outcomes.py</code> 和 <code>scripts/run_safe_control_probe.py</code>。
         </p>
     </section>
 </main>
