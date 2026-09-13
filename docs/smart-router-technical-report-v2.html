@@ -184,6 +184,37 @@
             padding: 16px;
         }
         .panel p:last-child { margin-bottom: 0; }
+        .term-sheet {
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            margin: 22px 0 26px;
+            padding: 16px;
+        }
+        .term-sheet h2 {
+            margin-top: 0;
+        }
+        .term-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .term {
+            border: 1px solid #e3e8f2;
+            border-radius: 8px;
+            padding: 12px;
+        }
+        .term strong {
+            display: block;
+            line-height: 1.25;
+            margin-bottom: 4px;
+        }
+        .term p {
+            color: #475467;
+            font-size: 0.88rem;
+            margin: 0;
+        }
         .flow-map {
             background: #eef5ff;
             border: 1px solid #c7d7f2;
@@ -301,6 +332,37 @@
             font-size: 0.88rem;
             margin: 0;
         }
+        .plain-steps {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+            margin: 14px 0 22px;
+        }
+        .plain-step {
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            padding: 12px;
+        }
+        .plain-step strong {
+            display: block;
+            margin-bottom: 4px;
+        }
+        .plain-step p {
+            color: #475467;
+            font-size: 0.88rem;
+            margin: 0;
+        }
+        .path-list {
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            margin: 14px 0 22px;
+            padding: 12px 18px 12px 34px;
+        }
+        .path-list li {
+            padding-left: 4px;
+        }
         .pass { color: var(--green); font-weight: 760; }
         .warn-text { color: var(--amber); font-weight: 760; }
         .fail { color: var(--red); font-weight: 760; }
@@ -318,7 +380,7 @@
         @media (max-width: 860px) {
             .wrap { width: min(100vw - 24px, 1040px); }
             h1 { font-size: 1.8rem; }
-            .metrics, .grid-2, .grid-3 { grid-template-columns: 1fr; }
+            .metrics, .grid-2, .grid-3, .term-grid, .plain-steps { grid-template-columns: 1fr; }
             .flow-grid {
                 grid-template-columns: 1fr;
             }
@@ -348,35 +410,105 @@
     </nav>
 
     <section class="hero">
-        <div class="eyebrow">Technical Report V2 / 2026-09-13 / smart-router</div>
-        <h1>从单次 LLM Router 到 Agent 轨迹控制</h1>
+        <div class="eyebrow">技术报告 V2 / 2026-09-13 / 模型路由实验</div>
+        <h1>从单次模型选择到整条任务控制</h1>
         <p class="lede">
-            LLM routing 最容易讲清楚的目标其实只有一句话：
-            <strong>在质量不明显下降的前提下，把模型成本降下来。</strong>
-            经典单次路由可以把这件事讲得很干净：强模型、弱模型、一个阈值，然后画出成本和质量的取舍。
-            aware-gateway 要解决的是同一个问题的 agent 版本：成本不发生在一次请求上，而发生在一整条任务轨迹上。
+            先把问题讲白：LLM 是大语言模型；Agent 是会自己读文件、跑命令、改代码的自动化程序；
+            aware-gateway 是夹在 Agent 和模型服务之间的一层网关。这个实验要做的事是：
+            <strong>在任务质量不明显下降的前提下，让网关少花钱、少问裁判、少走弯路。</strong>
         </p>
+    </section>
+
+    <section class="term-sheet">
+        <h2>先把词说清楚</h2>
+        <p>后文第一次遇到这些词时，都按这里的意思理解。</p>
+        <div class="term-grid">
+            <div class="term">
+                <strong>模型路由</strong>
+                <p>每次请求到来时，决定用便宜模型还是强模型。</p>
+            </div>
+            <div class="term">
+                <strong>smart-router</strong>
+                <p>aware-gateway 里的模型路由插件。本文讨论的改动主要发生在这里。</p>
+            </div>
+            <div class="term">
+                <strong>Flash / Opus</strong>
+                <p>Flash 指便宜模型，适合读文件和简单执行；Opus 指强模型，适合复杂推理和失败恢复。</p>
+            </div>
+            <div class="term">
+                <strong>Upstream</strong>
+                <p>真正处理请求的模型服务。网关决定路线后，请求才会发到这里。</p>
+            </div>
+            <div class="term">
+                <strong>Router / Judge / Decision</strong>
+                <p>Router 是做选择的模块；Judge 是语义裁判；Decision 是裁判给出的一次选择结果。</p>
+            </div>
+            <div class="term">
+                <strong>Semantic judge</strong>
+                <p>语义裁判调用次数。次数越少，说明越多选择由本地状态直接完成。</p>
+            </div>
+            <div class="term">
+                <strong>Route action</strong>
+                <p>不只选模型，还告诉下一轮该探索、执行、恢复、停止，或者确认交付。</p>
+            </div>
+            <div class="term">
+                <strong>Safe-control / Prompt router</strong>
+                <p>Safe-control 是不用问裁判的本地规则；Prompt router 是需要语义判断时才调用的裁判。</p>
+            </div>
+            <div class="term">
+                <strong>Episode state</strong>
+                <p>同一个任务的记忆。它记录已经读过什么、写过什么、测试是否通过、是否一直卡住。</p>
+            </div>
+            <div class="term">
+                <strong>事件</strong>
+                <p>Agent 运行时留下的证据，比如工具调用、文件写入、测试通过、验证结果。</p>
+            </div>
+            <div class="term">
+                <strong>Verifier / Reward</strong>
+                <p>Verifier 是隐藏测试或最终检查；Reward 是检查分数，1.0 表示通过，0 表示失败。</p>
+            </div>
+            <div class="term">
+                <strong>Screening / Canary</strong>
+                <p>Screening 是早期筛查，不代表最终验收；Canary 是先跑一小条样本，确认方向没有明显坏掉。</p>
+            </div>
+            <div class="term">
+                <strong>Timeout / 输出截断</strong>
+                <p>Timeout 是单次调用的最长等待时间；输出截断是模型还没说完就被长度限制切断。</p>
+            </div>
+            <div class="term">
+                <strong>shadow-relay</strong>
+                <p>Harbor 是本地运行环境；benchmark 是固定任务集；shadow-relay 是其中一个任务名，用来观察协议理解、文件写入和隐藏验证。</p>
+            </div>
+            <div class="term">
+                <strong>Artifact / Trace / Replay</strong>
+                <p>Artifact 是运行产物；Trace 是每次调用的记录；Replay 是用旧记录重放决策，检查策略是否合理。</p>
+            </div>
+            <div class="term">
+                <strong>完成率 / 单次成功成本</strong>
+                <p>完成率是多次运行中成功的比例；单次成功成本是总花费除以成功次数。</p>
+            </div>
+        </div>
     </section>
 
     <section class="metrics">
         <div class="metric">
             <div class="label">当前最好样本</div>
-            <span class="value">reward 1.0</span>
-            <div class="note"><code>shadow-relay</code> screening 通过。</div>
+            <span class="value">1.0</span>
+            <div class="note"><code>shadow-relay</code> 早期筛查通过。</div>
         </div>
         <div class="metric">
             <div class="label">整条轨迹成本</div>
             <span class="value">$1.4194</span>
-            <div class="note">包含 agent 和 decision 成本。</div>
+            <div class="note">包含 Agent 模型调用和裁判调用。</div>
         </div>
         <div class="metric">
-            <div class="label">semantic judge</div>
+            <div class="label">语义裁判调用</div>
             <span class="value">3 次</span>
-            <div class="note">23 次 agent 调用中只有 3 次问 judge。</div>
+            <div class="note">23 次 Agent 调用中只有 3 次需要裁判。</div>
         </div>
         <div class="metric">
             <div class="label">结论边界</div>
-            <span class="value">screening</span>
+            <span class="value">早期筛查</span>
             <div class="note">单任务通过，不等于泛化验收。</div>
         </div>
     </section>
@@ -394,7 +526,7 @@
         阈值越保守，强模型用得越多，质量更稳但更贵；阈值越激进，成本下降，但质量可能掉。
     </p>
     <p>
-        Agent 任务也应该这么评估，只是横轴不能只看单次请求。一个 coding agent 会在同一任务里连续调用模型、
+        Agent 任务也应该这么评估，只是横轴不能只看单次请求。这类 Agent 会在同一任务里连续调用模型、
         跑命令、读文件、写产物、触发隐藏测试。真正要比较的是整条轨迹。
     </p>
 
@@ -469,27 +601,27 @@
         <tr>
             <th>指标</th>
             <th>单次请求路由口径</th>
-            <th>Agent 场景下的 aware-gateway 口径</th>
+            <th>多轮任务场景下的 aware-gateway 口径</th>
         </tr>
         <tr>
             <td>质量</td>
-            <td>benchmark score 或强模型性能保留率。</td>
-            <td>hidden verifier reward、solved rate、最终交付是否通过。</td>
+            <td>固定任务集分数，或相对强模型保住多少质量。</td>
+            <td>隐藏 verifier 的 reward、完成率、最终交付是否通过。</td>
         </tr>
         <tr>
             <td>成本</td>
             <td>一次回答使用强/弱模型带来的成本。</td>
-            <td>整条轨迹成本：agent 调用、decision 调用、失败和 stop 前已花掉的钱。</td>
+            <td>整条轨迹成本：agent 调用、decision 调用、失败和提前停止前已花掉的钱。</td>
         </tr>
         <tr>
             <td>调节旋钮</td>
             <td>路由阈值，控制强模型调用比例。</td>
-            <td>状态阈值和 route action：什么时候 cheap probe、什么时候 premium recover、什么时候 stop。</td>
+            <td>状态阈值和 route action：什么时候便宜探索、什么时候强模型恢复、什么时候提前停止。</td>
         </tr>
         <tr>
             <td>曲线</td>
             <td>不同阈值下的成本-质量边界。</td>
-            <td>不同策略、不同任务、不同 stop gate 下的完成成本边界。</td>
+            <td>不同策略、不同任务、不同提前停止规则下的完成成本边界。</td>
         </tr>
     </table>
 
@@ -498,16 +630,32 @@
         经典单次请求路由的核心链路可以简化成：看一次请求，估计强模型胜率，和阈值比较，决定走强模型还是弱模型。
         这个问题足够清楚，所以很容易用一张曲线讲明白。
     </p>
-    <pre><code>request -> estimate strong_model_win_rate
-        -> compare with threshold
-      -> choose strong_model or weak_model</code></pre>
+    <div class="plain-steps">
+        <div class="plain-step">
+            <strong>看这一次请求</strong>
+            <p>只根据当前输入判断它像不像需要强模型。</p>
+        </div>
+        <div class="plain-step">
+            <strong>和阈值比较</strong>
+            <p>阈值越保守，越容易选强模型；阈值越激进，越容易省钱。</p>
+        </div>
+        <div class="plain-step">
+            <strong>二选一</strong>
+            <p>最后只输出一个选择：便宜模型，或者强模型。</p>
+        </div>
+    </div>
     <p>
         aware-gateway 当前要处理的是 agent 轨迹。某一轮请求看起来可能只是“读文件”，但它处在不同阶段时含义完全不同：
         早期读文件是探索；已经有候选答案后还在读文件，可能是在拖延交付；测试失败后再读文件，可能是在恢复。
         所以单看当前请求不够，必须看它前面发生过什么。
     </p>
-    <pre><code>agent turn -> gateway route -> model call -> tool/file/test/verifier events
-           -> episode state -> next route action -> outcome</code></pre>
+    <ol class="path-list">
+        <li>Agent 发起本轮请求。</li>
+        <li>Gateway 查询这个任务已有的 Episode state。</li>
+        <li>Router 或本地规则决定模型和 route action。</li>
+        <li>模型返回后，Agent 继续读文件、跑命令、改文件或交付结果。</li>
+        <li>工具、文件、测试和 verifier 结果写回 Episode state，影响下一轮。</li>
+    </ol>
 
     <div class="grid-2">
         <div class="panel">
@@ -534,7 +682,7 @@
         <tr>
             <td>Safe-control</td>
             <td>不用问 judge，直接做高置信路由。</td>
-            <td>读文件走 Flash；重复错误或 verifier 失败走 Opus；超成本且无交付证据则本地 stop。</td>
+            <td>读文件走 Flash；重复错误或 verifier 失败走 Opus；超成本且无交付证据则本地提前停止。</td>
         </tr>
         <tr>
             <td>Prompt router</td>
@@ -555,7 +703,7 @@
     </p>
     <table>
         <tr>
-            <th>Action</th>
+            <th>路由动作</th>
             <th>意思</th>
             <th>通常模型</th>
         </tr>
@@ -598,8 +746,8 @@
 
     <h2>这一轮真正改动了什么</h2>
     <p>
-        旧版本已经能 stop 坏轨迹，但还不知道“某条分析是否已经足够交付”。这轮的关键是把中间进展也变成事件，
-        让 router 不再只看到 length、cost 和错误。
+        旧版本已经能提前停止坏轨迹，但还不知道“某条分析是否已经足够交付”。这轮的关键是把中间进展也变成事件，
+        让 router 不再只看到输出截断、成本和错误。
     </p>
     <table>
         <tr>
@@ -631,19 +779,20 @@
 
     <h2>关键数据</h2>
     <p>
-        下面这张表保留了真正推动设计变化的几条样本。重点不是每个 run 的细节，而是每个样本暴露了什么。
+        下面这张表保留了真正推动设计变化的几条样本。重点不是每次运行的细节，而是每个样本暴露了什么。
+        A1、A4、A5 是前面几轮实验的样本编号。
     </p>
     <table>
         <tr>
             <th>样本</th>
-            <th class="num">Reward</th>
-            <th class="num">Cost</th>
-            <th class="num">Agent calls</th>
-            <th class="num">Decision calls</th>
+            <th class="num">检查分数</th>
+            <th class="num">成本</th>
+            <th class="num">Agent 调用</th>
+            <th class="num">裁判调用</th>
             <th>结论</th>
         </tr>
         <tr>
-            <td>Phase 1 prompt router best</td>
+            <td>第一阶段最好样本</td>
             <td class="num pass">1.0</td>
             <td class="num">$2.6803</td>
             <td class="num">14</td>
@@ -651,31 +800,31 @@
             <td>能完成，但几乎每轮都问 judge。</td>
         </tr>
         <tr>
-            <td>A1 safe-control</td>
+            <td>A1 本地规则</td>
             <td class="num pass">1.0</td>
             <td class="num">$2.2468</td>
             <td class="num">22</td>
             <td class="num">10</td>
-            <td>本地规则可以降低 decision 税，质量没有掉。</td>
+            <td>本地规则可以降低裁判成本，质量没有掉。</td>
         </tr>
         <tr>
-            <td>A4 budgeted route</td>
+            <td>A4 预算动作</td>
             <td class="num pass">1.0</td>
             <td class="num">$3.4808</td>
             <td class="num">44</td>
             <td class="num">23</td>
-            <td>预算动作能工作，但 21/44 次 length 截断让轨迹变碎。</td>
+            <td>预算动作能工作，但 21/44 次输出截断让轨迹变碎。</td>
         </tr>
         <tr>
-            <td>A5 length feedback</td>
-            <td class="num warn-text">stopped</td>
+            <td>A5 截断反馈</td>
+            <td class="num warn-text">早停</td>
             <td class="num">$7.0576</td>
             <td class="num">59</td>
             <td class="num">29</td>
-            <td>只看到 length 就放大预算会失控。</td>
+            <td>只看到输出截断就放大预算会失控。</td>
         </tr>
         <tr>
-            <td>long-exploration stop</td>
+            <td>长期探索早停</td>
             <td class="num fail">0</td>
             <td class="num">$0.4325</td>
             <td class="num">9</td>
@@ -683,7 +832,7 @@
             <td>能早停省钱，但不会自动提高质量。</td>
         </tr>
         <tr>
-            <td>V2 outcome-aware canary</td>
+            <td>V2 结果感知 canary</td>
             <td class="num pass">1.0</td>
             <td class="num">$1.4194</td>
             <td class="num">23</td>
@@ -694,7 +843,7 @@
 
     <div class="callout good">
         <p>
-            最新样本比 A1 和 A4 都便宜，同时保住了 reward 1.0。更重要的是，semantic decision 从 Phase 1 最好样本的
+            最新样本比 A1 和 A4 都便宜，同时保住了检查分数 1.0。更重要的是，语义裁判调用从第一阶段最好样本的
             13 次降到 3 次，说明本地状态控制确实替掉了一部分 judge，而不是简单把所有请求都交给 Opus。
         </p>
     </div>
@@ -704,12 +853,13 @@
         最新 canary 是 <code>shadow-relay__FRkn4xR</code>。它不是靠一次大模型长回答冲过去的，
         而是走了一条可观察的链路：
     </p>
-    <pre><code>分析得到关键事实
--> analysis_progress 进入 episode state
--> cheap_execute 尝试把事实落到命令/交付
--> 多次未落地后触发一次 premium_recover
--> 写入 /app/output/flag.txt 和 /app/output/analysis.json
--> verifier 8/8 passed, reward=1.0</code></pre>
+    <ol class="path-list">
+        <li>先分析出关键事实，并把这类进展记成 <code>analysis_progress</code>。</li>
+        <li>下一轮没有继续扩大探索，而是走 <code>cheap_execute</code>，尝试把事实落到命令或交付物。</li>
+        <li>多次没有落地后，触发 <code>premium_recover</code>，让强模型介入恢复。</li>
+        <li>最终写入 <code>/app/output/flag.txt</code> 和 <code>/app/output/analysis.json</code>。</li>
+        <li>隐藏 verifier 的 8 个检查全部通过，reward 得到 <code>1.0</code>。</li>
+    </ol>
     <table>
         <tr>
             <th>项目</th>
@@ -721,7 +871,7 @@
         </tr>
         <tr>
             <td>模型调用</td>
-            <td>23 次 agent 调用；3 次 semantic decision。</td>
+            <td>23 次 agent 调用；3 次语义裁判调用。</td>
         </tr>
         <tr>
             <td>路由动作</td>
@@ -733,13 +883,13 @@
         </tr>
         <tr>
             <td>最终证据</td>
-            <td><code>/app/output</code> 写入、1 次测试通过、1 次 verifier result、reward <code>1.0</code>。</td>
+            <td><code>/app/output</code> 写入、1 次测试通过、1 个 <code>verifier_result</code> 事件、reward <code>1.0</code>。</td>
         </tr>
     </table>
 
     <h2>离线复原为什么重要</h2>
     <p>
-        如果只看线上成功，很容易讲成故事。我们还用 extractor 从 artifact 和 trace 里重建了 episode timeline，
+        如果只看线上成功，很容易讲成故事。我们还用离线脚本从 artifact 和 trace 里重建了任务时间线，
         并检查 replay 样本没有偷看未来事件。
     </p>
     <table>
@@ -772,7 +922,7 @@
             <td class="num">1</td>
         </tr>
         <tr>
-            <td>Replay future evidence leakage</td>
+            <td>重放时偷看未来事件</td>
             <td class="num">0</td>
         </tr>
     </table>
@@ -783,8 +933,8 @@
             <h3 class="pass">可以接受</h3>
             <ul>
                 <li>safe-control 作为子里程碑完成。</li>
-                <li>route action 能控制模型、预算、timeout 和必要的 agent instruction。</li>
-                <li>Episode state 能把 outcome 带回下一轮路由。</li>
+                <li>route action 能控制模型、预算、timeout 和给 Agent 的行动提示。</li>
+                <li>Episode state 能把运行结果带回下一轮路由。</li>
                 <li><code>shadow-relay</code> 上 V2 screening 通过，成本优于历史成功样本。</li>
             </ul>
         </div>
@@ -792,8 +942,8 @@
             <h3 class="warn-text">还不能接受</h3>
             <ul>
                 <li>不能说策略已经泛化。当前只有一个代表性任务的单次成功。</li>
-                <li><code>analysis_progress</code> 是 inferred 信号，需要更多任务验证误报。</li>
-                <li>Harbor 仍靠 artifact watcher，native tool event hook 还没接到 agent runtime。</li>
+                <li><code>analysis_progress</code> 是推断出来的信号，需要更多任务验证误报。</li>
+                <li>Harbor 仍靠运行产物观察脚本，直接从 Agent 运行时采集工具事件还没完成。</li>
                 <li>还没有画出多任务成本-质量边界。</li>
             </ul>
         </div>
@@ -802,7 +952,7 @@
     <h2>下一步怎么按成本-质量曲线评估</h2>
     <p>
         下一步不应该继续围绕 <code>shadow-relay</code> 调阈值。应该把它变成一组可比较曲线：
-        不同策略、不同任务、不同强模型使用比例下，solved rate 和 cost per success 怎么变。
+        不同策略、不同任务、不同强模型使用比例下，完成率和单次成功成本怎么变。
     </p>
     <table>
         <tr>
@@ -811,7 +961,7 @@
         </tr>
         <tr>
             <td>任务多样性</td>
-            <td>保留 <code>shadow-relay</code> 作为协议/逆向任务，再选一个短数据或算法任务做 holdout。</td>
+            <td>保留 <code>shadow-relay</code> 作为协议/逆向任务，再选一个短数据或算法任务做保留验证。</td>
         </tr>
         <tr>
             <td>策略曲线</td>
@@ -819,26 +969,32 @@
         </tr>
         <tr>
             <td>质量口径</td>
-            <td>主指标用 reward / solved rate；辅助看 hidden verifier 前是否有交付证据。</td>
+            <td>主指标用 reward 和完成率；辅助看隐藏 verifier 前是否有交付证据。</td>
         </tr>
         <tr>
             <td>成本口径</td>
-            <td>用 cost per attempt 和 cost per success，失败和 stop 前成本都算进去。</td>
+            <td>用单次运行成本和单次成功成本，失败和提前停止前的成本都算进去。</td>
         </tr>
         <tr>
             <td>验收门槛</td>
-            <td>screening 只需要 1 次；acceptance 至少每任务 3 次，不用单次运气关 Issue。</td>
+            <td>screening 只需要 1 次；正式验收至少每任务 3 次，不用单次运气关 Issue。</td>
         </tr>
     </table>
 
-    <pre><code>目标曲线：
-quality = solved rate / verifier reward
-cost = total trajectory cost
-control = premium share + decision calls + no-progress loops
-
-接受策略：
-同等质量下更低 cost_per_success
-或同等成本下更高 solved rate</code></pre>
+    <div class="plain-steps">
+        <div class="plain-step">
+            <strong>质量看完成率</strong>
+            <p>主要看任务是否通过 verifier，以及 reward 是否稳定。</p>
+        </div>
+        <div class="plain-step">
+            <strong>成本看整条轨迹</strong>
+            <p>把 agent 调用、decision 调用、失败前花掉的钱都算进去。</p>
+        </div>
+        <div class="plain-step">
+            <strong>策略看边界</strong>
+            <p>同等质量下更便宜，或同等成本下完成率更高，才算改进。</p>
+        </div>
+    </div>
 
     <h2>一句话总结</h2>
     <p>
